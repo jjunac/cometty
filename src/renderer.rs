@@ -1,0 +1,529 @@
+use cosmic_text::{
+    Attrs, AttrsList, Buffer, BufferLine, Family, LineEnding, Metrics, Shaping, Weight, Wrap,
+};
+use glyphon::{
+    Cache, FontSystem, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer,
+    Viewport,
+};
+use wgpu::MultisampleState;
+
+use crate::grid::Cell;
+use crate::theme::Theme;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct BgVertex {
+    pos: [f32; 2],
+    color: [f32; 3],
+}
+
+impl BgVertex {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<BgVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 8,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+            ],
+        }
+    }
+}
+
+const BG_SHADER: &str = r#"
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) color: vec3<f32>,
+};
+@vertex
+fn vs_main(@location(0) ndc: vec2<f32>, @location(1) color: vec3<f32>) -> VsOut {
+    var out: VsOut;
+    out.pos = vec4<f32>(ndc, 0.0, 1.0);
+    out.color = color;
+    return out;
+}
+@fragment
+fn fs_main(@location(0) color: vec3<f32>) -> @location(0) vec4<f32> {
+    return vec4<f32>(color, 1.0);
+}
+"#;
+
+fn build_buffer_lines(rows: &[Vec<Cell>], theme: &Theme) -> Vec<BufferLine> {
+    let mut lines = Vec::with_capacity(rows.len());
+    for row_cells in rows {
+        let text: String = row_cells.iter().map(|c| c.ch).collect();
+        let trimmed = text.trim_end();
+        let line_text = if trimmed.is_empty() {
+            " ".to_string()
+        } else {
+            trimmed.to_string()
+        };
+        let mut line = BufferLine::new(
+            line_text.clone(),
+            LineEnding::None,
+            AttrsList::new(&Attrs::new().family(Family::Monospace)),
+            Shaping::Advanced,
+        );
+        let mut attrs_list = AttrsList::new(
+            &Attrs::new()
+                .family(Family::Monospace)
+                .color(theme.foreground.as_glyphon_color()),
+        );
+        let visible_len = line_text.chars().count();
+        let mut byte_idx = 0;
+        let chars: Vec<char> = line_text.chars().collect();
+        let mut i = 0;
+        while i < visible_len {
+            let cell = &row_cells[i];
+            let color = cell.fg.as_glyphon_color();
+            let weight = if cell.bold {
+                Weight::BOLD
+            } else {
+                Weight::NORMAL
+            };
+            let attrs = Attrs::new()
+                .family(Family::Monospace)
+                .color(color)
+                .weight(weight);
+            let start_byte = byte_idx;
+            let mut j = i;
+            while j < visible_len {
+                let c2 = &row_cells[j];
+                let same = c2.fg == cell.fg && c2.bold == cell.bold;
+                if !same {
+                    break;
+                }
+                byte_idx += chars[j].len_utf8();
+                j += 1;
+            }
+            if j > i {
+                attrs_list.add_span(start_byte..byte_idx, &attrs);
+            }
+            i = j;
+        }
+        line.set_attrs_list(attrs_list);
+        lines.push(line);
+    }
+    lines
+}
+
+pub struct Renderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    viewport: Viewport,
+    atlas: TextAtlas,
+    text_renderer: TextRenderer,
+    buffer: Buffer,
+    bg_pipeline: wgpu::RenderPipeline,
+    bg_vertex_buf: wgpu::Buffer,
+    bg_vertex_capacity: usize,
+    theme: Theme,
+    pub font_size: f32,
+    pub line_height: f32,
+    pub cell_width: f32,
+    width: u32,
+    height: u32,
+    last_grid_version: u64,
+}
+
+impl Renderer {
+    pub fn new(
+        window: std::sync::Arc<winit::window::Window>,
+        width: u32,
+        height: u32,
+        theme: Theme,
+    ) -> anyhow::Result<Self> {
+        let font_size = 28.0;
+        let line_height = font_size * 1.25;
+        let cell_width = font_size * 0.602;
+
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let surface = instance.create_surface(window)?;
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("cometty"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+                ..Default::default()
+            }))?;
+
+        let mut config = surface
+            .get_default_config(&adapter, width.max(1), height.max(1))
+            .ok_or_else(|| anyhow::anyhow!("surface not supported"))?;
+        config.present_mode = wgpu::PresentMode::AutoVsync;
+        surface.configure(&device, &config);
+        let format = config.format;
+
+        let mut font_system = FontSystem::new();
+        let swash_cache = SwashCache::new();
+        let cache = Cache::new(&device);
+        let viewport = Viewport::new(&device, &cache);
+        let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
+        let text_renderer =
+            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+        let metrics = Metrics::new(font_size, line_height);
+        let mut buffer = Buffer::new(&mut font_system, metrics);
+        buffer.set_wrap(Wrap::None);
+        buffer.set_size(Some(width as f32), Some(height as f32));
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("bg"),
+            source: wgpu::ShaderSource::Wgsl(BG_SHADER.into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("bg layout"),
+            bind_group_layouts: &[],
+            immediate_size: 0,
+        });
+        let bg_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("bg pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(BgVertex::desc())],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let bg_vertex_capacity = 1024;
+        let bg_vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bg verts"),
+            size: (bg_vertex_capacity * std::mem::size_of::<BgVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut r = Self {
+            device,
+            queue,
+            surface,
+            config,
+            font_system,
+            swash_cache,
+            viewport,
+            atlas,
+            text_renderer,
+            buffer,
+            bg_pipeline,
+            bg_vertex_buf,
+            bg_vertex_capacity,
+            theme,
+            font_size,
+            line_height,
+            cell_width,
+            width: width.max(1),
+            height: height.max(1),
+            last_grid_version: u64::MAX,
+        };
+        r.update_viewport(width.max(1), height.max(1));
+        Ok(r)
+    }
+
+    #[allow(dead_code)]
+    pub fn theme(&self) -> Theme {
+        self.theme
+    }
+
+    /// Swap the active theme. Forces a text rebuild on the next render so
+    /// future theme switching (CLI flag / config / keybind) just calls this.
+    #[allow(dead_code)]
+    pub fn set_theme(&mut self, theme: Theme) {
+        if self.theme != theme {
+            self.theme = theme;
+            self.last_grid_version = u64::MAX;
+        }
+    }
+
+    fn update_viewport(&mut self, width: u32, height: u32) {
+        self.width = width.max(1);
+        self.height = height.max(1);
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.width,
+                height: self.height,
+            },
+        );
+        self.buffer
+            .set_size(Some(self.width as f32), Some(self.height as f32));
+        self.last_grid_version = u64::MAX;
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        if width == self.width && height == self.height {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+        self.update_viewport(width, height);
+    }
+
+    pub fn cols_for_width(&self, width: u32) -> usize {
+        ((width as f32 / self.cell_width).floor() as usize).max(1)
+    }
+
+    pub fn rows_for_height(&self, height: u32) -> usize {
+        ((height as f32 / self.line_height).floor() as usize).max(1)
+    }
+
+    pub fn rebuild_buffer(&mut self, rows: &[Vec<Cell>]) {
+        let metrics = Metrics::new(self.font_size, self.line_height);
+        self.buffer.set_metrics(metrics);
+        self.buffer.lines.clear();
+        for line in build_buffer_lines(rows, &self.theme) {
+            self.buffer.lines.push(line);
+        }
+        self.buffer
+            .set_size(Some(self.width as f32), Some(self.height as f32));
+        // `lines` was mutated directly, bypassing `Buffer`'s dirty flags, so
+        // `shape_until_scroll` alone would early-return via `resolve_dirty`.
+        // Lay out each line explicitly so `TextRenderer::prepare` finds glyphs.
+        let n = self.buffer.lines.len();
+        for i in 0..n {
+            self.buffer.line_layout(&mut self.font_system, i);
+        }
+    }
+
+    fn push_quad(&self, verts: &mut Vec<BgVertex>, x: f32, y: f32, w: f32, h: f32, col: [f32; 3]) {
+        let sw = self.width as f32;
+        let sh = self.height as f32;
+        let x0 = (x / sw) * 2.0 - 1.0;
+        let y0 = 1.0 - (y / sh) * 2.0;
+        let x1 = ((x + w) / sw) * 2.0 - 1.0;
+        let y1 = 1.0 - ((y + h) / sh) * 2.0;
+        verts.push(BgVertex {
+            pos: [x0, y0],
+            color: col,
+        });
+        verts.push(BgVertex {
+            pos: [x1, y0],
+            color: col,
+        });
+        verts.push(BgVertex {
+            pos: [x0, y1],
+            color: col,
+        });
+        verts.push(BgVertex {
+            pos: [x1, y0],
+            color: col,
+        });
+        verts.push(BgVertex {
+            pos: [x1, y1],
+            color: col,
+        });
+        verts.push(BgVertex {
+            pos: [x0, y1],
+            color: col,
+        });
+    }
+
+    pub fn render(
+        &mut self,
+        grid_rows: &[Vec<Cell>],
+        cursor: (usize, usize),
+        cursor_visible: bool,
+        grid_version: u64,
+    ) -> anyhow::Result<()> {
+        if grid_version != self.last_grid_version {
+            self.rebuild_buffer(grid_rows);
+            self.last_grid_version = grid_version;
+        }
+
+        let mut verts: Vec<BgVertex> = Vec::new();
+        for (y, row) in grid_rows.iter().enumerate() {
+            let py = y as f32 * self.line_height;
+            for (x, cell) in row.iter().enumerate() {
+                let is_cursor = cursor_visible && cursor.0 == x && cursor.1 == y;
+                if cell.bg != self.theme.background || is_cursor {
+                    let px = x as f32 * self.cell_width;
+                    let col = if is_cursor {
+                        self.theme.cursor_bg.as_linear_f32_array()
+                    } else {
+                        cell.bg.as_linear_f32_array()
+                    };
+                    self.push_quad(&mut verts, px, py, self.cell_width, self.line_height, col);
+                }
+            }
+        }
+
+        if verts.len() > self.bg_vertex_capacity {
+            self.bg_vertex_capacity = verts.len().next_power_of_two().max(1024);
+            self.bg_vertex_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("bg verts"),
+                size: (self.bg_vertex_capacity * std::mem::size_of::<BgVertex>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !verts.is_empty() {
+            self.queue
+                .write_buffer(&self.bg_vertex_buf, 0, bytemuck::cast_slice(&verts));
+        }
+
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.device, &self.config);
+                return Ok(());
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return Ok(());
+            }
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let text_areas = [TextArea {
+            buffer: &self.buffer,
+            left: 0.0,
+            top: 0.0,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: 0,
+                top: 0,
+                right: self.width as i32,
+                bottom: self.height as i32,
+            },
+            default_color: self.theme.foreground.as_glyphon_color(),
+            custom_glyphs: &[],
+        }];
+
+        self.text_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            text_areas,
+            &mut self.swash_cache,
+        )?;
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("cometty encoder"),
+            });
+        {
+            let bg = self.theme.background.as_linear_f32_array();
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cometty pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: bg[0] as f64,
+                            g: bg[1] as f64,
+                            b: bg[2] as f64,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if !verts.is_empty() {
+                pass.set_pipeline(&self.bg_pipeline);
+                pass.set_vertex_buffer(0, self.bg_vertex_buf.slice(..));
+                pass.draw(0..verts.len() as u32, 0..1);
+            }
+            self.text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)?;
+        }
+        self.queue.submit(Some(encoder.finish()));
+        self.queue.present(frame);
+        self.atlas.trim();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grid::Cell;
+
+    fn test_cells(text: &str) -> Vec<Cell> {
+        text.chars()
+            .map(|ch| Cell {
+                ch,
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn buffer_lines_shape_to_visible_glyphs() {
+        // Headless regression test for invisible text: lines pushed directly
+        // into a cosmic-text Buffer bypass dirty flags, so they must be laid
+        // out explicitly before glyphon can render them.
+        let mut font_system = FontSystem::new();
+        let metrics = Metrics::new(16.0, 20.0);
+        let mut buffer = Buffer::new(&mut font_system, metrics);
+        buffer.set_wrap(Wrap::None);
+        buffer.set_size(Some(800.0), Some(600.0));
+
+        let rows = vec![test_cells("hello"), test_cells("hi")];
+        let theme = Theme::default();
+        buffer.lines.clear();
+        for line in build_buffer_lines(&rows, &theme) {
+            buffer.lines.push(line);
+        }
+
+        // Without explicit layout there are no visible runs (the bug).
+        assert_eq!(buffer.layout_runs().count(), 0);
+
+        let n = buffer.lines.len();
+        for i in 0..n {
+            buffer.line_layout(&mut font_system, i);
+        }
+
+        assert!(buffer.layout_runs().count() > 0);
+    }
+}
