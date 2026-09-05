@@ -115,6 +115,25 @@ fn build_buffer_lines(rows: &[Vec<Cell>], theme: &Theme) -> Vec<BufferLine> {
     lines
 }
 
+/// Logical font size in points. Scaled by the window scale factor to get
+/// physical pixels, so text looks the same size on 1x and 2x displays.
+const BASE_FONT_SIZE_LOGICAL: f32 = 14.0;
+
+pub(crate) fn scaled_metrics(base: f32, scale: f32) -> (f32, f32, f32) {
+    let s = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let font_size = base * s;
+    (font_size, font_size * 1.25, font_size * 0.602)
+}
+
+pub(crate) fn clamp_surface_size(width: u32, height: u32, max_dim: u32) -> (u32, u32) {
+    let max_dim = max_dim.max(1);
+    (width.max(1).min(max_dim), height.max(1).min(max_dim))
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -130,6 +149,9 @@ pub struct Renderer {
     bg_vertex_buf: wgpu::Buffer,
     bg_vertex_capacity: usize,
     theme: Theme,
+    base_font_size: f32,
+    scale_factor: f32,
+    max_surface_dim: u32,
     pub font_size: f32,
     pub line_height: f32,
     pub cell_width: f32,
@@ -143,11 +165,16 @@ impl Renderer {
         window: std::sync::Arc<winit::window::Window>,
         width: u32,
         height: u32,
+        scale_factor: f32,
         theme: Theme,
     ) -> anyhow::Result<Self> {
-        let font_size = 28.0;
-        let line_height = font_size * 1.25;
-        let cell_width = font_size * 0.602;
+        let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+            scale_factor
+        } else {
+            1.0
+        };
+        let base_font_size = BASE_FONT_SIZE_LOGICAL;
+        let (font_size, line_height, cell_width) = scaled_metrics(base_font_size, scale_factor);
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance.create_surface(window)?;
@@ -157,18 +184,40 @@ impl Renderer {
             force_fallback_adapter: false,
             apply_limit_buckets: false,
         }))?;
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        let device_desc_default = wgpu::DeviceDescriptor {
+            label: Some("cometty"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            ..Default::default()
+        };
+        let (device, queue) = match pollster::block_on(adapter.request_device(&device_desc_default))
+        {
+            Ok(pair) => pair,
+            Err(_) => pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("cometty"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::downlevel_defaults(),
                 ..Default::default()
-            }))?;
+            }))?,
+        };
+        let max_surface_dim = device
+            .limits()
+            .max_texture_dimension_2d
+            .min(adapter.limits().max_texture_dimension_2d)
+            .max(1);
+        let (clamped_w, clamped_h) = clamp_surface_size(width, height, max_surface_dim);
+        if clamped_w != width.max(1) || clamped_h != height.max(1) {
+            log::warn!(
+                "clamping surface size {width}x{height} to {clamped_w}x{clamped_h} (limit {max_surface_dim})"
+            );
+        }
 
         let mut config = surface
-            .get_default_config(&adapter, width.max(1), height.max(1))
+            .get_default_config(&adapter, clamped_w, clamped_h)
             .ok_or_else(|| anyhow::anyhow!("surface not supported"))?;
         config.present_mode = wgpu::PresentMode::AutoVsync;
+        config.width = clamped_w;
+        config.height = clamped_h;
         surface.configure(&device, &config);
         let format = config.format;
 
@@ -182,7 +231,7 @@ impl Renderer {
         let metrics = Metrics::new(font_size, line_height);
         let mut buffer = Buffer::new(&mut font_system, metrics);
         buffer.set_wrap(Wrap::None);
-        buffer.set_size(Some(width as f32), Some(height as f32));
+        buffer.set_size(Some(clamped_w as f32), Some(clamped_h as f32));
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bg"),
@@ -242,14 +291,17 @@ impl Renderer {
             bg_vertex_buf,
             bg_vertex_capacity,
             theme,
+            base_font_size,
+            scale_factor,
+            max_surface_dim,
             font_size,
             line_height,
             cell_width,
-            width: width.max(1),
-            height: height.max(1),
+            width: clamped_w,
+            height: clamped_h,
             last_grid_version: u64::MAX,
         };
-        r.update_viewport(width.max(1), height.max(1));
+        r.update_viewport(clamped_w, clamped_h);
         Ok(r)
     }
 
@@ -266,6 +318,28 @@ impl Renderer {
             self.theme = theme;
             self.last_grid_version = u64::MAX;
         }
+    }
+
+    /// Update the DPI scale factor. Font metrics are re-derived so logical
+    /// text size stays constant across 1x/2x displays.
+    /// Returns true if the scale changed.
+    pub fn set_scale_factor(&mut self, scale: f32) -> bool {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        if (scale - self.scale_factor).abs() < f32::EPSILON {
+            return false;
+        }
+        self.scale_factor = scale;
+        let (font_size, line_height, cell_width) =
+            scaled_metrics(self.base_font_size, self.scale_factor);
+        self.font_size = font_size;
+        self.line_height = line_height;
+        self.cell_width = cell_width;
+        self.last_grid_version = u64::MAX;
+        true
     }
 
     fn update_viewport(&mut self, width: u32, height: u32) {
@@ -287,13 +361,20 @@ impl Renderer {
         if width == 0 || height == 0 {
             return;
         }
-        if width == self.width && height == self.height {
+        let (clamped_w, clamped_h) = clamp_surface_size(width, height, self.max_surface_dim);
+        if clamped_w != width || clamped_h != height {
+            log::warn!(
+                "clamping surface size {width}x{height} to {clamped_w}x{clamped_h} (limit {})",
+                self.max_surface_dim
+            );
+        }
+        if clamped_w == self.width && clamped_h == self.height {
             return;
         }
-        self.config.width = width;
-        self.config.height = height;
+        self.config.width = clamped_w;
+        self.config.height = clamped_h;
         self.surface.configure(&self.device, &self.config);
-        self.update_viewport(width, height);
+        self.update_viewport(clamped_w, clamped_h);
     }
 
     pub fn cols_for_width(&self, width: u32) -> usize {
@@ -525,5 +606,22 @@ mod tests {
         }
 
         assert!(buffer.layout_runs().count() > 0);
+    }
+
+    #[test]
+    fn scaled_metrics_follow_scale_factor() {
+        let (font_1x, line_1x, cell_1x) = scaled_metrics(16.0, 1.0);
+        let (font_2x, line_2x, cell_2x) = scaled_metrics(16.0, 2.0);
+        assert_eq!(font_1x, 16.0);
+        assert_eq!(font_2x, 32.0);
+        assert_eq!(line_2x, line_1x * 2.0);
+        assert_eq!(cell_2x, cell_1x * 2.0);
+    }
+
+    #[test]
+    fn clamp_surface_size_caps_at_limit() {
+        assert_eq!(clamp_surface_size(2204, 1200, 2048), (2048, 1200));
+        assert_eq!(clamp_surface_size(800, 600, 2048), (800, 600));
+        assert_eq!(clamp_surface_size(0, 0, 2048), (1, 1));
     }
 }

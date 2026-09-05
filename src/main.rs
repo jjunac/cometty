@@ -35,6 +35,7 @@ struct App {
     cursor_visible: bool,
     last_blink: Instant,
     pending_resize: Option<(u32, u32)>,
+    pending_scale: Option<f32>,
     wheel_accum: f64,
     exited: bool,
 }
@@ -52,6 +53,7 @@ impl App {
             cursor_visible: true,
             last_blink: Instant::now(),
             pending_resize: None,
+            pending_scale: None,
             wheel_accum: 0.0,
             exited: false,
         }
@@ -93,7 +95,19 @@ impl App {
         }
     }
 
-    fn apply_resize(&mut self, width: u32, height: u32) {
+    fn sync_scale_factor(&mut self) -> f32 {
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0);
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_scale_factor(scale);
+        }
+        scale
+    }
+
+    fn apply_resize(&mut self, width: u32, height: u32, scale: f32) {
         if width == 0 || height == 0 {
             return;
         }
@@ -105,6 +119,7 @@ impl App {
             (Some(r), Some(t), Some(p)) => (r, t, p),
             _ => return,
         };
+        renderer.set_scale_factor(scale);
         renderer.resize(width, height);
         let cols = renderer.cols_for_width(width).clamp(1, 1024);
         let rows = renderer.rows_for_height(height).clamp(1, 1024);
@@ -133,7 +148,8 @@ impl ApplicationHandler<UserEvent> for App {
         };
         let size = window.inner_size();
         let (w, h) = (size.width.max(1), size.height.max(1));
-        let renderer = match Renderer::new(window.clone(), w, h, self.theme) {
+        let scale = window.scale_factor() as f32;
+        let renderer = match Renderer::new(window.clone(), w, h, scale, self.theme) {
             Ok(r) => r,
             Err(e) => {
                 log::error!("failed to init renderer: {e:#}");
@@ -189,7 +205,13 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
+                let scale = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.scale_factor() as f32)
+                    .unwrap_or(1.0);
                 self.pending_resize = Some((size.width, size.height));
+                self.pending_scale = Some(scale);
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
@@ -197,7 +219,9 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ScaleFactorChanged { .. } => {
                 if let Some(w) = self.window.as_ref() {
                     let s = w.inner_size();
+                    let scale = w.scale_factor() as f32;
                     self.pending_resize = Some((s.width, s.height));
+                    self.pending_scale = Some(scale);
                     w.request_redraw();
                 }
             }
@@ -284,8 +308,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                // Scale can change without a Resized event (monitor move), so
+                // always sync before applying a pending resize.
+                let current_scale = self.sync_scale_factor();
                 if let Some((w, h)) = self.pending_resize.take() {
-                    self.apply_resize(w, h);
+                    let scale = self.pending_scale.take().unwrap_or(current_scale);
+                    self.apply_resize(w, h, scale);
                 }
                 // Drain any pending PTY output that arrived between wake and draw.
                 self.drain_pty();
