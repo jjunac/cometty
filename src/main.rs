@@ -218,8 +218,9 @@ impl ApplicationHandler<UserEvent> for App {
                 let cursor = grid.cursor();
                 let rows: Vec<Vec<grid::Cell>> = grid.visible_rows().to_vec();
                 let version = grid.version;
+                let effective_cursor = self.cursor_visible && terminal.cursor_visible();
                 if let Err(e) =
-                    renderer.render(&rows, (cursor.x, cursor.y), self.cursor_visible, version)
+                    renderer.render(&rows, (cursor.x, cursor.y), effective_cursor, version)
                 {
                     // Surface lost / outdated is recoverable via resize.
                     log::warn!("render failed: {e:#}");

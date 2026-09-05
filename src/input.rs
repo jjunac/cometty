@@ -79,6 +79,22 @@ fn map_key(
     None
 }
 
+/// Wrap pasted text in bracketed-paste sentinels when the mode is enabled.
+/// Future paste paths (OSC 52 / clipboard) should route through here so
+/// `CSI ? 2004 h` apps like vim/zsh get `ESC[200~...ESC[201~`.
+#[allow(dead_code)]
+pub fn wrap_bracketed_paste(text: &str, enabled: bool) -> Vec<u8> {
+    if enabled {
+        let mut out = Vec::with_capacity(text.len() + 12);
+        out.extend_from_slice(b"\x1b[200~");
+        out.extend_from_slice(text.as_bytes());
+        out.extend_from_slice(b"\x1b[201~");
+        out
+    } else {
+        text.as_bytes().to_vec()
+    }
+}
+
 /// Map a winit KeyEvent to bytes to send to the PTY.
 pub fn key_to_bytes(event: &KeyEvent, modifiers: &ModifiersState) -> Option<Vec<u8>> {
     #[cfg(any(
@@ -171,5 +187,14 @@ mod tests {
         // winit doesn't allow struct-literal construction (private fields), so
         // we only test map_key here; integration is covered by manual run.
         let _ = ElementState::Pressed;
+    }
+
+    #[test]
+    fn bracketed_wrap_adds_sentinels_when_enabled() {
+        assert_eq!(wrap_bracketed_paste("hi", false), b"hi".to_vec());
+        assert_eq!(
+            wrap_bracketed_paste("hi", true),
+            b"\x1b[200~hi\x1b[201~".to_vec()
+        );
     }
 }

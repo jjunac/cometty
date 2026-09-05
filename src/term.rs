@@ -36,6 +36,20 @@ impl Terminal {
         self.grid.rows()
     }
 
+    pub fn cursor_visible(&self) -> bool {
+        self.grid.cursor_enabled()
+    }
+
+    #[allow(dead_code)]
+    pub fn bracketed_paste(&self) -> bool {
+        self.grid.bracketed_paste()
+    }
+
+    #[allow(dead_code)]
+    pub fn is_alt(&self) -> bool {
+        self.grid.is_alt()
+    }
+
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.grid.resize(cols, rows);
         self.pending_wrap = false;
@@ -61,6 +75,39 @@ impl Terminal {
 
     fn params_flat(params: &Params) -> Vec<u16> {
         params.iter().flat_map(|p| p.iter().copied()).collect()
+    }
+
+    fn set_private_mode(&mut self, mode: u16, set: bool) {
+        match mode {
+            25 => self.grid.set_cursor_enabled(set),
+            2004 => self.grid.set_bracketed_paste(set),
+            47 | 1047 => {
+                if set {
+                    self.grid.enter_alt(false);
+                } else {
+                    self.grid.exit_alt();
+                }
+                self.pending_wrap = false;
+            }
+            1048 => {
+                if set {
+                    self.grid.save_cursor();
+                } else {
+                    self.grid.restore_cursor();
+                }
+            }
+            1049 => {
+                if set {
+                    self.grid.save_cursor();
+                    self.grid.enter_alt(true);
+                } else {
+                    self.grid.exit_alt();
+                    self.grid.restore_cursor();
+                }
+                self.pending_wrap = false;
+            }
+            _ => {}
+        }
     }
 }
 
@@ -99,6 +146,13 @@ impl vte::Perform for Terminal {
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         if !intermediates.is_empty() {
+            if intermediates == [b'?'] && (action == 'h' || action == 'l') {
+                let set = action == 'h';
+                self.pending_wrap = false;
+                for mode in Self::params_flat(params) {
+                    self.set_private_mode(mode, set);
+                }
+            }
             return;
         }
         self.pending_wrap = false;
@@ -198,6 +252,10 @@ impl vte::Perform for Terminal {
                 b'7' => self.grid.save_cursor(),
                 b'8' => self.grid.restore_cursor(),
                 b'c' => {
+                    // Full reset: back to main buffer with default modes.
+                    self.grid.exit_alt();
+                    self.grid.set_cursor_enabled(true);
+                    self.grid.set_bracketed_paste(false);
                     self.grid.clear_all();
                     self.grid.set_cursor(0, 0);
                     self.grid.sgr(&[0]);
@@ -281,5 +339,55 @@ mod tests {
         feed_str(&mut t, "\x1b[38;2;10;20;30mX");
         let c = t.grid().cell(0, 0).unwrap();
         assert_eq!((c.fg.r, c.fg.g, c.fg.b), (10, 20, 30));
+    }
+
+    #[test]
+    fn alt_screen_1049_swaps_and_restores() {
+        let mut t = test_terminal(5, 3);
+        feed_str(&mut t, "hi");
+        feed_str(&mut t, "\x1b[?1049h");
+        assert!(t.is_alt());
+        assert_eq!(t.grid().cell(0, 0).unwrap().ch, ' ');
+        feed_str(&mut t, "X");
+        assert_eq!(t.grid().cell(0, 0).unwrap().ch, 'X');
+        assert_eq!(t.grid().scrollback_len(), 0);
+        feed_str(&mut t, "\x1b[?1049l");
+        assert!(!t.is_alt());
+        assert_eq!(t.grid().cell(0, 0).unwrap().ch, 'h');
+        assert_eq!(t.grid().cell(1, 0).unwrap().ch, 'i');
+    }
+
+    #[test]
+    fn alt_screen_1047_and_cursor_save_restore() {
+        let mut t = test_terminal(5, 3);
+        feed_str(&mut t, "ab");
+        feed_str(&mut t, "\x1b[?1048h\x1b[?1047h");
+        assert!(t.is_alt());
+        feed_str(&mut t, "\x1b[?1047l\x1b[?1048l");
+        assert!(!t.is_alt());
+        assert_eq!(t.grid().cell(0, 0).unwrap().ch, 'a');
+    }
+
+    #[test]
+    fn decset_cursor_and_bracketed_modes() {
+        let mut t = test_terminal(5, 3);
+        assert!(t.cursor_visible());
+        assert!(!t.bracketed_paste());
+        feed_str(&mut t, "\x1b[?25l");
+        assert!(!t.cursor_visible());
+        feed_str(&mut t, "\x1b[?25h");
+        assert!(t.cursor_visible());
+        feed_str(&mut t, "\x1b[?2004h");
+        assert!(t.bracketed_paste());
+        feed_str(&mut t, "\x1b[?2004l");
+        assert!(!t.bracketed_paste());
+    }
+
+    #[test]
+    fn unknown_private_mode_ignored() {
+        let mut t = test_terminal(5, 3);
+        feed_str(&mut t, "ok\x1b[?9999h");
+        assert_eq!(t.grid().cell(0, 0).unwrap().ch, 'o');
+        assert!(!t.is_alt());
     }
 }

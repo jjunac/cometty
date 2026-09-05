@@ -22,7 +22,7 @@ cargo fmt --check
 - [x] Input: text passthrough, Enter → `\r`, Backspace → `0x7F`, Esc, arrows, Home/End/PgUp/PgDn/Ins/Del, Ctrl+letter, Ctrl+Space
 - [x] Rendering: per-cell fg/bold + bg quads, block cursor + blink, version-cache to skip rebuild, surface-loss recovery
 - [x] Themes defined (`tokyo-night` default, `vscode`, `tomorrow-night`)
-- [ ] Alt screen (`?1049h/l`) + DECSET/DECRST (`?25`, `?2004`, …) for `vim` / `less` / `htop`
+- [x] Alt screen (`?1049h/l`) + DECSET/DECRST (`?25`, `?2004`, …) for `vim` / `less` / `htop`
 - [ ] Scrollback viewing (Shift+PgUp/Dn, mouse wheel)
 - [ ] Selection + copy/paste (mouse, Ctrl+Shift+C/V, bracketed paste)
 - [ ] Underline rendering (parsed, not drawn), cursor visibility / shape (`?25`, `DECSCUSR`), window title (OSC)

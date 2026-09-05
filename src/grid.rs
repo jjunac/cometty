@@ -62,6 +62,13 @@ pub struct Grid {
     saved_cursor: Option<Cursor>,
     saved_pen: Option<Pen>,
     pub version: u64,
+    in_alt: bool,
+    saved_main_cells: Option<Vec<Vec<Cell>>>,
+    saved_main_cursor: Option<Cursor>,
+    saved_main_saved_cursor: Option<Cursor>,
+    saved_main_saved_pen: Option<Pen>,
+    cursor_enabled: bool,
+    bracketed_paste: bool,
 }
 
 impl Grid {
@@ -92,6 +99,13 @@ impl Grid {
             saved_cursor: None,
             saved_pen: None,
             version: 0,
+            in_alt: false,
+            saved_main_cells: None,
+            saved_main_cursor: None,
+            saved_main_saved_cursor: None,
+            saved_main_saved_pen: None,
+            cursor_enabled: true,
+            bracketed_paste: false,
         }
     }
 
@@ -169,10 +183,25 @@ impl Grid {
             }
         }
         self.cells = new_cells;
+        if let Some(main) = self.saved_main_cells.take() {
+            let mut new_main = vec![vec![blank; cols]; rows];
+            let main_rows = main.len();
+            let main_cols = main.first().map(|r| r.len()).unwrap_or(0);
+            for (y, new_row) in new_main.iter_mut().enumerate().take(main_rows.min(rows)) {
+                for (x, new_cell) in new_row.iter_mut().enumerate().take(main_cols.min(cols)) {
+                    *new_cell = main[y][x];
+                }
+            }
+            self.saved_main_cells = Some(new_main);
+        }
         self.cols = cols;
         self.rows = rows;
         self.cursor.x = self.cursor.x.min(cols.saturating_sub(1));
         self.cursor.y = self.cursor.y.min(rows.saturating_sub(1));
+        if let Some(c) = self.saved_main_cursor.as_mut() {
+            c.x = c.x.min(cols.saturating_sub(1));
+            c.y = c.y.min(rows.saturating_sub(1));
+        }
         self.bump();
     }
 
@@ -258,11 +287,13 @@ impl Grid {
                 break;
             }
             let top = self.cells.remove(0);
-            if self.scrollback.len() >= self.max_scrollback {
-                self.scrollback.pop_front();
+            if !self.in_alt {
+                if self.scrollback.len() >= self.max_scrollback {
+                    self.scrollback.pop_front();
+                }
+                // Don't store fully blank default lines to save memory? Keep for simplicity.
+                self.scrollback.push_back(top);
             }
-            // Don't store fully blank default lines to save memory? Keep for simplicity.
-            self.scrollback.push_back(top);
             self.cells.push(self.blank_row());
         }
         self.bump();
@@ -456,6 +487,78 @@ impl Grid {
         self.bump();
     }
 
+    #[allow(dead_code)]
+    pub fn is_alt(&self) -> bool {
+        self.in_alt
+    }
+
+    pub fn cursor_enabled(&self) -> bool {
+        self.cursor_enabled
+    }
+
+    pub fn set_cursor_enabled(&mut self, enabled: bool) {
+        if self.cursor_enabled != enabled {
+            self.cursor_enabled = enabled;
+            self.bump();
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn bracketed_paste(&self) -> bool {
+        self.bracketed_paste
+    }
+
+    pub fn set_bracketed_paste(&mut self, enabled: bool) {
+        if self.bracketed_paste != enabled {
+            self.bracketed_paste = enabled;
+            self.bump();
+        }
+    }
+
+    pub fn enter_alt(&mut self, clear: bool) {
+        if self.in_alt {
+            if clear {
+                self.clear_all();
+                self.set_cursor(0, 0);
+            }
+            return;
+        }
+        self.saved_main_cells = Some(std::mem::take(&mut self.cells));
+        self.saved_main_cursor = Some(self.cursor);
+        self.saved_main_saved_cursor = self.saved_cursor;
+        self.saved_main_saved_pen = self.saved_pen;
+        self.cells = vec![self.blank_row(); self.rows];
+        self.cursor = Cursor { x: 0, y: 0 };
+        self.saved_cursor = None;
+        self.saved_pen = None;
+        self.in_alt = true;
+        if !clear {
+            // Fresh alt buffer is already blank; keep cursor at home.
+        }
+        self.bump();
+    }
+
+    pub fn exit_alt(&mut self) {
+        if !self.in_alt {
+            return;
+        }
+        if let Some(main) = self.saved_main_cells.take() {
+            self.cells = main;
+        } else {
+            self.cells = vec![self.blank_row(); self.rows];
+        }
+        if let Some(c) = self.saved_main_cursor.take() {
+            self.cursor = Cursor {
+                x: c.x.min(self.cols.saturating_sub(1)),
+                y: c.y.min(self.rows.saturating_sub(1)),
+            };
+        }
+        self.saved_cursor = self.saved_main_saved_cursor.take();
+        self.saved_pen = self.saved_main_saved_pen.take();
+        self.in_alt = false;
+        self.bump();
+    }
+
     fn default_pen(&self) -> Pen {
         Pen {
             fg: self.theme.foreground,
@@ -554,5 +657,43 @@ mod tests {
         assert_eq!(g.cell(1, 0).unwrap().ch, 'i');
         g.resize(6, 3);
         assert_eq!(g.cell(0, 0).unwrap().ch, 'h');
+    }
+
+    #[test]
+    fn alt_buffer_isolates_and_restores() {
+        let mut g = Grid::new(4, 2, test_theme());
+        g.put_char('a');
+        g.enter_alt(true);
+        assert!(g.is_alt());
+        assert_eq!(g.cell(0, 0).unwrap().ch, ' ');
+        g.put_char('b');
+        assert_eq!(g.cell(0, 0).unwrap().ch, 'b');
+        g.exit_alt();
+        assert!(!g.is_alt());
+        assert_eq!(g.cell(0, 0).unwrap().ch, 'a');
+    }
+
+    #[test]
+    fn alt_buffer_suppresses_scrollback() {
+        let mut g = Grid::new(2, 2, test_theme());
+        g.enter_alt(true);
+        g.put_char('x');
+        g.newline();
+        g.put_char('y');
+        g.newline();
+        assert_eq!(g.scrollback_len(), 0);
+        g.exit_alt();
+        assert_eq!(g.scrollback_len(), 0);
+    }
+
+    #[test]
+    fn cursor_and_bracketed_flags_toggle() {
+        let mut g = Grid::new(2, 2, test_theme());
+        assert!(g.cursor_enabled());
+        assert!(!g.bracketed_paste());
+        g.set_cursor_enabled(false);
+        g.set_bracketed_paste(true);
+        assert!(!g.cursor_enabled());
+        assert!(g.bracketed_paste());
     }
 }
