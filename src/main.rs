@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::ModifiersState;
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use pty::{PtyEvent, PtySession};
@@ -35,6 +35,7 @@ struct App {
     cursor_visible: bool,
     last_blink: Instant,
     pending_resize: Option<(u32, u32)>,
+    wheel_accum: f64,
     exited: bool,
 }
 
@@ -51,7 +52,20 @@ impl App {
             cursor_visible: true,
             last_blink: Instant::now(),
             pending_resize: None,
+            wheel_accum: 0.0,
             exited: false,
+        }
+    }
+
+    fn scroll_terminal(&mut self, delta: isize) {
+        if delta == 0 {
+            return;
+        }
+        if let Some(t) = self.terminal.as_mut()
+            && t.scroll_by(delta)
+            && let Some(w) = self.window.as_ref()
+        {
+            w.request_redraw();
         }
     }
 
@@ -191,12 +205,82 @@ impl ApplicationHandler<UserEvent> for App {
                 self.modifiers = m.state();
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // Shift+PgUp/PgDn/Home/End scrolls locally instead of sending to the PTY.
+                if event.state == ElementState::Pressed
+                    && self.modifiers.shift_key()
+                    && let Key::Named(named) = &event.logical_key
+                {
+                    let handled = match named {
+                        NamedKey::PageUp => {
+                            let page = self
+                                .terminal
+                                .as_ref()
+                                .map(|t| t.rows().saturating_sub(1).max(1) as isize)
+                                .unwrap_or(1);
+                            self.scroll_terminal(page);
+                            true
+                        }
+                        NamedKey::PageDown => {
+                            let page = self
+                                .terminal
+                                .as_ref()
+                                .map(|t| t.rows().saturating_sub(1).max(1) as isize)
+                                .unwrap_or(1);
+                            self.scroll_terminal(-page);
+                            true
+                        }
+                        NamedKey::Home => {
+                            if let Some(t) = self.terminal.as_mut()
+                                && t.scroll_to_top()
+                                && let Some(w) = self.window.as_ref()
+                            {
+                                w.request_redraw();
+                            }
+                            true
+                        }
+                        NamedKey::End => {
+                            if let Some(t) = self.terminal.as_mut()
+                                && t.scroll_to_bottom()
+                                && let Some(w) = self.window.as_ref()
+                            {
+                                w.request_redraw();
+                            }
+                            true
+                        }
+                        _ => false,
+                    };
+                    if handled {
+                        return;
+                    }
+                }
                 // Allow Ctrl+Shift+Q / Cmd+Q style quit? Keep minimal: no custom shortcuts.
                 if event.state == ElementState::Pressed
                     && let Some(bytes) = input::key_to_bytes(&event, &self.modifiers)
                     && let Some(p) = self.pty.as_ref()
                 {
                     p.write(bytes);
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                const LINES_PER_TICK: f64 = 7.0;
+                match delta {
+                    MouseScrollDelta::LineDelta(_, y) => {
+                        self.scroll_terminal((y as f64 * LINES_PER_TICK).round() as isize);
+                    }
+                    MouseScrollDelta::PixelDelta(pos) => {
+                        let line_height = self
+                            .renderer
+                            .as_ref()
+                            .map(|r| f64::from(r.line_height))
+                            .unwrap_or(20.0)
+                            .max(1.0);
+                        self.wheel_accum += pos.y / line_height;
+                        let lines = self.wheel_accum.trunc() as isize;
+                        if lines != 0 {
+                            self.wheel_accum -= lines as f64;
+                            self.scroll_terminal(lines);
+                        }
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -216,9 +300,11 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 let grid = terminal.grid();
                 let cursor = grid.cursor();
-                let rows: Vec<Vec<grid::Cell>> = grid.visible_rows().to_vec();
+                let rows: Vec<Vec<grid::Cell>> = grid.view_rows().into_iter().cloned().collect();
                 let version = grid.version;
-                let effective_cursor = self.cursor_visible && terminal.cursor_visible();
+                let effective_cursor = self.cursor_visible
+                    && terminal.cursor_visible()
+                    && terminal.scroll_offset() == 0;
                 if let Err(e) =
                     renderer.render(&rows, (cursor.x, cursor.y), effective_cursor, version)
                 {

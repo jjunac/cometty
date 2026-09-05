@@ -69,6 +69,7 @@ pub struct Grid {
     saved_main_saved_pen: Option<Pen>,
     cursor_enabled: bool,
     bracketed_paste: bool,
+    scroll_offset: usize,
 }
 
 impl Grid {
@@ -106,6 +107,7 @@ impl Grid {
             saved_main_saved_pen: None,
             cursor_enabled: true,
             bracketed_paste: false,
+            scroll_offset: 0,
         }
     }
 
@@ -157,14 +159,88 @@ impl Grid {
         self.cells.get(y)?.get(x).copied()
     }
 
+    #[allow(dead_code)]
     pub fn visible_rows(&self) -> &[Vec<Cell>] {
         &self.cells
+    }
+
+    /// Rows actually on screen, accounting for scrollback viewing.
+    /// `scroll_offset == 0` is the live view; `> 0` looks that many lines up.
+    pub fn view_rows(&self) -> Vec<&Vec<Cell>> {
+        let off = self.scroll_offset.min(self.scrollback.len());
+        if off == 0 || self.rows == 0 {
+            return self.cells.iter().collect();
+        }
+        let sb = self.scrollback.len();
+        (0..self.rows)
+            .map(|i| {
+                let global = sb - off + i;
+                if global < sb {
+                    &self.scrollback[global]
+                } else {
+                    &self.cells[global - sb]
+                }
+            })
+            .collect()
     }
 
     // See `pen`.
     #[allow(dead_code)]
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
+    }
+
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll_offset.min(self.scrollback.len())
+    }
+
+    /// Scroll the view by `delta` lines (`> 0` = up into history).
+    /// No-op in the alt buffer. Returns true if the view changed.
+    pub fn scroll_by(&mut self, delta: isize) -> bool {
+        if self.in_alt {
+            return false;
+        }
+        let max = self.scrollback.len() as isize;
+        let cur = self.scroll_offset.min(self.scrollback.len()) as isize;
+        let next = (cur + delta).clamp(0, max) as usize;
+        if next == self.scroll_offset {
+            return false;
+        }
+        self.scroll_offset = next;
+        self.bump();
+        true
+    }
+
+    pub fn scroll_to_top(&mut self) -> bool {
+        if self.in_alt {
+            return false;
+        }
+        self.scroll_by(self.scrollback.len() as isize)
+    }
+
+    pub fn scroll_to_bottom(&mut self) -> bool {
+        if self.scroll_offset == 0 {
+            return false;
+        }
+        self.scroll_offset = 0;
+        self.bump();
+        true
+    }
+
+    pub fn clear_scrollback(&mut self) {
+        if self.scrollback.is_empty() && self.scroll_offset == 0 {
+            return;
+        }
+        self.scrollback.clear();
+        self.scroll_offset = 0;
+        self.bump();
+    }
+
+    /// New cell output sticks the view to the live bottom.
+    /// Called at the top of content-mutating ops (their trailing `bump`
+    /// covers the version change, so this deliberately doesn't bump).
+    fn stick_to_bottom(&mut self) {
+        self.scroll_offset = 0;
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
@@ -196,6 +272,12 @@ impl Grid {
         }
         self.cols = cols;
         self.rows = rows;
+        if cols != self.scrollback.front().map(|r| r.len()).unwrap_or(cols) {
+            for row in self.scrollback.iter_mut() {
+                row.resize(cols, blank);
+            }
+        }
+        self.scroll_offset = self.scroll_offset.min(self.scrollback.len());
         self.cursor.x = self.cursor.x.min(cols.saturating_sub(1));
         self.cursor.y = self.cursor.y.min(rows.saturating_sub(1));
         if let Some(c) = self.saved_main_cursor.as_mut() {
@@ -209,6 +291,7 @@ impl Grid {
         if ch == '\0' {
             return;
         }
+        self.stick_to_bottom();
         if self.cursor.y >= self.rows {
             self.scroll_up(1);
             self.cursor.y = self.rows.saturating_sub(1);
@@ -240,6 +323,7 @@ impl Grid {
     }
 
     pub fn newline(&mut self) {
+        self.stick_to_bottom();
         self.cursor.x = 0;
         if self.cursor.y + 1 >= self.rows {
             self.scroll_up(1);
@@ -282,6 +366,7 @@ impl Grid {
     }
 
     pub fn scroll_up(&mut self, n: usize) {
+        self.stick_to_bottom();
         for _ in 0..n {
             if self.rows == 0 {
                 break;
@@ -300,6 +385,7 @@ impl Grid {
     }
 
     pub fn scroll_down(&mut self, n: usize) {
+        self.stick_to_bottom();
         for _ in 0..n {
             if self.cells.is_empty() {
                 break;
@@ -311,6 +397,7 @@ impl Grid {
     }
 
     pub fn erase_in_display(&mut self, mode: u16) {
+        self.stick_to_bottom();
         match mode {
             0 => {
                 // cursor to end
@@ -348,8 +435,12 @@ impl Grid {
                     self.cells[cy][x] = self.blank_cell();
                 }
             }
-            2 | 3 => {
+            2 => {
                 self.clear_all();
+            }
+            3 => {
+                self.clear_all();
+                self.clear_scrollback();
             }
             _ => {}
         }
@@ -357,6 +448,7 @@ impl Grid {
     }
 
     pub fn erase_in_line(&mut self, mode: u16) {
+        self.stick_to_bottom();
         let y = self.cursor.y.min(self.rows.saturating_sub(1));
         match mode {
             0 => {
@@ -380,6 +472,7 @@ impl Grid {
     }
 
     pub fn clear_all(&mut self) {
+        self.stick_to_bottom();
         let blank = self.blank_cell();
         for row in &mut self.cells {
             for c in row.iter_mut() {
@@ -390,6 +483,7 @@ impl Grid {
     }
 
     pub fn insert_lines(&mut self, n: usize) {
+        self.stick_to_bottom();
         let y = self.cursor.y.min(self.rows);
         for _ in 0..n {
             if y < self.rows {
@@ -401,6 +495,7 @@ impl Grid {
     }
 
     pub fn delete_lines(&mut self, n: usize) {
+        self.stick_to_bottom();
         let y = self.cursor.y.min(self.rows);
         for _ in 0..n {
             if y < self.rows {
@@ -532,6 +627,7 @@ impl Grid {
         self.saved_cursor = None;
         self.saved_pen = None;
         self.in_alt = true;
+        self.scroll_offset = 0;
         if !clear {
             // Fresh alt buffer is already blank; keep cursor at home.
         }
@@ -556,6 +652,7 @@ impl Grid {
         self.saved_cursor = self.saved_main_saved_cursor.take();
         self.saved_pen = self.saved_main_saved_pen.take();
         self.in_alt = false;
+        self.scroll_offset = 0;
         self.bump();
     }
 
@@ -695,5 +792,69 @@ mod tests {
         g.set_bracketed_paste(true);
         assert!(!g.cursor_enabled());
         assert!(g.bracketed_paste());
+    }
+
+    #[test]
+    fn scroll_offset_clamps_and_views_history() {
+        let mut g = Grid::new(2, 2, test_theme());
+        g.put_char('a');
+        g.newline();
+        g.put_char('b');
+        g.newline();
+        g.put_char('c');
+        assert_eq!(g.scrollback_len(), 1);
+        assert_eq!(g.scroll_offset(), 0);
+        // Live view: b, c rows
+        assert_eq!(g.view_rows()[0][0].ch, 'b');
+        assert!(g.scroll_by(5));
+        assert_eq!(g.scroll_offset(), 1);
+        // Scrolled up one: a, b rows
+        let view = g.view_rows();
+        assert_eq!(view[0][0].ch, 'a');
+        assert_eq!(view[1][0].ch, 'b');
+        assert!(!g.scroll_by(5));
+        assert!(g.scroll_to_bottom());
+        assert_eq!(g.scroll_offset(), 0);
+        assert!(!g.scroll_to_bottom());
+    }
+
+    #[test]
+    fn new_output_sticks_to_bottom() {
+        let mut g = Grid::new(2, 2, test_theme());
+        g.put_char('a');
+        g.newline();
+        g.put_char('b');
+        g.newline();
+        assert!(g.scroll_by(1));
+        g.put_char('z');
+        assert_eq!(g.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn scroll_disabled_in_alt() {
+        let mut g = Grid::new(2, 2, test_theme());
+        g.put_char('a');
+        g.newline();
+        g.put_char('b');
+        g.newline();
+        g.enter_alt(true);
+        assert!(!g.scroll_by(1));
+        assert_eq!(g.scroll_offset(), 0);
+        g.exit_alt();
+        assert!(g.scroll_by(1));
+    }
+
+    #[test]
+    fn ed3_clears_scrollback() {
+        let mut g = Grid::new(2, 2, test_theme());
+        g.put_char('a');
+        g.newline();
+        g.put_char('b');
+        g.newline();
+        assert_eq!(g.scrollback_len(), 1);
+        g.scroll_by(1);
+        g.erase_in_display(3);
+        assert_eq!(g.scrollback_len(), 0);
+        assert_eq!(g.scroll_offset(), 0);
     }
 }
