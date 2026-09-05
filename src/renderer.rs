@@ -134,6 +134,18 @@ pub(crate) fn clamp_surface_size(width: u32, height: u32, max_dim: u32) -> (u32,
     (width.max(1).min(max_dim), height.max(1).min(max_dim))
 }
 
+/// egui chrome input for [`Renderer::render`]: overlay scrollbar only.
+/// Grouped so `render` stays under the clippy arg limit and future
+/// tab-strip rects can join without growing the signature.
+pub struct ScrollCtx<'a> {
+    pub window: &'a winit::window::Window,
+    pub ui: &'a mut crate::scrollbar::ScrollbarUi,
+    pub total: usize,
+    pub visible: usize,
+    pub offset: usize,
+    pub is_alt: bool,
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -158,6 +170,9 @@ pub struct Renderer {
     width: u32,
     height: u32,
     last_grid_version: u64,
+    egui_ctx: egui::Context,
+    egui_state: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
 }
 
 impl Renderer {
@@ -177,7 +192,7 @@ impl Renderer {
         let (font_size, line_height, cell_width) = scaled_metrics(base_font_size, scale_factor);
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let surface = instance.create_surface(window)?;
+        let surface = instance.create_surface(window.clone())?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
@@ -276,6 +291,19 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        let egui_ctx = egui::Context::default();
+        egui_ctx.set_visuals(theme.to_egui_visuals());
+        let mut egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            window.as_ref(),
+            Some(scale_factor),
+            None,
+            Some(max_surface_dim as usize),
+        );
+        egui_state.set_max_texture_side(max_surface_dim as usize);
+        let egui_renderer = egui_wgpu::Renderer::new(&device, format, Default::default());
+
         let mut r = Self {
             device,
             queue,
@@ -300,6 +328,9 @@ impl Renderer {
             width: clamped_w,
             height: clamped_h,
             last_grid_version: u64::MAX,
+            egui_ctx,
+            egui_state,
+            egui_renderer,
         };
         r.update_viewport(clamped_w, clamped_h);
         Ok(r)
@@ -316,8 +347,20 @@ impl Renderer {
     pub fn set_theme(&mut self, theme: Theme) {
         if self.theme != theme {
             self.theme = theme;
+            self.egui_ctx.set_visuals(theme.to_egui_visuals());
             self.last_grid_version = u64::MAX;
         }
+    }
+
+    /// Forward a winit window event to egui. Call at the top of the
+    /// `WindowEvent` handler; when `consumed` is true the event was over
+    /// egui chrome (scrollbar) and terminal handling should be skipped.
+    pub fn on_window_event(
+        &mut self,
+        window: &winit::window::Window,
+        event: &winit::event::WindowEvent,
+    ) -> egui_winit::EventResponse {
+        self.egui_state.on_window_event(window, event)
     }
 
     /// Update the DPI scale factor. Font metrics are re-derived so logical
@@ -442,7 +485,8 @@ impl Renderer {
         cursor: (usize, usize),
         cursor_visible: bool,
         grid_version: u64,
-    ) -> anyhow::Result<()> {
+        scroll: ScrollCtx<'_>,
+    ) -> anyhow::Result<Option<usize>> {
         if grid_version != self.last_grid_version {
             self.rebuild_buffer(grid_rows);
             self.last_grid_version = grid_version;
@@ -479,18 +523,150 @@ impl Renderer {
                 .write_buffer(&self.bg_vertex_buf, 0, bytemuck::cast_slice(&verts));
         }
 
+        // --- egui overlay: scrollbar (chrome only; terminal cells stay glyphon).
+        let ScrollCtx {
+            window,
+            ui: scrollbar,
+            total,
+            visible,
+            offset,
+            is_alt,
+        } = scroll;
+        let scale = self.scale_factor.max(1.0);
+        let screen_w_pts = self.width as f32 / scale;
+        let screen_h_pts = self.height as f32 / scale;
+        let theme = self.theme;
+        let opacity = scrollbar.opacity;
+        let mut scroll_to: Option<usize> = None;
+        let mut hovered = false;
+
+        let egui_input = self.egui_state.take_egui_input(window);
+        let ctx = self.egui_ctx.clone();
+        ctx.begin_pass(egui_input);
+        egui::Area::new(egui::Id::new("scrollbar"))
+            .fixed_pos(egui::pos2(0.0, 0.0))
+            .order(egui::Order::Foreground)
+            .show(&ctx, |ui| {
+                let Some((thumb_y, thumb_h)) =
+                    crate::scrollbar::geometry(screen_h_pts, total, visible, offset)
+                else {
+                    return;
+                };
+                if is_alt || (opacity <= 0.01 && !scrollbar.is_dragging()) {
+                    return;
+                }
+                let track_w = crate::scrollbar::TRACK_WIDTH_POINTS;
+                let pad = crate::scrollbar::TRACK_PAD_POINTS;
+                let track_rect = egui::Rect::from_min_size(
+                    egui::pos2(screen_w_pts - track_w - pad, 0.0),
+                    egui::vec2(track_w, screen_h_pts),
+                );
+                let thumb_rect = egui::Rect::from_min_size(
+                    egui::pos2(screen_w_pts - track_w - pad, thumb_y),
+                    egui::vec2(track_w, thumb_h),
+                );
+                let painter = ui.painter().clone();
+                let track_col = theme
+                    .scrollbar_track
+                    .as_egui_color()
+                    .gamma_multiply((opacity * 0.45).clamp(0.0, 1.0));
+                painter.rect_filled(track_rect, egui::CornerRadius::same(4), track_col);
+
+                let resp = ui.allocate_rect(track_rect, egui::Sense::click_and_drag());
+                hovered = resp.hovered() || resp.dragged();
+                let active = scrollbar.is_dragging() || resp.dragged() || resp.hovered();
+                let thumb_base = if active {
+                    theme.scrollbar_hover.as_egui_color()
+                } else {
+                    theme.scrollbar_thumb.as_egui_color()
+                };
+                painter.rect_filled(
+                    thumb_rect,
+                    egui::CornerRadius::same(4),
+                    thumb_base.gamma_multiply(opacity.clamp(0.0, 1.0)),
+                );
+
+                if resp.drag_started() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let y = pos.y - track_rect.min.y;
+                        if y >= thumb_y && y <= thumb_y + thumb_h {
+                            scrollbar.begin_drag(y - thumb_y);
+                        } else {
+                            let target = crate::scrollbar::offset_for_thumb_y(
+                                y - thumb_h * 0.5,
+                                screen_h_pts,
+                                total,
+                                visible,
+                            );
+                            scroll_to = Some(target);
+                            scrollbar.begin_drag(thumb_h * 0.5);
+                        }
+                    }
+                } else if resp.dragged()
+                    && let (Some(pos), Some(grab)) =
+                        (resp.interact_pointer_pos(), scrollbar.drag_grab())
+                {
+                    let y = pos.y - track_rect.min.y - grab;
+                    scroll_to = Some(crate::scrollbar::offset_for_thumb_y(
+                        y,
+                        screen_h_pts,
+                        total,
+                        visible,
+                    ));
+                }
+                if resp.drag_stopped() {
+                    scrollbar.end_drag();
+                } else if resp.clicked()
+                    && let Some(pos) = resp.interact_pointer_pos()
+                {
+                    let y = pos.y - track_rect.min.y;
+                    if y < thumb_y || y > thumb_y + thumb_h {
+                        scroll_to = Some(crate::scrollbar::offset_for_thumb_y(
+                            y - thumb_h * 0.5,
+                            screen_h_pts,
+                            total,
+                            visible,
+                        ));
+                    }
+                }
+            });
+        let mut full_output = ctx.end_pass();
+        self.egui_state
+            .handle_platform_output(window, full_output.platform_output);
+        let paint_jobs = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+        let now = std::time::Instant::now();
+        if scrollbar.update(now, total, visible, offset, is_alt, hovered) {
+            ctx.request_repaint();
+        }
+
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.width, self.height],
+            pixels_per_point: scale,
+        };
+        // Drain (not just borrow): egui panics on drop with unapplied deltas,
+        // and our early surface-loss returns below must not leak them either.
+        for (id, deltas) in full_output.textures_delta.set.drain() {
+            for delta in &deltas {
+                self.egui_renderer
+                    .update_texture(&self.device, &self.queue, id, delta);
+            }
+        }
+        for id in full_output.textures_delta.free.drain() {
+            self.egui_renderer.free_texture(&id);
+        }
+
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return Ok(());
+                return Ok(scroll_to);
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
-                return Ok(());
+                return Ok(scroll_to);
             }
             wgpu::CurrentSurfaceTexture::Validation => {
-                return Ok(());
+                return Ok(scroll_to);
             }
         };
         let view = frame
@@ -527,6 +703,13 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("cometty encoder"),
             });
+        self.egui_renderer.update_buffers(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &paint_jobs,
+            &screen_descriptor,
+        );
         {
             let bg = self.theme.background.as_linear_f32_array();
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -557,11 +740,13 @@ impl Renderer {
             }
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
+            self.egui_renderer
+                .render(&mut pass.forget_lifetime(), &paint_jobs, &screen_descriptor);
         }
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
         self.atlas.trim();
-        Ok(())
+        Ok(scroll_to)
     }
 }
 

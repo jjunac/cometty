@@ -46,6 +46,10 @@ impl Rgb {
     pub fn as_glyphon_color(&self) -> glyphon::Color {
         glyphon::Color::rgb(self.r, self.g, self.b)
     }
+
+    pub fn as_egui_color(&self) -> egui::Color32 {
+        egui::Color32::from_rgb(self.r, self.g, self.b)
+    }
 }
 
 /// A full terminal color scheme.
@@ -60,6 +64,9 @@ pub struct Theme {
     pub cursor_bg: Rgb,
     pub cursor_fg: Rgb,
     pub palette: [Rgb; 16],
+    pub scrollbar_track: Rgb,
+    pub scrollbar_thumb: Rgb,
+    pub scrollbar_hover: Rgb,
 }
 
 impl Theme {
@@ -73,6 +80,9 @@ impl Theme {
             background: Rgb::new(0x1E, 0x1E, 0x1E),
             cursor_bg: Rgb::new(0xCC, 0xCC, 0xCC),
             cursor_fg: Rgb::new(0x1E, 0x1E, 0x1E),
+            scrollbar_track: Rgb::new(0x2D, 0x2D, 0x2D),
+            scrollbar_thumb: Rgb::new(0x5A, 0x5A, 0x5A),
+            scrollbar_hover: Rgb::new(0xCC, 0xCC, 0xCC),
             palette: [
                 Rgb::new(0x00, 0x00, 0x00), // black
                 Rgb::new(0xCD, 0x31, 0x31), // red
@@ -103,6 +113,9 @@ impl Theme {
             background: Rgb::new(0x1A, 0x1B, 0x26),
             cursor_bg: Rgb::new(0xC0, 0xCA, 0xF5),
             cursor_fg: Rgb::new(0x1A, 0x1B, 0x26),
+            scrollbar_track: Rgb::new(0x1F, 0x23, 0x35),
+            scrollbar_thumb: Rgb::new(0x41, 0x48, 0x68),
+            scrollbar_hover: Rgb::new(0xC0, 0xCA, 0xF5),
             palette: [
                 Rgb::new(0x15, 0x16, 0x1E), // black
                 Rgb::new(0xF7, 0x76, 0x8E), // red
@@ -133,6 +146,9 @@ impl Theme {
             background: Rgb::new(0x1D, 0x1F, 0x21),
             cursor_bg: Rgb::new(0xC5, 0xC8, 0xC6),
             cursor_fg: Rgb::new(0x1D, 0x1F, 0x21),
+            scrollbar_track: Rgb::new(0x28, 0x2A, 0x2E),
+            scrollbar_thumb: Rgb::new(0x96, 0x98, 0x96),
+            scrollbar_hover: Rgb::new(0xC5, 0xC8, 0xC6),
             palette: [
                 Rgb::new(0x1D, 0x1F, 0x21),
                 Rgb::new(0xCC, 0x66, 0x66),
@@ -177,6 +193,22 @@ impl Theme {
         } else {
             self.foreground
         }
+    }
+
+    /// One-way bridge for egui chrome (tab bar, scrollbar, dialogs).
+    /// Terminal cells keep using glyphon/cosmic-text; only egui widgets
+    /// read through this.
+    pub fn to_egui_visuals(self) -> egui::Visuals {
+        let mut visuals = egui::Visuals::dark();
+        visuals.window_fill = self.background.as_egui_color();
+        visuals.panel_fill = self.background.as_egui_color();
+        visuals.faint_bg_color = self.scrollbar_track.as_egui_color();
+        visuals.extreme_bg_color = self.background.as_egui_color();
+        visuals.code_bg_color = self.background.as_egui_color();
+        visuals.override_text_color = Some(self.foreground.as_egui_color());
+        visuals.selection.bg_fill = self.scrollbar_thumb.as_egui_color();
+        visuals.selection.stroke.color = self.foreground.as_egui_color();
+        visuals
     }
 }
 

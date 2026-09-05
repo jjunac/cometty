@@ -227,6 +227,21 @@ impl Grid {
         true
     }
 
+    /// Jump directly to an absolute scroll offset (0 = live bottom).
+    /// Used by the GUI scrollbar drag. No-op in the alt buffer.
+    pub fn scroll_to_offset(&mut self, offset: usize) -> bool {
+        if self.in_alt {
+            return false;
+        }
+        let next = offset.min(self.scrollback.len());
+        if next == self.scroll_offset {
+            return false;
+        }
+        self.scroll_offset = next;
+        self.bump();
+        true
+    }
+
     pub fn clear_scrollback(&mut self) {
         if self.scrollback.is_empty() && self.scroll_offset == 0 {
             return;

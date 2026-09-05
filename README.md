@@ -24,7 +24,7 @@ cargo fmt --check
 - [x] Themes defined (`tokyo-night` default, `vscode`, `tomorrow-night`)
 - [x] Alt screen (`?1049h/l`) + DECSET/DECRST (`?25`, `?2004`, …) for `vim` / `less` / `htop`
 - [x] Scrollback viewing (Shift+PgUp/Dn = page-minus-1, Shift+Home/End = top/bottom, mouse wheel)
-- [ ] Scrollbar UI (no graphical scrollbar; use keys/wheel above)
+- [X] Scrollbar UI (no graphical scrollbar; use keys/wheel above)
 - [ ] Selection + copy/paste (mouse, Ctrl+Shift+C/V, bracketed paste)
 - [ ] Underline rendering (parsed, not drawn), cursor visibility / shape (`?25`, `DECSCUSR`), window title (OSC)
 - [ ] Consistent erase semantics (`ED 0` vs others)

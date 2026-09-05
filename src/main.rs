@@ -2,6 +2,7 @@ mod grid;
 mod input;
 mod pty;
 mod renderer;
+mod scrollbar;
 mod term;
 mod theme;
 
@@ -37,6 +38,7 @@ struct App {
     pending_resize: Option<(u32, u32)>,
     pending_scale: Option<f32>,
     wheel_accum: f64,
+    scrollbar: scrollbar::ScrollbarUi,
     exited: bool,
 }
 
@@ -55,6 +57,7 @@ impl App {
             pending_resize: None,
             pending_scale: None,
             wheel_accum: 0.0,
+            scrollbar: scrollbar::ScrollbarUi::new(Instant::now()),
             exited: false,
         }
     }
@@ -199,6 +202,23 @@ impl ApplicationHandler<UserEvent> for App {
         if !win_ok {
             return;
         }
+        // egui chrome first: scrollbar hover/drag consumes pointer events.
+        let egui_consumed = match (self.renderer.as_mut(), self.window.as_ref()) {
+            (Some(r), Some(w)) => r.on_window_event(w, &event).consumed,
+            _ => false,
+        };
+        // While fading/dragging, keep frames coming without waiting for PTY.
+        if egui_consumed
+            && matches!(
+                event,
+                WindowEvent::CursorMoved { .. }
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::CursorLeft { .. }
+            )
+            && let Some(w) = self.window.as_ref()
+        {
+            w.request_redraw();
+        }
         match event {
             WindowEvent::CloseRequested => {
                 self.exited = true;
@@ -229,6 +249,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.modifiers = m.state();
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                if egui_consumed {
+                    return;
+                }
                 // Shift+PgUp/PgDn/Home/End scrolls locally instead of sending to the PTY.
                 if event.state == ElementState::Pressed
                     && self.modifiers.shift_key()
@@ -286,6 +309,8 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                // Wheel over the egui scrollbar still scrolls the same view.
+                let _ = egui_consumed;
                 const LINES_PER_TICK: f64 = 7.0;
                 match delta {
                     MouseScrollDelta::LineDelta(_, y) => {
@@ -333,13 +358,43 @@ impl ApplicationHandler<UserEvent> for App {
                 let effective_cursor = self.cursor_visible
                     && terminal.cursor_visible()
                     && terminal.scroll_offset() == 0;
-                if let Err(e) =
-                    renderer.render(&rows, (cursor.x, cursor.y), effective_cursor, version)
-                {
-                    // Surface lost / outdated is recoverable via resize.
-                    log::warn!("render failed: {e:#}");
-                    let s = window.inner_size();
-                    renderer.resize(s.width.max(1), s.height.max(1));
+                let total = grid.scrollback_len() + grid.rows();
+                match renderer.render(
+                    &rows,
+                    (cursor.x, cursor.y),
+                    effective_cursor,
+                    version,
+                    renderer::ScrollCtx {
+                        window,
+                        ui: &mut self.scrollbar,
+                        total,
+                        visible: grid.rows(),
+                        offset: terminal.scroll_offset(),
+                        is_alt: grid.is_alt(),
+                    },
+                ) {
+                    Ok(scroll_to) => {
+                        if let Some(target) = scroll_to
+                            && let Some(t) = self.terminal.as_mut()
+                            && t.scroll_to_offset(target)
+                            && let Some(w) = self.window.as_ref()
+                        {
+                            w.request_redraw();
+                        }
+                        // Keep animating the fade without PTY traffic.
+                        let fading = self.scrollbar.opacity > 0.0 && self.scrollbar.opacity < 1.0;
+                        if let Some(w) = self.window.as_ref()
+                            && (fading || self.scrollbar.is_dragging())
+                        {
+                            w.request_redraw();
+                        }
+                    }
+                    Err(e) => {
+                        // Surface lost / outdated is recoverable via resize.
+                        log::warn!("render failed: {e:#}");
+                        let s = window.inner_size();
+                        renderer.resize(s.width.max(1), s.height.max(1));
+                    }
                 }
             }
             WindowEvent::Focused(_) => {

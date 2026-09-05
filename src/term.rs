@@ -75,6 +75,14 @@ impl Terminal {
         self.grid.scroll_to_bottom()
     }
 
+    pub fn scroll_to_offset(&mut self, offset: usize) -> bool {
+        let changed = self.grid.scroll_to_offset(offset);
+        if changed {
+            self.pending_wrap = false;
+        }
+        changed
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) {
         // vte::Parser::advance borrows both parser and performer; swap parser
         // out to satisfy the borrow checker while preserving state.
