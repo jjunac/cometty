@@ -3,6 +3,7 @@ mod input;
 mod pty;
 mod renderer;
 mod scrollbar;
+mod selection;
 mod term;
 mod theme;
 
@@ -10,13 +11,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use pty::{PtyEvent, PtySession};
 use renderer::Renderer;
+use selection::{CellPos, Selection};
 use term::Terminal;
 use theme::Theme;
 
@@ -40,6 +42,12 @@ struct App {
     wheel_accum: f64,
     scrollbar: scrollbar::ScrollbarUi,
     exited: bool,
+    selection: Option<Selection>,
+    selecting: bool,
+    cursor_pos: Option<(f32, f32)>,
+    last_click: Option<(Instant, (usize, usize))>,
+    clipboard: Option<arboard::Clipboard>,
+    is_alt: bool,
 }
 
 impl App {
@@ -59,6 +67,12 @@ impl App {
             wheel_accum: 0.0,
             scrollbar: scrollbar::ScrollbarUi::new(Instant::now()),
             exited: false,
+            selection: None,
+            selecting: false,
+            cursor_pos: None,
+            last_click: None,
+            clipboard: None,
+            is_alt: false,
         }
     }
 
@@ -71,6 +85,106 @@ impl App {
             && let Some(w) = self.window.as_ref()
         {
             w.request_redraw();
+        }
+    }
+
+    /// Visible `(col, view_row)` under the last known cursor position.
+    fn cell_under_cursor(&self) -> Option<(usize, usize)> {
+        let (x, y) = self.cursor_pos?;
+        self.renderer.as_ref()?.cell_at_pos(x, y)
+    }
+
+    /// Whether the overlay scrollbar is currently painted.
+    fn scrollbar_visible(&self) -> bool {
+        let Some(t) = self.terminal.as_ref() else {
+            return false;
+        };
+        let grid = t.grid();
+        !grid.is_alt()
+            && scrollbar::geometry(
+                100.0,
+                grid.scrollback_len() + grid.rows(),
+                grid.rows(),
+                grid.scroll_offset(),
+            )
+            .is_some()
+    }
+
+    /// True when physical `x` is on scrollbar chrome (and it is visible).
+    /// egui's `consumed` flag claims presses across the whole window, so
+    /// selection must use this explicit hit-test instead.
+    fn press_on_chrome(&self, x_phys: f32) -> bool {
+        self.scrollbar_visible()
+            && self
+                .renderer
+                .as_ref()
+                .is_some_and(|r| r.over_scrollbar(x_phys))
+    }
+
+    fn view_to_global(&self, view_row: usize) -> Option<usize> {
+        let t = self.terminal.as_ref()?;
+        let grid = t.grid();
+        Some(selection::view_to_global(
+            view_row,
+            grid.scrollback_len(),
+            grid.scroll_offset(),
+        ))
+    }
+
+    fn clear_selection(&mut self) {
+        self.selection = None;
+        self.selecting = false;
+    }
+
+    fn copy_selection(&mut self) {
+        let text = match (self.terminal.as_ref(), self.selection.as_ref()) {
+            (Some(t), Some(sel)) => {
+                let grid = t.grid();
+                selection::extract_text(sel, |g| grid.global_line_chars(g))
+            }
+            _ => None,
+        };
+        let Some(text) = text else { return };
+        if text.is_empty() {
+            return;
+        }
+        if self.clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(cb) => self.clipboard = Some(cb),
+                Err(e) => {
+                    log::warn!("clipboard unavailable: {e:#}");
+                    return;
+                }
+            }
+        }
+        if let Some(cb) = self.clipboard.as_mut()
+            && let Err(e) = cb.set_text(text)
+        {
+            log::warn!("clipboard copy failed: {e:#}");
+        }
+    }
+
+    fn paste_from_clipboard(&mut self) {
+        if self.clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(cb) => self.clipboard = Some(cb),
+                Err(e) => {
+                    log::warn!("clipboard unavailable: {e:#}");
+                    return;
+                }
+            }
+        }
+        let text = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok());
+        let Some(text) = text else { return };
+        // Normalize all line endings to CR, the terminal's Enter byte.
+        let normalized = text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\n', "\r");
+        let enabled = self.terminal.as_ref().is_some_and(|t| t.bracketed_paste());
+        let bytes = input::wrap_bracketed_paste(&normalized, enabled);
+        if let Some(p) = self.pty.as_ref() {
+            p.write(bytes);
         }
     }
 
@@ -93,8 +207,15 @@ impl App {
                 None => break,
             }
         }
-        if got_data && let Some(w) = self.window.as_ref() {
-            w.request_redraw();
+        if got_data {
+            // New output invalidates the selected text; alt switches too.
+            self.clear_selection();
+            if let Some(t) = self.terminal.as_ref() {
+                self.is_alt = t.grid().is_alt();
+            }
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
         }
     }
 
@@ -129,6 +250,7 @@ impl App {
         if cols != term.cols() || rows != term.rows() {
             term.resize(cols, rows);
             pty.resize(cols, rows);
+            self.clear_selection();
         }
     }
 }
@@ -252,6 +374,17 @@ impl ApplicationHandler<UserEvent> for App {
                 if egui_consumed {
                     return;
                 }
+                // Explicit copy/paste never reaches the PTY.
+                if event.state == ElementState::Pressed {
+                    if input::is_copy_shortcut(&event.logical_key, &self.modifiers) {
+                        self.copy_selection();
+                        return;
+                    }
+                    if input::is_paste_shortcut(&event.logical_key, &self.modifiers) {
+                        self.paste_from_clipboard();
+                        return;
+                    }
+                }
                 // Shift+PgUp/PgDn/Home/End scrolls locally instead of sending to the PTY.
                 if event.state == ElementState::Pressed
                     && self.modifiers.shift_key()
@@ -308,6 +441,93 @@ impl ApplicationHandler<UserEvent> for App {
                     p.write(bytes);
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_pos = Some((position.x as f32, position.y as f32));
+                if !self.selecting {
+                    return;
+                }
+                let cell = self.cell_under_cursor();
+                let global = cell.and_then(|(_, row)| self.view_to_global(row));
+                if let (Some((col, _)), Some(g)) = (cell, global)
+                    && let Some(sel) = self.selection.as_mut()
+                {
+                    sel.update(CellPos { x: col, y: g });
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.cursor_pos = None;
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                // NB: egui's `consumed` flag claims left-presses across the
+                // whole window, so selection uses an explicit scrollbar
+                // hit-test instead; releases always finalize a drag.
+                let _ = egui_consumed;
+                match (button, state) {
+                    (MouseButton::Left, ElementState::Pressed) => {
+                        let now = Instant::now();
+                        if self
+                            .cursor_pos
+                            .is_some_and(|(x, _)| self.press_on_chrome(x))
+                        {
+                            return;
+                        }
+                        let Some((col, view_row)) = self.cell_under_cursor() else {
+                            return;
+                        };
+                        let Some(global) = self.view_to_global(view_row) else {
+                            return;
+                        };
+                        // Double-click: expand to word on the same visual row.
+                        const DOUBLE_CLICK_MS: u128 = 400;
+                        if let Some((t, (pc, pr))) = self.last_click
+                            && now.duration_since(t).as_millis() <= DOUBLE_CLICK_MS
+                            && (pc, pr) == (col, view_row)
+                            && let Some(term) = self.terminal.as_ref()
+                        {
+                            let row_chars: Vec<char> = term
+                                .grid()
+                                .view_rows()
+                                .get(view_row)
+                                .map(|r| r.iter().map(|c| c.ch).collect())
+                                .unwrap_or_default();
+                            let (sx, ex) = selection::expand_word(&row_chars, col);
+                            // Clamp to visible cols so a resized row can't overflow.
+                            let cols = term.cols();
+                            let sx = sx.min(cols.saturating_sub(1));
+                            let ex = ex.min(cols.saturating_sub(1));
+                            self.selection = Some(Selection {
+                                anchor: CellPos { x: sx, y: global },
+                                active: CellPos { x: ex, y: global },
+                            });
+                            self.selecting = false;
+                            self.last_click = None;
+                            if let Some(w) = self.window.as_ref() {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        self.selection = Some(Selection::new(CellPos { x: col, y: global }));
+                        self.selecting = true;
+                        self.last_click = Some((now, (col, view_row)));
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                    }
+                    (MouseButton::Left, ElementState::Released) if self.selecting => {
+                        self.selecting = false;
+                        if self.selection.as_ref().is_some_and(|s| s.is_empty()) {
+                            self.selection = None;
+                        }
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                    }
+                    _ => {}
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 // Wheel over the egui scrollbar still scrolls the same view.
                 let _ = egui_consumed;
@@ -343,6 +563,13 @@ impl ApplicationHandler<UserEvent> for App {
                 // Drain any pending PTY output that arrived between wake and draw.
                 self.drain_pty();
 
+                // Defensive: alt switches always drop the selection.
+                let alt_now = self.terminal.as_ref().is_some_and(|t| t.grid().is_alt());
+                if alt_now != self.is_alt {
+                    self.clear_selection();
+                    self.is_alt = alt_now;
+                }
+
                 let (renderer, terminal, window) = match (
                     self.renderer.as_mut(),
                     self.terminal.as_ref(),
@@ -359,11 +586,20 @@ impl ApplicationHandler<UserEvent> for App {
                     && terminal.cursor_visible()
                     && terminal.scroll_offset() == 0;
                 let total = grid.scrollback_len() + grid.rows();
+                let selection_view = self.selection.as_ref().and_then(|sel| {
+                    selection::selection_to_view(
+                        sel,
+                        grid.scrollback_len(),
+                        grid.scroll_offset(),
+                        grid.rows(),
+                    )
+                });
                 match renderer.render(
                     &rows,
                     (cursor.x, cursor.y),
                     effective_cursor,
                     version,
+                    selection_view,
                     renderer::ScrollCtx {
                         window,
                         ui: &mut self.scrollbar,

@@ -134,6 +134,31 @@ pub(crate) fn clamp_surface_size(width: u32, height: u32, max_dim: u32) -> (u32,
     (width.max(1).min(max_dim), height.max(1).min(max_dim))
 }
 
+/// Hit-test a normalized view-space selection `((x0, y0), (x1, y1))`.
+fn in_view_selection(sel: Option<((usize, usize), (usize, usize))>, x: usize, y: usize) -> bool {
+    let Some(((ax, ay), (bx, by))) = sel else {
+        return false;
+    };
+    let (s, e) = if (by, bx) < (ay, ax) {
+        ((bx, by), (ax, ay))
+    } else {
+        ((ax, ay), (bx, by))
+    };
+    if y < s.1 || y > e.1 {
+        return false;
+    }
+    if s.1 == e.1 {
+        return x >= s.0 && x <= e.0;
+    }
+    if y == s.1 {
+        return x >= s.0;
+    }
+    if y == e.1 {
+        return x <= e.0;
+    }
+    true
+}
+
 /// egui chrome input for [`Renderer::render`]: overlay scrollbar only.
 /// Grouped so `render` stays under the clippy arg limit and future
 /// tab-strip rects can join without growing the signature.
@@ -428,6 +453,22 @@ impl Renderer {
         ((height as f32 / self.line_height).floor() as usize).max(1)
     }
 
+    /// Map physical pixels to a visible `(col, row)` cell.
+    pub fn cell_at_pos(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+        let cols = self.cols_for_width(self.width);
+        let rows = self.rows_for_height(self.height);
+        crate::selection::cell_at_pos(x, y, self.cell_width, self.line_height, cols, rows)
+    }
+
+    /// True when physical `x` falls on the overlay scrollbar strip.
+    /// Callers use this (not egui's `consumed` flag) to decide whether a
+    /// press belongs to scrollbar chrome or terminal selection.
+    pub fn over_scrollbar(&self, x_phys: f32) -> bool {
+        let scale = self.scale_factor.max(1.0);
+        let screen_w_pts = self.width as f32 / scale;
+        crate::scrollbar::hit_test(x_phys / scale, screen_w_pts)
+    }
+
     pub fn rebuild_buffer(&mut self, rows: &[Vec<Cell>]) {
         let metrics = Metrics::new(self.font_size, self.line_height);
         self.buffer.set_metrics(metrics);
@@ -485,6 +526,7 @@ impl Renderer {
         cursor: (usize, usize),
         cursor_visible: bool,
         grid_version: u64,
+        selection: Option<((usize, usize), (usize, usize))>,
         scroll: ScrollCtx<'_>,
     ) -> anyhow::Result<Option<usize>> {
         if grid_version != self.last_grid_version {
@@ -497,10 +539,13 @@ impl Renderer {
             let py = y as f32 * self.line_height;
             for (x, cell) in row.iter().enumerate() {
                 let is_cursor = cursor_visible && cursor.0 == x && cursor.1 == y;
-                if cell.bg != self.theme.background || is_cursor {
+                let is_selected = in_view_selection(selection, x, y);
+                if cell.bg != self.theme.background || is_cursor || is_selected {
                     let px = x as f32 * self.cell_width;
                     let col = if is_cursor {
                         self.theme.cursor_bg.as_linear_f32_array()
+                    } else if is_selected {
+                        self.theme.selection.as_linear_f32_array()
                     } else {
                         cell.bg.as_linear_f32_array()
                     };

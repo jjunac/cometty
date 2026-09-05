@@ -95,6 +95,40 @@ pub fn wrap_bracketed_paste(text: &str, enabled: bool) -> Vec<u8> {
     }
 }
 
+/// Explicit-copy shortcut: `Ctrl+Shift+C` everywhere, plus `Cmd+C` on macOS.
+pub fn is_copy_shortcut(logical_key: &Key, modifiers: &ModifiersState) -> bool {
+    let Key::Character(s) = logical_key else {
+        return false;
+    };
+    if s.to_ascii_lowercase() != "c" {
+        return false;
+    }
+    if modifiers.super_key() && !modifiers.control_key() && !modifiers.alt_key() {
+        return true;
+    }
+    modifiers.control_key()
+        && modifiers.shift_key()
+        && !modifiers.super_key()
+        && !modifiers.alt_key()
+}
+
+/// Explicit-paste shortcut: `Ctrl+Shift+V` everywhere, plus `Cmd+V` on macOS.
+pub fn is_paste_shortcut(logical_key: &Key, modifiers: &ModifiersState) -> bool {
+    let Key::Character(s) = logical_key else {
+        return false;
+    };
+    if s.to_ascii_lowercase() != "v" {
+        return false;
+    }
+    if modifiers.super_key() && !modifiers.control_key() && !modifiers.alt_key() {
+        return true;
+    }
+    modifiers.control_key()
+        && modifiers.shift_key()
+        && !modifiers.super_key()
+        && !modifiers.alt_key()
+}
+
 /// Map a winit KeyEvent to bytes to send to the PTY.
 pub fn key_to_bytes(event: &KeyEvent, modifiers: &ModifiersState) -> Option<Vec<u8>> {
     #[cfg(any(
@@ -196,5 +230,21 @@ mod tests {
             wrap_bracketed_paste("hi", true),
             b"\x1b[200~hi\x1b[201~".to_vec()
         );
+    }
+
+    #[test]
+    fn copy_paste_shortcuts() {
+        use winit::keyboard::ModifiersState;
+        let c: Key = Key::Character("c".into());
+        let v: Key = Key::Character("v".into());
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert!(is_copy_shortcut(&c, &ctrl_shift));
+        assert!(!is_copy_shortcut(&v, &ctrl_shift));
+        assert!(is_paste_shortcut(&v, &ctrl_shift));
+        assert!(!is_paste_shortcut(&c, &ctrl_shift));
+        assert!(!is_copy_shortcut(&c, &ModifiersState::CONTROL));
+        let cmd = ModifiersState::SUPER;
+        assert!(is_copy_shortcut(&c, &cmd));
+        assert!(is_paste_shortcut(&v, &cmd));
     }
 }

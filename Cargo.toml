@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+arboard = "3"
 winit = "0.30"
 wgpu = "30"
 egui = "0.36"

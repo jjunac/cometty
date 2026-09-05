@@ -190,6 +190,25 @@ impl Grid {
         self.scrollback.len()
     }
 
+    /// Total lines in global space: scrollback + visible.
+    #[allow(dead_code)]
+    pub fn total_lines(&self) -> usize {
+        self.scrollback.len() + self.rows
+    }
+
+    /// Chars of a global line (`0` = oldest scrollback). Returns `None`
+    /// when out of range. Used by selection text extraction.
+    pub fn global_line_chars(&self, global: usize) -> Option<Vec<char>> {
+        let sb = self.scrollback.len();
+        if global < sb {
+            Some(self.scrollback[global].iter().map(|c| c.ch).collect())
+        } else {
+            self.cells
+                .get(global - sb)
+                .map(|row| row.iter().map(|c| c.ch).collect())
+        }
+    }
+
     pub fn scroll_offset(&self) -> usize {
         self.scroll_offset.min(self.scrollback.len())
     }

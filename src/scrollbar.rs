@@ -57,6 +57,17 @@ pub fn offset_for_thumb_y(thumb_y: f32, track_h: f32, total: usize, visible: usi
     ((1.0 - frac) * max_offset).round() as usize
 }
 
+/// Hit-test the overlay strip in logical points.
+///
+/// True when `x_pts` falls inside the right-edge scrollbar track
+/// (including padding). Pure so it stays unit-testable; callers convert
+/// physical pixels to points before calling.
+pub fn hit_test(x_pts: f32, screen_w_pts: f32) -> bool {
+    x_pts.is_finite()
+        && screen_w_pts.is_finite()
+        && x_pts >= screen_w_pts - TRACK_WIDTH_POINTS - TRACK_PAD_POINTS
+}
+
 /// Fade/drag state owned by the app, painted by egui.
 pub struct ScrollbarUi {
     pub opacity: f32,
@@ -229,5 +240,15 @@ mod tests {
         ui.set_opacity_for_test(1.0, t0);
         ui.update(t0, 100, 40, 10, true, false);
         assert_eq!(ui.opacity, 0.0);
+    }
+
+    #[test]
+    fn hit_test_covers_track_strip_only() {
+        // 800pt wide screen: strip starts at 800 - 10 - 2 = 788.
+        assert!(!hit_test(500.0, 800.0));
+        assert!(!hit_test(787.9, 800.0));
+        assert!(hit_test(788.0, 800.0));
+        assert!(hit_test(799.9, 800.0));
+        assert!(!hit_test(f32::NAN, 800.0));
     }
 }
