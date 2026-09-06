@@ -38,9 +38,12 @@ impl App {
                 let cursor = grid.cursor();
                 let rows: Vec<Vec<grid::Cell>> = grid.view_rows().into_iter().cloned().collect();
                 let version = grid.version;
-                let effective_cursor = self.cursor_visible
-                    && tab.terminal.cursor_visible()
-                    && tab.terminal.scroll_offset() == 0;
+                let style = tab.terminal.cursor_style();
+                // Steady cursors (DECSCUSR 2/4/6) ignore the blink phase;
+                // blinking shapes follow `self.cursor_visible`.
+                let effective_cursor = tab.terminal.cursor_visible()
+                    && tab.terminal.scroll_offset() == 0
+                    && (!style.blinking || self.cursor_visible);
                 let total = grid.scrollback_len() + grid.rows();
                 let selection_view = tab.selection.as_ref().and_then(|sel| {
                     crate::selection::selection_to_view(
@@ -55,6 +58,7 @@ impl App {
                     cursor,
                     version,
                     effective_cursor,
+                    style.shape,
                     total,
                     grid.rows(),
                     tab.terminal.scroll_offset(),
@@ -69,6 +73,7 @@ impl App {
             cursor,
             version,
             effective_cursor,
+            cursor_shape,
             total,
             visible,
             offset,
@@ -78,6 +83,8 @@ impl App {
         else {
             return;
         };
+        // Keep the OS chrome in sync with the active tab's OSC title.
+        self.sync_window_title();
         // Owned: the overlay borrows titles while also taking
         // `&mut` to the active tab's scrollbar.
         let titles = self.tab_titles();
@@ -93,8 +100,11 @@ impl App {
             };
             match renderer.render(
                 &rows,
-                (cursor.x, cursor.y),
-                effective_cursor,
+                renderer::CursorCtx {
+                    pos: (cursor.x, cursor.y),
+                    visible: effective_cursor,
+                    shape: cursor_shape,
+                },
                 version,
                 selection_view,
                 renderer::ScrollCtx {

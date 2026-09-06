@@ -50,6 +50,14 @@ pub struct ScrollCtx<'a> {
     pub active_tab: usize,
 }
 
+/// Cursor input for [`Renderer::render`]: position + visibility + shape.
+/// Grouped so `render` stays under the clippy arg limit.
+pub struct CursorCtx {
+    pub pos: (usize, usize),
+    pub visible: bool,
+    pub shape: crate::grid::CursorShape,
+}
+
 /// [`Renderer::render`] output: scrollbar scrolling plus tab-strip actions
 /// the app applies after the frame (switch/close/new).
 pub struct RenderOutput {
@@ -407,8 +415,7 @@ impl Renderer {
     pub fn render(
         &mut self,
         grid_rows: &[Vec<Cell>],
-        cursor: (usize, usize),
-        cursor_visible: bool,
+        cursor: CursorCtx,
         grid_version: u64,
         selection: Option<((usize, usize), (usize, usize))>,
         scroll: ScrollCtx<'_>,
@@ -419,7 +426,14 @@ impl Renderer {
         }
 
         let tab_count = scroll.tab_titles.len();
-        let vert_count = self.paint_bg(grid_rows, cursor, cursor_visible, selection, tab_count);
+        let vert_count = self.paint_bg(
+            grid_rows,
+            cursor.pos,
+            cursor.visible,
+            cursor.shape,
+            selection,
+            tab_count,
+        );
         let overlay::OverlayOutput {
             scroll_to,
             selected_tab,

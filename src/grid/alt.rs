@@ -1,12 +1,13 @@
 //! Alt-screen buffer + mode flags (cursor visibility, bracketed paste).
 
 use super::Grid;
-use super::cell::Cursor;
+use super::cell::{Cursor, CursorStyle};
 
 impl Grid {
     pub fn save_cursor(&mut self) {
         self.saved_cursor = Some(self.cursor);
         self.saved_pen = Some(self.pen);
+        self.saved_style = Some(self.cursor_style);
     }
 
     pub fn restore_cursor(&mut self) {
@@ -18,6 +19,11 @@ impl Grid {
         }
         if let Some(p) = self.saved_pen {
             self.pen = p;
+        }
+        if let Some(s) = self.saved_style
+            && self.cursor_style != s
+        {
+            self.cursor_style = s;
         }
         self.bump();
     }
@@ -50,6 +56,17 @@ impl Grid {
         }
     }
 
+    pub fn cursor_style(&self) -> CursorStyle {
+        self.cursor_style
+    }
+
+    pub fn set_cursor_style(&mut self, style: CursorStyle) {
+        if self.cursor_style != style {
+            self.cursor_style = style;
+            self.bump();
+        }
+    }
+
     pub fn enter_alt(&mut self, clear: bool) {
         if self.in_alt {
             if clear {
@@ -62,10 +79,12 @@ impl Grid {
         self.saved_main_cursor = Some(self.cursor);
         self.saved_main_saved_cursor = self.saved_cursor;
         self.saved_main_saved_pen = self.saved_pen;
+        self.saved_main_saved_style = self.saved_style;
         self.cells = vec![self.blank_row(); self.rows];
         self.cursor = Cursor { x: 0, y: 0 };
         self.saved_cursor = None;
         self.saved_pen = None;
+        self.saved_style = None;
         self.in_alt = true;
         self.scroll_offset = 0;
         if !clear {
@@ -91,6 +110,7 @@ impl Grid {
         }
         self.saved_cursor = self.saved_main_saved_cursor.take();
         self.saved_pen = self.saved_main_saved_pen.take();
+        self.saved_style = self.saved_main_saved_style.take();
         self.in_alt = false;
         self.scroll_offset = 0;
         self.bump();

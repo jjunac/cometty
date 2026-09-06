@@ -1,6 +1,6 @@
 use vte::{Params, Parser};
 
-use crate::grid::Grid;
+use crate::grid::{CursorShape, CursorStyle, Grid};
 use crate::theme::Theme;
 
 pub struct Terminal {
@@ -85,6 +85,10 @@ impl Terminal {
 
     pub fn cursor_visible(&self) -> bool {
         self.grid.cursor_enabled()
+    }
+
+    pub fn cursor_style(&self) -> CursorStyle {
+        self.grid.cursor_style()
     }
 
     #[allow(dead_code)]
@@ -184,6 +188,37 @@ impl Terminal {
             _ => {}
         }
     }
+
+    fn set_cursor_style(&mut self, ps: u16) {
+        let style = match ps {
+            0 | 1 => CursorStyle {
+                shape: CursorShape::Block,
+                blinking: true,
+            },
+            2 => CursorStyle {
+                shape: CursorShape::Block,
+                blinking: false,
+            },
+            3 => CursorStyle {
+                shape: CursorShape::Underline,
+                blinking: true,
+            },
+            4 => CursorStyle {
+                shape: CursorShape::Underline,
+                blinking: false,
+            },
+            5 => CursorStyle {
+                shape: CursorShape::Bar,
+                blinking: true,
+            },
+            6 => CursorStyle {
+                shape: CursorShape::Bar,
+                blinking: false,
+            },
+            _ => return,
+        };
+        self.grid.set_cursor_style(style);
+    }
 }
 
 impl vte::Perform for Terminal {
@@ -227,6 +262,10 @@ impl vte::Perform for Terminal {
                 for mode in Self::params_flat(params) {
                     self.set_private_mode(mode, set);
                 }
+            } else if intermediates == [b' '] && action == 'q' {
+                // DECSCUSR: `CSI Ps SP q` cursor shape + blink.
+                self.pending_wrap = false;
+                self.set_cursor_style(Self::param_or(params, 0, 0));
             }
             return;
         }
@@ -329,6 +368,7 @@ impl vte::Perform for Terminal {
                     self.grid.exit_alt();
                     self.grid.set_cursor_enabled(true);
                     self.grid.set_bracketed_paste(false);
+                    self.grid.set_cursor_style(CursorStyle::default());
                     self.grid.clear_all();
                     self.grid.set_cursor(0, 0);
                     self.grid.sgr(&[0]);
@@ -552,5 +592,66 @@ mod tests {
             Some("split;title".to_string())
         );
         assert_eq!(osc_title(&[b"0"]), None);
+    }
+
+    #[test]
+    fn sgr_underline_is_stored_on_cells() {
+        use crate::grid::{CursorShape, CursorStyle};
+        let mut t = test_terminal(5, 2);
+        feed_str(&mut t, "\x1b[4mU\x1b[24mN");
+        assert!(t.grid().cell(0, 0).unwrap().underline);
+        assert!(!t.grid().cell(1, 0).unwrap().underline);
+        // Default cursor style is blinking block.
+        assert_eq!(t.cursor_style(), CursorStyle::default());
+        assert_eq!(
+            t.cursor_style(),
+            CursorStyle {
+                shape: CursorShape::Block,
+                blinking: true,
+            }
+        );
+    }
+
+    #[test]
+    fn decscusr_sets_shape_and_blink() {
+        use crate::grid::CursorShape;
+        let mut t = test_terminal(5, 2);
+        feed_str(&mut t, "\x1b[0 q");
+        assert_eq!(t.cursor_style().shape, CursorShape::Block);
+        assert!(t.cursor_style().blinking);
+        feed_str(&mut t, "\x1b[2 q");
+        assert_eq!(t.cursor_style().shape, CursorShape::Block);
+        assert!(!t.cursor_style().blinking);
+        feed_str(&mut t, "\x1b[3 q");
+        assert_eq!(t.cursor_style().shape, CursorShape::Underline);
+        assert!(t.cursor_style().blinking);
+        feed_str(&mut t, "\x1b[4 q");
+        assert_eq!(t.cursor_style().shape, CursorShape::Underline);
+        assert!(!t.cursor_style().blinking);
+        feed_str(&mut t, "\x1b[5 q");
+        assert_eq!(t.cursor_style().shape, CursorShape::Bar);
+        assert!(t.cursor_style().blinking);
+        feed_str(&mut t, "\x1b[6 q");
+        assert_eq!(t.cursor_style().shape, CursorShape::Bar);
+        assert!(!t.cursor_style().blinking);
+        // Unknown Ps is ignored, keeping the previous style.
+        feed_str(&mut t, "\x1b[9 q");
+        assert_eq!(t.cursor_style().shape, CursorShape::Bar);
+        assert!(!t.cursor_style().blinking);
+    }
+
+    #[test]
+    fn decscusr_save_restore_and_reset() {
+        use crate::grid::CursorShape;
+        let mut t = test_terminal(5, 2);
+        feed_str(&mut t, "\x1b[5 q");
+        feed_str(&mut t, "\x1b7");
+        feed_str(&mut t, "\x1b[3 q");
+        assert_eq!(t.cursor_style().shape, CursorShape::Underline);
+        feed_str(&mut t, "\x1b8");
+        assert_eq!(t.cursor_style().shape, CursorShape::Bar);
+        // Full reset restores blinking block.
+        feed_str(&mut t, "\x1bc");
+        assert_eq!(t.cursor_style(), crate::grid::CursorStyle::default());
     }
 }

@@ -32,6 +32,32 @@ pub struct Cursor {
     pub y: usize,
 }
 
+/// DECSCUSR cursor shape (`CSI Ps SP q`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CursorShape {
+    #[default]
+    Block,
+    Underline,
+    Bar,
+}
+
+/// DECSCUSR cursor style: shape + blink phase.
+/// `blinking == true` follows the app blink timer; `false` is steady.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorStyle {
+    pub shape: CursorShape,
+    pub blinking: bool,
+}
+
+impl Default for CursorStyle {
+    fn default() -> Self {
+        Self {
+            shape: CursorShape::Block,
+            blinking: true,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pen {
     pub fg: Rgb,

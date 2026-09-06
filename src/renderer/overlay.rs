@@ -76,7 +76,7 @@ impl Renderer {
                     ui.painter().rect_filled(
                         container_rect,
                         egui::CornerRadius::same(crate::tabbar::BAR_CORNER_RADIUS_POINTS),
-                        theme.tab_bar_bg.as_egui_color(),
+                        theme.background.as_egui_color(),
                     );
                     let tab_count = tab_titles.len();
                     let tab_w = crate::tabbar::tab_width(container_w, tab_count);
@@ -263,7 +263,7 @@ impl Renderer {
                                     if plus_hovered {
                                         active_bg
                                     } else {
-                                        theme.tab_bar_bg.as_egui_color()
+                                        theme.background.as_egui_color()
                                     },
                                 );
                                 plus_painter.circle_stroke(

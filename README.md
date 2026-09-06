@@ -20,14 +20,14 @@ cargo fmt --check
 - [x] SGR: bold, 16 + bright colors, `38;5` / `48;5`, `38;2` / `48;2` truecolor
 - [x] Grid: scrollback buffer (10k lines, stored), insert/delete lines, erase display/line
 - [x] Input: text passthrough, Enter → `\r`, Backspace → `0x7F`, Esc, arrows, Home/End/PgUp/PgDn/Ins/Del, Ctrl+letter, Ctrl+Space
-- [x] Rendering: per-cell fg/bold + bg quads, block cursor + blink, version-cache to skip rebuild, surface-loss recovery
+- [x] Rendering: per-cell fg/bold/underline + bg quads, cursor shapes (block/underline/bar) + blink, version-cache to skip rebuild, surface-loss recovery
 - [x] Themes (`tokyo-night` default, `vscode`, `tomorrow-night`) via `--theme NAME` / `--list-themes`
 - [x] Alt screen (`?1049h/l`) + DECSET/DECRST (`?25`, `?2004`, …) for `vim` / `less` / `htop`
 - [x] Scrollback viewing (Shift+PgUp/Dn = page-minus-1, Shift+Home/End = top/bottom, mouse wheel)
 - [X] Scrollbar UI (no graphical scrollbar; use keys/wheel above)
 - [x] Selection + copy/paste (mouse drag + double-click word, Ctrl+Shift+C/V, bracketed paste)
 - [x] Tabs (Ctrl+T / Cmd+T, Ghostty-style strip hidden for 1 tab: inset pill, equal-width tabs down to min then scroll, click to switch, hover × on left to close, + for new, ⌘1-9 hints, OSC title labels)
-- [ ] Underline rendering (parsed, not drawn), cursor visibility / shape (`?25`, `DECSCUSR`), window title (OSC)
+- [x] Underline rendering + cursor shape (`?25`, `DECSCUSR` block/underline/bar, steady/blink) + window title (OSC `0/1/2`)
 - [ ] Consistent erase semantics (`ED 0` vs others)
 - [ ] Full keyboard: F1–F12, Ctrl/Shift+arrows, Alt+key → `ESC` prefix, keypad
 - [ ] Unicode: double-width / emoji / combining chars

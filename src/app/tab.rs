@@ -85,6 +85,17 @@ pub fn display_title(index: usize, osc_title: &str) -> String {
     format!("{kept}…")
 }
 
+/// OS window title for the active tab: the shell's OSC title when set,
+/// otherwise the app name. Tab-bar labels fall back to `Tab N`, but the
+/// window chrome keeps the stable `cometty` brand when the shell is quiet.
+pub fn window_title_for(osc_title: &str) -> &str {
+    if osc_title.is_empty() {
+        "cometty"
+    } else {
+        osc_title
+    }
+}
+
 impl App {
     pub(crate) fn active_tab(&self) -> Option<&Tab> {
         self.tabs.get(self.active)
@@ -101,6 +112,22 @@ impl App {
             .enumerate()
             .map(|(i, t)| display_title(i, t.terminal.title()))
             .collect()
+    }
+
+    /// Push the active tab's OSC title to the OS window chrome.
+    /// No-op when unchanged or when the window isn't ready yet.
+    pub(crate) fn sync_window_title(&mut self) {
+        let desired = self
+            .active_tab()
+            .map(|t| window_title_for(t.terminal.title()).to_string())
+            .unwrap_or_else(|| "cometty".to_string());
+        if desired == self.window_title {
+            return;
+        }
+        self.window_title = desired.clone();
+        if let Some(w) = self.window.as_ref() {
+            w.set_title(&desired);
+        }
     }
 
     fn waker(&self) -> impl Fn() + Send + 'static {
@@ -303,5 +330,11 @@ mod tests {
         }
         assert_eq!(term_height_px(10, 1.0, 2), 1);
         assert_eq!(term_height_px(0, 1.0, 2), 1);
+    }
+
+    #[test]
+    fn window_title_falls_back_to_app_name() {
+        assert_eq!(window_title_for(""), "cometty");
+        assert_eq!(window_title_for("nvim | ~/dev"), "nvim | ~/dev");
     }
 }

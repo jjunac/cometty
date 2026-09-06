@@ -50,6 +50,7 @@ pub struct App {
     pub(crate) cursor_pos: Option<(f32, f32)>,
     pub(crate) last_click: Option<(Instant, (usize, usize))>,
     pub(crate) clipboard: Option<arboard::Clipboard>,
+    pub(crate) window_title: String,
 }
 
 impl App {
@@ -71,6 +72,7 @@ impl App {
             cursor_pos: None,
             last_click: None,
             clipboard: None,
+            window_title: String::from("cometty"),
         }
     }
 }

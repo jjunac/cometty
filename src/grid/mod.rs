@@ -4,7 +4,7 @@ mod edit;
 mod scroll;
 mod style;
 
-pub use cell::{Cell, Cursor, Pen};
+pub use cell::{Cell, Cursor, CursorShape, CursorStyle, Pen};
 
 use std::collections::VecDeque;
 
@@ -30,6 +30,9 @@ pub struct Grid {
     cursor_enabled: bool,
     bracketed_paste: bool,
     scroll_offset: usize,
+    cursor_style: CursorStyle,
+    saved_style: Option<CursorStyle>,
+    saved_main_saved_style: Option<CursorStyle>,
 }
 
 impl Grid {
@@ -68,6 +71,9 @@ impl Grid {
             cursor_enabled: true,
             bracketed_paste: false,
             scroll_offset: 0,
+            cursor_style: CursorStyle::default(),
+            saved_style: None,
+            saved_main_saved_style: None,
         }
     }
 
@@ -329,5 +335,53 @@ mod tests {
         g.erase_in_display(3);
         assert_eq!(g.scrollback_len(), 0);
         assert_eq!(g.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn cursor_style_save_restore_across_alt() {
+        use super::cell::{CursorShape, CursorStyle};
+        let mut g = Grid::new(2, 2, test_theme());
+        assert_eq!(g.cursor_style(), CursorStyle::default());
+        g.set_cursor_style(CursorStyle {
+            shape: CursorShape::Bar,
+            blinking: false,
+        });
+        g.save_cursor();
+        g.set_cursor_style(CursorStyle {
+            shape: CursorShape::Underline,
+            blinking: true,
+        });
+        g.restore_cursor();
+        assert_eq!(
+            g.cursor_style(),
+            CursorStyle {
+                shape: CursorShape::Bar,
+                blinking: false,
+            }
+        );
+        // Style persists across alt; saved state is isolated per buffer.
+        g.save_cursor();
+        g.enter_alt(true);
+        assert_eq!(
+            g.cursor_style(),
+            CursorStyle {
+                shape: CursorShape::Bar,
+                blinking: false,
+            }
+        );
+        g.set_cursor_style(CursorStyle {
+            shape: CursorShape::Block,
+            blinking: true,
+        });
+        g.exit_alt();
+        // Exiting restores the main saved state, not the alt edit.
+        g.restore_cursor();
+        assert_eq!(
+            g.cursor_style(),
+            CursorStyle {
+                shape: CursorShape::Bar,
+                blinking: false,
+            }
+        );
     }
 }
