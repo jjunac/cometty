@@ -8,6 +8,47 @@ pub struct Terminal {
     parser: Parser,
     // Pending wrap: true when cursor is past right margin and next printable should wrap first.
     pending_wrap: bool,
+    // Last OSC 0/1/2 title set by the shell; empty when none seen.
+    // Drives tab-bar labels (falls back to `Tab N`).
+    title: String,
+}
+
+/// Maximum stored OSC title length (chars) so a runaway escape can't
+/// grow memory without bound; the tab bar truncates further anyway.
+const MAX_TITLE_CHARS: usize = 256;
+
+/// Extract an `OSC 0/1/2` window-title update from vte's split params.
+///
+/// vte splits OSC content on `;`, so `ESC ] 0 ; foo BEL` arrives as
+/// `[b"0", b"foo"]` and a title containing `;` arrives as extra pieces
+/// (`[b"0", b"a", b"b"]` for `a;b`). A single unsplit param (`[b"0;foo"]`)
+/// is handled too for robustness.
+fn osc_title(params: &[&[u8]]) -> Option<String> {
+    let (num, rest) = match params {
+        [] => return None,
+        [single] => match single.iter().position(|&b| b == b';') {
+            Some(i) => (&single[..i], vec![&single[i + 1..]]),
+            None => return None,
+        },
+        [first, rest @ ..] => (*first, rest.to_vec()),
+    };
+    if num != b"0" && num != b"1" && num != b"2" {
+        return None;
+    }
+    if rest.is_empty() {
+        return Some(String::new());
+    }
+    // Rejoin multi-`;` titles split by the parser.
+    let mut bytes = Vec::new();
+    for (i, piece) in rest.iter().enumerate() {
+        if i > 0 {
+            bytes.push(b';');
+        }
+        bytes.extend_from_slice(piece);
+    }
+    let s = String::from_utf8_lossy(&bytes).trim().to_string();
+    let truncated: String = s.chars().take(MAX_TITLE_CHARS).collect();
+    Some(truncated)
 }
 
 impl Terminal {
@@ -16,7 +57,13 @@ impl Terminal {
             grid: Grid::new(cols, rows, theme),
             parser: Parser::new(),
             pending_wrap: false,
+            title: String::new(),
         }
+    }
+
+    /// Last `OSC 0/1/2` title reported by the shell, or empty.
+    pub fn title(&self) -> &str {
+        &self.title
     }
 
     #[allow(dead_code)]
@@ -285,6 +332,7 @@ impl vte::Perform for Terminal {
                     self.grid.clear_all();
                     self.grid.set_cursor(0, 0);
                     self.grid.sgr(&[0]);
+                    self.title.clear();
                 }
                 _ => {}
             }
@@ -293,8 +341,11 @@ impl vte::Perform for Terminal {
 
     fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
 
-    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {
-        // Ignore window title etc. for v1.
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        // Only window/icon titles (0/1/2) are tracked; they feed tab labels.
+        if let Some(title) = osc_title(params) {
+            self.title = title;
+        }
     }
 }
 
@@ -466,5 +517,40 @@ mod tests {
         feed_str(&mut t, "\x1b[38;5mX\x1b[38;2;10mY\x1b[48mZ");
         assert_eq!(t.grid().pen(), before);
         assert_eq!(t.grid().cell(0, 0).unwrap().ch, 'X');
+    }
+
+    #[test]
+    fn osc_title_is_stored_for_tab_labels() {
+        let mut t = test_terminal(10, 2);
+        assert_eq!(t.title(), "");
+        feed_str(&mut t, "\x1b]0;nvim | ~/dev\x07");
+        assert_eq!(t.title(), "nvim | ~/dev");
+        // Icon title (1) and window title (2) also update.
+        feed_str(&mut t, "\x1b]2;second\x07");
+        assert_eq!(t.title(), "second");
+        // Titles containing ';' survive vte's param splitting.
+        feed_str(&mut t, "\x1b]0;a;b\x07");
+        assert_eq!(t.title(), "a;b");
+    }
+
+    #[test]
+    fn osc_non_title_is_ignored() {
+        let mut t = test_terminal(10, 2);
+        feed_str(&mut t, "\x1b]0;kept\x07");
+        // OSC 4 (palette) must not clobber the title.
+        feed_str(&mut t, "\x1b]4;1;red\x07");
+        assert_eq!(t.title(), "kept");
+    }
+
+    #[test]
+    fn osc_title_parser_shapes() {
+        assert_eq!(osc_title(&[]), None);
+        assert_eq!(osc_title(&[b"4", b"1;red"]), None);
+        assert_eq!(osc_title(&[b"0", b"hi"]), Some("hi".to_string()));
+        assert_eq!(
+            osc_title(&[b"2;split;title"]),
+            Some("split;title".to_string())
+        );
+        assert_eq!(osc_title(&[b"0"]), None);
     }
 }

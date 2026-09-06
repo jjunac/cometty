@@ -129,6 +129,23 @@ pub fn is_paste_shortcut(logical_key: &Key, modifiers: &ModifiersState) -> bool 
         && !modifiers.alt_key()
 }
 
+/// New-tab shortcut: `Ctrl+T` everywhere, plus `Cmd+T` on macOS.
+/// Shift is excluded so `Ctrl+Shift+T` stays free for a future
+/// reopen-closed-tab binding. Consumed locally, never reaches the PTY.
+pub fn is_new_tab_shortcut(logical_key: &Key, modifiers: &ModifiersState) -> bool {
+    let Key::Character(s) = logical_key else {
+        return false;
+    };
+    if s.to_ascii_lowercase() != "t" {
+        return false;
+    }
+    if modifiers.shift_key() || modifiers.alt_key() {
+        return false;
+    }
+    // Exactly one of Ctrl / Super.
+    modifiers.control_key() != modifiers.super_key()
+}
+
 /// Map a winit KeyEvent to bytes to send to the PTY.
 pub fn key_to_bytes(event: &KeyEvent, modifiers: &ModifiersState) -> Option<Vec<u8>> {
     #[cfg(any(
@@ -246,5 +263,32 @@ mod tests {
         let cmd = ModifiersState::SUPER;
         assert!(is_copy_shortcut(&c, &cmd));
         assert!(is_paste_shortcut(&v, &cmd));
+    }
+
+    #[test]
+    fn new_tab_shortcut() {
+        use winit::keyboard::ModifiersState;
+        let t: Key = Key::Character("t".into());
+        let t_upper: Key = Key::Character("T".into());
+        let c: Key = Key::Character("c".into());
+        assert!(is_new_tab_shortcut(&t, &ModifiersState::CONTROL));
+        assert!(is_new_tab_shortcut(&t, &ModifiersState::SUPER));
+        assert!(is_new_tab_shortcut(&t_upper, &ModifiersState::CONTROL));
+        assert!(!is_new_tab_shortcut(&c, &ModifiersState::CONTROL));
+        assert!(!is_new_tab_shortcut(&t, &ModifiersState::empty()));
+        // Shift / Alt variants stay free for future bindings.
+        assert!(!is_new_tab_shortcut(
+            &t,
+            &(ModifiersState::CONTROL | ModifiersState::SHIFT)
+        ));
+        assert!(!is_new_tab_shortcut(
+            &t,
+            &(ModifiersState::CONTROL | ModifiersState::ALT)
+        ));
+        // Both modifiers at once is not a tab shortcut.
+        assert!(!is_new_tab_shortcut(
+            &t,
+            &(ModifiersState::CONTROL | ModifiersState::SUPER)
+        ));
     }
 }

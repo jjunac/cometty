@@ -1,4 +1,4 @@
-//! Keyboard handling (copy/paste shortcuts, local scroll, PTY send).
+//! Keyboard handling (copy/paste shortcuts, new tab, local scroll, PTY send).
 
 use winit::event::ElementState;
 use winit::keyboard::{Key, NamedKey};
@@ -25,6 +25,11 @@ impl App {
                 self.paste_from_clipboard();
                 return true;
             }
+            // New tab never reaches the PTY either.
+            if crate::input::is_new_tab_shortcut(&event.logical_key, &self.modifiers) {
+                self.spawn_tab_for_window();
+                return true;
+            }
         }
         // Shift+PgUp/PgDn/Home/End scrolls locally instead of sending to the PTY.
         if event.state == ElementState::Pressed
@@ -34,25 +39,23 @@ impl App {
             let handled = match named {
                 NamedKey::PageUp => {
                     let page = self
-                        .terminal
-                        .as_ref()
-                        .map(|t| t.rows().saturating_sub(1).max(1) as isize)
+                        .active_tab()
+                        .map(|t| t.terminal.rows().saturating_sub(1).max(1) as isize)
                         .unwrap_or(1);
                     self.scroll_terminal(page);
                     true
                 }
                 NamedKey::PageDown => {
                     let page = self
-                        .terminal
-                        .as_ref()
-                        .map(|t| t.rows().saturating_sub(1).max(1) as isize)
+                        .active_tab()
+                        .map(|t| t.terminal.rows().saturating_sub(1).max(1) as isize)
                         .unwrap_or(1);
                     self.scroll_terminal(-page);
                     true
                 }
                 NamedKey::Home => {
-                    if let Some(t) = self.terminal.as_mut()
-                        && t.scroll_to_top()
+                    if let Some(t) = self.active_tab_mut()
+                        && t.terminal.scroll_to_top()
                         && let Some(w) = self.window.as_ref()
                     {
                         w.request_redraw();
@@ -60,8 +63,8 @@ impl App {
                     true
                 }
                 NamedKey::End => {
-                    if let Some(t) = self.terminal.as_mut()
-                        && t.scroll_to_bottom()
+                    if let Some(t) = self.active_tab_mut()
+                        && t.terminal.scroll_to_bottom()
                         && let Some(w) = self.window.as_ref()
                     {
                         w.request_redraw();
@@ -74,12 +77,12 @@ impl App {
                 return true;
             }
         }
-        // Regular keys go to the PTY.
+        // Regular keys go to the active tab's PTY.
         if event.state == ElementState::Pressed
             && let Some(bytes) = crate::input::key_to_bytes(event, &self.modifiers)
-            && let Some(p) = self.pty.as_ref()
+            && let Some(tab) = self.active_tab()
         {
-            p.write(bytes);
+            tab.pty.write(bytes);
         }
         true
     }

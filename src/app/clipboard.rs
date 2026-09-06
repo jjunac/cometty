@@ -4,12 +4,15 @@ use super::App;
 
 impl App {
     pub(crate) fn copy_selection(&mut self) {
-        let text = match (self.terminal.as_ref(), self.selection.as_ref()) {
-            (Some(t), Some(sel)) => {
-                let grid = t.grid();
-                crate::selection::extract_text(sel, |g| grid.global_line_chars(g))
-            }
-            _ => None,
+        let text = {
+            let Some(tab) = self.active_tab() else {
+                return;
+            };
+            let Some(sel) = tab.selection.as_ref() else {
+                return;
+            };
+            let grid = tab.terminal.grid();
+            crate::selection::extract_text(sel, |g| grid.global_line_chars(g))
         };
         let Some(text) = text else { return };
         if text.is_empty() {
@@ -48,10 +51,12 @@ impl App {
             .replace("\r\n", "\n")
             .replace('\r', "\n")
             .replace('\n', "\r");
-        let enabled = self.terminal.as_ref().is_some_and(|t| t.bracketed_paste());
+        let enabled = self
+            .active_tab()
+            .is_some_and(|t| t.terminal.bracketed_paste());
         let bytes = crate::input::wrap_bracketed_paste(&normalized, enabled);
-        if let Some(p) = self.pty.as_ref() {
-            p.write(bytes);
+        if let Some(tab) = self.active_tab() {
+            tab.pty.write(bytes);
         }
     }
 }

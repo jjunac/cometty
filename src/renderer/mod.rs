@@ -18,6 +18,10 @@ use crate::theme::Theme;
 /// physical pixels, so text looks the same size on 1x and 2x displays.
 const BASE_FONT_SIZE_LOGICAL: f32 = 14.0;
 
+/// Tab-bar height in logical points. The terminal grid is laid out in the
+/// window area below it; all glyphon/GL coordinates add the scaled offset.
+pub const TAB_BAR_HEIGHT_POINTS: f32 = 32.0;
+
 pub(crate) fn scaled_metrics(base: f32, scale: f32) -> (f32, f32, f32) {
     let s = if scale.is_finite() && scale > 0.0 {
         scale
@@ -33,9 +37,8 @@ pub(crate) fn clamp_surface_size(width: u32, height: u32, max_dim: u32) -> (u32,
     (width.max(1).min(max_dim), height.max(1).min(max_dim))
 }
 
-/// egui chrome input for [`Renderer::render`]: overlay scrollbar only.
-/// Grouped so `render` stays under the clippy arg limit and future
-/// tab-strip rects can join without growing the signature.
+/// egui chrome input for [`Renderer::render`]: tab strip + overlay scrollbar.
+/// Grouped so `render` stays under the clippy arg limit.
 pub struct ScrollCtx<'a> {
     pub window: &'a winit::window::Window,
     pub ui: &'a mut crate::scrollbar::ScrollbarUi,
@@ -43,6 +46,17 @@ pub struct ScrollCtx<'a> {
     pub visible: usize,
     pub offset: usize,
     pub is_alt: bool,
+    pub tab_titles: &'a [String],
+    pub active_tab: usize,
+}
+
+/// [`Renderer::render`] output: scrollbar scrolling plus tab-strip actions
+/// the app applies after the frame (switch/close/new).
+pub struct RenderOutput {
+    pub scroll_to: Option<usize>,
+    pub selected_tab: Option<usize>,
+    pub close_tab: Option<usize>,
+    pub new_tab: bool,
 }
 
 pub struct Renderer {
@@ -329,11 +343,51 @@ impl Renderer {
         ((height as f32 / self.line_height).floor() as usize).max(1)
     }
 
-    /// Map physical pixels to a visible `(col, row)` cell.
+    /// Current DPI scale factor (for tab-bar / grid-size math in `App`).
+    pub fn scale_factor(&self) -> f32 {
+        self.scale_factor
+    }
+
+    /// Tab-bar height in physical pixels at the current scale.
+    pub fn tab_bar_px(&self) -> f32 {
+        crate::app::tab::tab_bar_px(self.scale_factor)
+    }
+
+    /// Forget the cached grid version so the next `render` reshapes text.
+    /// Required on tab switch: two tabs can share a version counter while
+    /// holding different content.
+    pub fn invalidate(&mut self) {
+        self.last_grid_version = u64::MAX;
+    }
+
+    /// Rows available to the terminal grid (window minus tab bar).
+    pub fn term_rows(&self) -> usize {
+        let h = (self.height as f32 - self.tab_bar_px()).max(1.0) as u32;
+        self.rows_for_height(h)
+    }
+
+    /// Map physical pixels to a visible `(col, row)` cell in the terminal
+    /// area. Returns `None` on the tab bar or outside the grid.
     pub fn cell_at_pos(&self, x: f32, y: f32) -> Option<(usize, usize)> {
+        let tab_bar = self.tab_bar_px();
+        if y < tab_bar {
+            return None;
+        }
         let cols = self.cols_for_width(self.width);
-        let rows = self.rows_for_height(self.height);
-        crate::selection::cell_at_pos(x, y, self.cell_width, self.line_height, cols, rows)
+        let rows = self.term_rows();
+        crate::selection::cell_at_pos(
+            x,
+            y - tab_bar,
+            self.cell_width,
+            self.line_height,
+            cols,
+            rows,
+        )
+    }
+
+    /// True when physical `y` falls on the tab-bar chrome.
+    pub fn over_tab_bar(&self, y_phys: f32) -> bool {
+        y_phys.is_finite() && y_phys < self.tab_bar_px()
     }
 
     /// True when physical `x` falls on the overlay scrollbar strip.
@@ -356,7 +410,7 @@ impl Renderer {
         grid_version: u64,
         selection: Option<((usize, usize), (usize, usize))>,
         scroll: ScrollCtx<'_>,
-    ) -> anyhow::Result<Option<usize>> {
+    ) -> anyhow::Result<RenderOutput> {
         if grid_version != self.last_grid_version {
             self.rebuild_buffer(grid_rows);
             self.last_grid_version = grid_version;
@@ -365,22 +419,32 @@ impl Renderer {
         let vert_count = self.paint_bg(grid_rows, cursor, cursor_visible, selection);
         let overlay::OverlayOutput {
             scroll_to,
+            selected_tab,
+            close_tab,
+            new_tab,
             paint_jobs,
             screen_descriptor,
         } = self.paint_overlay(scroll);
+
+        let out = RenderOutput {
+            scroll_to,
+            selected_tab,
+            close_tab,
+            new_tab,
+        };
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return Ok(scroll_to);
+                return Ok(out);
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
-                return Ok(scroll_to);
+                return Ok(out);
             }
             wgpu::CurrentSurfaceTexture::Validation => {
-                return Ok(scroll_to);
+                return Ok(out);
             }
         };
         let view = frame
@@ -390,7 +454,7 @@ impl Renderer {
         let text_areas = [TextArea {
             buffer: &self.buffer,
             left: 0.0,
-            top: 0.0,
+            top: self.tab_bar_px(),
             scale: 1.0,
             bounds: TextBounds {
                 left: 0,
@@ -460,7 +524,7 @@ impl Renderer {
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
         self.atlas.trim();
-        Ok(scroll_to)
+        Ok(out)
     }
 }
 

@@ -11,8 +11,10 @@ pub mod mouse;
 pub mod pty_io;
 pub mod redraw;
 pub mod selection_view;
+pub mod tab;
 
 pub use geometry::compute_grid_size;
+pub use tab::Tab;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,11 +22,7 @@ use std::time::Instant;
 use winit::keyboard::ModifiersState;
 use winit::window::Window;
 
-use crate::pty::PtySession;
 use crate::renderer::Renderer;
-use crate::scrollbar::ScrollbarUi;
-use crate::selection::Selection;
-use crate::term::Terminal;
 use crate::theme::Theme;
 
 /// Double-click threshold for word selection.
@@ -38,8 +36,8 @@ pub enum UserEvent {
 pub struct App {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) renderer: Option<Renderer>,
-    pub(crate) terminal: Option<Terminal>,
-    pub(crate) pty: Option<PtySession>,
+    pub(crate) tabs: Vec<Tab>,
+    pub(crate) active: usize,
     pub(crate) proxy: Option<winit::event_loop::EventLoopProxy<UserEvent>>,
     pub(crate) theme: Theme,
     pub(crate) modifiers: ModifiersState,
@@ -48,14 +46,10 @@ pub struct App {
     pub(crate) pending_resize: Option<(u32, u32)>,
     pub(crate) pending_scale: Option<f32>,
     pub(crate) wheel_accum: f64,
-    pub(crate) scrollbar: ScrollbarUi,
     pub(crate) exited: bool,
-    pub(crate) selection: Option<Selection>,
-    pub(crate) selecting: bool,
     pub(crate) cursor_pos: Option<(f32, f32)>,
     pub(crate) last_click: Option<(Instant, (usize, usize))>,
     pub(crate) clipboard: Option<arboard::Clipboard>,
-    pub(crate) is_alt: bool,
 }
 
 impl App {
@@ -63,8 +57,8 @@ impl App {
         Self {
             window: None,
             renderer: None,
-            terminal: None,
-            pty: None,
+            tabs: Vec::new(),
+            active: 0,
             proxy,
             theme,
             modifiers: ModifiersState::empty(),
@@ -73,14 +67,10 @@ impl App {
             pending_resize: None,
             pending_scale: None,
             wheel_accum: 0.0,
-            scrollbar: ScrollbarUi::new(Instant::now()),
             exited: false,
-            selection: None,
-            selecting: false,
             cursor_pos: None,
             last_click: None,
             clipboard: None,
-            is_alt: false,
         }
     }
 }

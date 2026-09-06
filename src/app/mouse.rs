@@ -10,13 +10,22 @@ use crate::selection::{CellPos, Selection};
 impl App {
     pub(crate) fn on_cursor_moved(&mut self, x: f32, y: f32) {
         self.cursor_pos = Some((x, y));
-        if !self.selecting {
+        // Hovering the tab strip must repaint (hover highlight / × reveal)
+        // even when no selection drag is in progress.
+        if self.renderer.as_ref().is_some_and(|r| r.over_tab_bar(y))
+            && let Some(w) = self.window.as_ref()
+        {
+            w.request_redraw();
+        }
+        let selecting = self.active_tab().is_some_and(|t| t.selecting);
+        if !selecting {
             return;
         }
         let cell = self.cell_under_cursor();
         let global = cell.and_then(|(_, row)| self.view_to_global(row));
         if let (Some((col, _)), Some(g)) = (cell, global)
-            && let Some(sel) = self.selection.as_mut()
+            && let Some(tab) = self.active_tab_mut()
+            && let Some(sel) = tab.selection.as_mut()
         {
             sel.update(CellPos { x: col, y: g });
             if let Some(w) = self.window.as_ref() {
@@ -35,7 +44,7 @@ impl App {
                 let now = Instant::now();
                 if self
                     .cursor_pos
-                    .is_some_and(|(x, _)| self.press_on_chrome(x))
+                    .is_some_and(|(x, y)| self.press_on_chrome(x, y))
                 {
                     return;
                 }
@@ -49,9 +58,10 @@ impl App {
                 if let Some((t, (pc, pr))) = self.last_click
                     && now.duration_since(t).as_millis() <= DOUBLE_CLICK_MS
                     && (pc, pr) == (col, view_row)
-                    && let Some(term) = self.terminal.as_ref()
+                    && let Some(tab) = self.active_tab()
                 {
-                    let row_chars: Vec<char> = term
+                    let row_chars: Vec<char> = tab
+                        .terminal
                         .grid()
                         .view_rows()
                         .get(view_row)
@@ -59,31 +69,41 @@ impl App {
                         .unwrap_or_default();
                     let (sx, ex) = crate::selection::expand_word(&row_chars, col);
                     // Clamp to visible cols so a resized row can't overflow.
-                    let cols = term.cols();
+                    let cols = tab.terminal.cols();
                     let sx = sx.min(cols.saturating_sub(1));
                     let ex = ex.min(cols.saturating_sub(1));
-                    self.selection = Some(Selection {
-                        anchor: CellPos { x: sx, y: global },
-                        active: CellPos { x: ex, y: global },
-                    });
-                    self.selecting = false;
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.selection = Some(Selection {
+                            anchor: CellPos { x: sx, y: global },
+                            active: CellPos { x: ex, y: global },
+                        });
+                        tab.selecting = false;
+                    }
                     self.last_click = None;
                     if let Some(w) = self.window.as_ref() {
                         w.request_redraw();
                     }
                     return;
                 }
-                self.selection = Some(Selection::new(CellPos { x: col, y: global }));
-                self.selecting = true;
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.selection = Some(Selection::new(CellPos { x: col, y: global }));
+                    tab.selecting = true;
+                }
                 self.last_click = Some((now, (col, view_row)));
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
             }
-            (MouseButton::Left, ElementState::Released) if self.selecting => {
-                self.selecting = false;
-                if self.selection.as_ref().is_some_and(|s| s.is_empty()) {
-                    self.selection = None;
+            (MouseButton::Left, ElementState::Released) => {
+                let selecting = self.active_tab().is_some_and(|t| t.selecting);
+                if !selecting {
+                    return;
+                }
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.selecting = false;
+                    if tab.selection.as_ref().is_some_and(|s| s.is_empty()) {
+                        tab.selection = None;
+                    }
                 }
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();

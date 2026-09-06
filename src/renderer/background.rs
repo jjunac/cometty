@@ -123,8 +123,9 @@ impl super::Renderer {
         // mutation don't alias; capacity is preserved across frames.
         let mut verts = std::mem::take(&mut self.bg_scratch);
         verts.clear();
+        let y_off = self.tab_bar_px();
         for (y, row) in grid_rows.iter().enumerate() {
-            let py = y as f32 * self.line_height;
+            let py = y_off + y as f32 * self.line_height;
             for (x, cell) in row.iter().enumerate() {
                 let is_cursor = cursor_visible && cursor.0 == x && cursor.1 == y;
                 let is_selected = in_view_selection(selection, x, y);

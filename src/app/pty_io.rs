@@ -1,6 +1,7 @@
 //! PTY drain + resize plumbing.
 
 use super::App;
+use crate::app::tab::term_height_px;
 use crate::pty::PtyEvent;
 
 impl App {
@@ -8,43 +9,63 @@ impl App {
         if delta == 0 {
             return;
         }
-        if let Some(t) = self.terminal.as_mut()
-            && t.scroll_by(delta)
+        if let Some(t) = self.active_tab_mut()
+            && t.terminal.scroll_by(delta)
             && let Some(w) = self.window.as_ref()
         {
             w.request_redraw();
         }
     }
 
-    pub(crate) fn drain_pty(&mut self) {
+    /// Drain all tabs' PTY output into their terminals.
+    /// Returns true when no tabs remain (shell of the last tab exited)
+    /// and the caller should exit the event loop.
+    pub(crate) fn drain_pty(&mut self) -> bool {
         let mut got_data = false;
-        loop {
-            let ev = self.pty.as_ref().and_then(|p| p.try_recv());
-            match ev {
-                Some(PtyEvent::Data(bytes)) => {
-                    if let Some(t) = self.terminal.as_mut() {
-                        t.feed(&bytes);
+        let mut exited: Vec<usize> = Vec::new();
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            loop {
+                match tab.pty.try_recv() {
+                    Some(PtyEvent::Data(bytes)) => {
+                        tab.terminal.feed(&bytes);
+                        got_data = true;
                     }
-                    got_data = true;
+                    Some(PtyEvent::Exit) => {
+                        log::info!("shell exited (tab {i})");
+                        exited.push(i);
+                        got_data = true;
+                        break;
+                    }
+                    None => break,
                 }
-                Some(PtyEvent::Exit) => {
-                    log::info!("shell exited");
-                    got_data = true;
-                    break;
-                }
-                None => break,
             }
+        }
+        // Remove exited tabs from the back so indices stay valid.
+        for i in exited.into_iter().rev() {
+            self.tabs.remove(i);
+            if self.active >= self.tabs.len() {
+                self.active = self.tabs.len().saturating_sub(1);
+            }
+        }
+        if self.tabs.is_empty() {
+            return true;
         }
         if got_data {
             // New output invalidates the selected text; alt switches too.
             self.clear_selection();
-            if let Some(t) = self.terminal.as_ref() {
-                self.is_alt = t.grid().is_alt();
+            if let Some(tab) = self.active_tab_mut() {
+                tab.is_alt = tab.terminal.grid().is_alt();
+            }
+            if let Some(r) = self.renderer.as_mut() {
+                // Titles feed the tab bar; a changed title must repaint
+                // even when the grid version is unchanged.
+                r.invalidate();
             }
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
         }
+        false
     }
 
     pub(crate) fn sync_scale_factor(&mut self) -> f32 {
@@ -63,22 +84,21 @@ impl App {
         if width == 0 || height == 0 {
             return;
         }
-        let (renderer, term, pty) = match (
-            self.renderer.as_mut(),
-            self.terminal.as_mut(),
-            self.pty.as_ref(),
-        ) {
-            (Some(r), Some(t), Some(p)) => (r, t, p),
-            _ => return,
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
         };
         renderer.set_scale_factor(scale);
         renderer.resize(width, height);
+        let term_h = term_height_px(height, scale);
         let (cols, rows) =
-            super::compute_grid_size(width, height, renderer.cell_width, renderer.line_height);
-        if cols != term.cols() || rows != term.rows() {
-            term.resize(cols, rows);
-            pty.resize(cols, rows);
-            self.clear_selection();
+            super::compute_grid_size(width, term_h, renderer.cell_width, renderer.line_height);
+        for tab in &mut self.tabs {
+            if cols != tab.terminal.cols() || rows != tab.terminal.rows() {
+                tab.terminal.resize(cols, rows);
+                tab.pty.resize(cols, rows);
+                tab.selection = None;
+                tab.selecting = false;
+            }
         }
     }
 }

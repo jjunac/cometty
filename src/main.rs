@@ -5,6 +5,7 @@ mod pty;
 mod renderer;
 mod scrollbar;
 mod selection;
+mod tabbar;
 mod term;
 mod theme;
 
@@ -17,9 +18,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 use app::{App, UserEvent};
-use pty::PtySession;
 use renderer::Renderer;
-use term::Terminal;
 use theme::Theme;
 
 /// Resolve `--theme NAME` / `--list-themes` from argv.
@@ -80,34 +79,26 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
-        let (cols, rows) = app::compute_grid_size(w, h, renderer.cell_width, renderer.line_height);
-        let terminal = Terminal::new(cols, rows, self.theme);
-
-        let proxy = self.proxy.clone();
-        let waker = move || {
-            if let Some(p) = proxy.as_ref() {
-                let _ = p.send_event(UserEvent::PtyAvailable);
-            }
-        };
-        let pty = match PtySession::spawn_with_size(cols, rows, waker) {
-            Ok(p) => p,
-            Err(e) => {
-                log::error!("failed to spawn pty: {e:#}");
-                event_loop.exit();
-                return;
-            }
-        };
+        // The tab bar reserves the top strip; the grid only gets the rest.
+        let term_h = app::tab::term_height_px(h, scale);
+        let (cols, rows) =
+            app::compute_grid_size(w, term_h, renderer.cell_width, renderer.line_height);
 
         self.window = Some(window);
         self.renderer = Some(renderer);
-        self.terminal = Some(terminal);
-        self.pty = Some(pty);
         self.last_blink = Instant::now();
+        if !self.spawn_tab(cols, rows) {
+            event_loop.exit();
+        }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::PtyAvailable => self.drain_pty(),
+            UserEvent::PtyAvailable => {
+                if self.drain_pty() {
+                    event_loop.exit();
+                }
+            }
         }
     }
 
@@ -190,6 +181,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::RedrawRequested => {
                 self.on_redraw();
+                if self.tabs.is_empty() {
+                    event_loop.exit();
+                }
             }
             WindowEvent::Focused(_) => {
                 if let Some(w) = self.window.as_ref() {
@@ -200,9 +194,13 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // Fallback drain in case a wake was coalesced.
-        self.drain_pty();
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Fallback drain in case a wake was coalesced. When the last
+        // tab's shell has exited there is nothing left to show.
+        if self.drain_pty() {
+            event_loop.exit();
+            return;
+        }
 
         let now = Instant::now();
         if now.duration_since(self.last_blink) >= Duration::from_millis(530) {
@@ -214,7 +212,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // Wake up for next blink toggle.
         let next = self.last_blink + Duration::from_millis(530);
-        _event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+        event_loop.set_control_flow(ControlFlow::WaitUntil(next));
     }
 }
 
