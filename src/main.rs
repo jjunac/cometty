@@ -60,6 +60,18 @@ impl ApplicationHandler<UserEvent> for App {
         let attrs = Window::default_attributes()
             .with_title("cometty")
             .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0));
+        // Brave-style merged titlebar on macOS: transparent titlebar with
+        // fullsize content view. The tab strip paints into the titlebar
+        // area; the OS keeps drawing the traffic lights on top. The title
+        // text itself stays hidden (tabs already show OSC titles).
+        #[cfg(target_os = "macos")]
+        let attrs = {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attrs
+                .with_title_hidden(true)
+                .with_titlebar_transparent(true)
+                .with_fullsize_content_view(true)
+        };
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -79,8 +91,8 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
-        // The tab bar reserves the top strip; the grid only gets the rest.
-        let term_h = app::tab::term_height_px(h, scale);
+        // Single tab: no bar, so the grid gets the full height.
+        let term_h = app::tab::term_height_px(h, scale, 1);
         let (cols, rows) =
             app::compute_grid_size(w, term_h, renderer.cell_width, renderer.line_height);
 

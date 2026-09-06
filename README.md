@@ -26,7 +26,7 @@ cargo fmt --check
 - [x] Scrollback viewing (Shift+PgUp/Dn = page-minus-1, Shift+Home/End = top/bottom, mouse wheel)
 - [X] Scrollbar UI (no graphical scrollbar; use keys/wheel above)
 - [x] Selection + copy/paste (mouse drag + double-click word, Ctrl+Shift+C/V, bracketed paste)
-- [x] Tabs (Ctrl+T / Cmd+T, Ghostty-style strip: click to switch, hover × to close, + for new, OSC title labels)
+- [x] Tabs (Ctrl+T / Cmd+T, Ghostty-style strip hidden for 1 tab: inset pill, equal-width tabs down to min then scroll, click to switch, hover × on left to close, + for new, ⌘1-9 hints, OSC title labels)
 - [ ] Underline rendering (parsed, not drawn), cursor visibility / shape (`?25`, `DECSCUSR`), window title (OSC)
 - [ ] Consistent erase semantics (`ED 0` vs others)
 - [ ] Full keyboard: F1–F12, Ctrl/Shift+arrows, Alt+key → `ESC` prefix, keypad

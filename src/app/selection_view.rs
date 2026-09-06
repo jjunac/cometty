@@ -8,7 +8,8 @@ impl App {
     /// `None` on chrome (tab bar / scrollbar) or outside the grid.
     pub(crate) fn cell_under_cursor(&self) -> Option<(usize, usize)> {
         let (x, y) = self.cursor_pos?;
-        self.renderer.as_ref()?.cell_at_pos(x, y)
+        let tab_count = self.tabs.len();
+        self.renderer.as_ref()?.cell_at_pos(x, y, tab_count)
     }
 
     /// Whether the overlay scrollbar is currently painted.
@@ -31,10 +32,11 @@ impl App {
     /// egui's `consumed` flag claims presses across the whole window, so
     /// selection must use this explicit hit-test instead.
     pub(crate) fn press_on_chrome(&self, x_phys: f32, y_phys: f32) -> bool {
+        let tab_count = self.tabs.len();
         if self
             .renderer
             .as_ref()
-            .is_some_and(|r| r.over_tab_bar(y_phys))
+            .is_some_and(|r| r.over_tab_bar(y_phys, tab_count))
         {
             return true;
         }

@@ -12,7 +12,11 @@ impl App {
         self.cursor_pos = Some((x, y));
         // Hovering the tab strip must repaint (hover highlight / × reveal)
         // even when no selection drag is in progress.
-        if self.renderer.as_ref().is_some_and(|r| r.over_tab_bar(y))
+        let tab_count = self.tabs.len();
+        if self
+            .renderer
+            .as_ref()
+            .is_some_and(|r| r.over_tab_bar(y, tab_count))
             && let Some(w) = self.window.as_ref()
         {
             w.request_redraw();
@@ -46,6 +50,11 @@ impl App {
                     .cursor_pos
                     .is_some_and(|(x, y)| self.press_on_chrome(x, y))
                 {
+                    // Merged macOS titlebar: dragging empty chrome moves
+                    // the window like Brave. No-op on other platforms.
+                    if cfg!(target_os = "macos") {
+                        self.maybe_drag_titlebar();
+                    }
                     return;
                 }
                 let Some((col, view_row)) = self.cell_under_cursor() else {
@@ -110,6 +119,28 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Start a native window drag when the press landed on empty
+    /// titlebar chrome (macOS merged titlebar). Does nothing on tabs,
+    /// the `+` button, or the traffic lights. Compiled everywhere so
+    /// Linux CI type-checks it; only called on macOS.
+    fn maybe_drag_titlebar(&self) {
+        let Some((x_phys, y_phys)) = self.cursor_pos else {
+            return;
+        };
+        let Some(renderer) = self.renderer.as_ref() else {
+            return;
+        };
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        let scale = renderer.scale_factor().max(1.0);
+        let screen_w_pts = window.inner_size().width.max(1) as f32 / scale;
+        let bar_h = super::tab::bar_height_points(self.tabs.len());
+        if crate::tabbar::is_titlebar_drag(x_phys / scale, y_phys / scale, screen_w_pts, bar_h) {
+            let _ = window.drag_window();
         }
     }
 

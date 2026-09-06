@@ -68,6 +68,9 @@ pub struct Theme {
     pub scrollbar_track: Rgb,
     pub scrollbar_thumb: Rgb,
     pub scrollbar_hover: Rgb,
+    pub tab_bar_bg: Rgb,
+    pub tab_active_bg: Rgb,
+    pub tab_border: Rgb,
 }
 
 impl Theme {
@@ -85,6 +88,9 @@ impl Theme {
             scrollbar_track: Rgb::new(0x2D, 0x2D, 0x2D),
             scrollbar_thumb: Rgb::new(0x5A, 0x5A, 0x5A),
             scrollbar_hover: Rgb::new(0xCC, 0xCC, 0xCC),
+            tab_bar_bg: Rgb::new(0x2D, 0x2D, 0x2D),
+            tab_active_bg: Rgb::new(0x3E, 0x3E, 0x42),
+            tab_border: Rgb::new(0x5A, 0x5A, 0x5A),
             palette: [
                 Rgb::new(0x00, 0x00, 0x00), // black
                 Rgb::new(0xCD, 0x31, 0x31), // red
@@ -119,6 +125,9 @@ impl Theme {
             scrollbar_track: Rgb::new(0x1F, 0x23, 0x35),
             scrollbar_thumb: Rgb::new(0x41, 0x48, 0x68),
             scrollbar_hover: Rgb::new(0xC0, 0xCA, 0xF5),
+            tab_bar_bg: Rgb::new(0x1A, 0x1B, 0x26),
+            tab_active_bg: Rgb::new(0x29, 0x2E, 0x42),
+            tab_border: Rgb::new(0x41, 0x48, 0x68),
             palette: [
                 Rgb::new(0x15, 0x16, 0x1E), // black
                 Rgb::new(0xF7, 0x76, 0x8E), // red
@@ -153,6 +162,9 @@ impl Theme {
             scrollbar_track: Rgb::new(0x28, 0x2A, 0x2E),
             scrollbar_thumb: Rgb::new(0x96, 0x98, 0x96),
             scrollbar_hover: Rgb::new(0xC5, 0xC8, 0xC6),
+            tab_bar_bg: Rgb::new(0x28, 0x2A, 0x2E),
+            tab_active_bg: Rgb::new(0x37, 0x3B, 0x41),
+            tab_border: Rgb::new(0x5A, 0x5E, 0x5E),
             palette: [
                 Rgb::new(0x1D, 0x1F, 0x21),
                 Rgb::new(0xCC, 0x66, 0x66),

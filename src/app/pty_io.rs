@@ -41,6 +41,7 @@ impl App {
             }
         }
         // Remove exited tabs from the back so indices stay valid.
+        let removed = !exited.is_empty();
         for i in exited.into_iter().rev() {
             self.tabs.remove(i);
             if self.active >= self.tabs.len() {
@@ -49,6 +50,10 @@ impl App {
         }
         if self.tabs.is_empty() {
             return true;
+        }
+        if removed {
+            // Dropping to 1 tab hides the bar and hands space back.
+            self.sync_tab_sizes();
         }
         if got_data {
             // New output invalidates the selected text; alt switches too.
@@ -89,7 +94,7 @@ impl App {
         };
         renderer.set_scale_factor(scale);
         renderer.resize(width, height);
-        let term_h = term_height_px(height, scale);
+        let term_h = term_height_px(height, scale, self.tabs.len());
         let (cols, rows) =
             super::compute_grid_size(width, term_h, renderer.cell_width, renderer.line_height);
         for tab in &mut self.tabs {

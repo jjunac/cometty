@@ -118,12 +118,13 @@ impl super::Renderer {
         cursor: (usize, usize),
         cursor_visible: bool,
         selection: Option<((usize, usize), (usize, usize))>,
+        tab_count: usize,
     ) -> usize {
         // Take the scratch buffer so `push_quad(&self, …)` and the vertex
         // mutation don't alias; capacity is preserved across frames.
         let mut verts = std::mem::take(&mut self.bg_scratch);
         verts.clear();
-        let y_off = self.tab_bar_px();
+        let y_off = self.tab_bar_px(tab_count);
         for (y, row) in grid_rows.iter().enumerate() {
             let py = y_off + y as f32 * self.line_height;
             for (x, cell) in row.iter().enumerate() {

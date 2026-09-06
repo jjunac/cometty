@@ -20,7 +20,7 @@ const BASE_FONT_SIZE_LOGICAL: f32 = 14.0;
 
 /// Tab-bar height in logical points. The terminal grid is laid out in the
 /// window area below it; all glyphon/GL coordinates add the scaled offset.
-pub const TAB_BAR_HEIGHT_POINTS: f32 = 32.0;
+pub const TAB_BAR_HEIGHT_POINTS: f32 = 38.0;
 
 pub(crate) fn scaled_metrics(base: f32, scale: f32) -> (f32, f32, f32) {
     let s = if scale.is_finite() && scale > 0.0 {
@@ -349,8 +349,9 @@ impl Renderer {
     }
 
     /// Tab-bar height in physical pixels at the current scale.
-    pub fn tab_bar_px(&self) -> f32 {
-        crate::app::tab::tab_bar_px(self.scale_factor)
+    /// Hidden (0.0) for a single tab; callers pass `tab_count`.
+    pub fn tab_bar_px(&self, tab_count: usize) -> f32 {
+        crate::app::tab::tab_bar_px(self.scale_factor, tab_count)
     }
 
     /// Forget the cached grid version so the next `render` reshapes text.
@@ -361,20 +362,20 @@ impl Renderer {
     }
 
     /// Rows available to the terminal grid (window minus tab bar).
-    pub fn term_rows(&self) -> usize {
-        let h = (self.height as f32 - self.tab_bar_px()).max(1.0) as u32;
+    pub fn term_rows(&self, tab_count: usize) -> usize {
+        let h = (self.height as f32 - self.tab_bar_px(tab_count)).max(1.0) as u32;
         self.rows_for_height(h)
     }
 
     /// Map physical pixels to a visible `(col, row)` cell in the terminal
     /// area. Returns `None` on the tab bar or outside the grid.
-    pub fn cell_at_pos(&self, x: f32, y: f32) -> Option<(usize, usize)> {
-        let tab_bar = self.tab_bar_px();
+    pub fn cell_at_pos(&self, x: f32, y: f32, tab_count: usize) -> Option<(usize, usize)> {
+        let tab_bar = self.tab_bar_px(tab_count);
         if y < tab_bar {
             return None;
         }
         let cols = self.cols_for_width(self.width);
-        let rows = self.term_rows();
+        let rows = self.term_rows(tab_count);
         crate::selection::cell_at_pos(
             x,
             y - tab_bar,
@@ -385,9 +386,10 @@ impl Renderer {
         )
     }
 
-    /// True when physical `y` falls on the tab-bar chrome.
-    pub fn over_tab_bar(&self, y_phys: f32) -> bool {
-        y_phys.is_finite() && y_phys < self.tab_bar_px()
+    /// True when physical `y` falls on the tab-bar chrome (never when the
+    /// bar is hidden for a single tab).
+    pub fn over_tab_bar(&self, y_phys: f32, tab_count: usize) -> bool {
+        y_phys.is_finite() && y_phys < self.tab_bar_px(tab_count)
     }
 
     /// True when physical `x` falls on the overlay scrollbar strip.
@@ -416,7 +418,8 @@ impl Renderer {
             self.last_grid_version = grid_version;
         }
 
-        let vert_count = self.paint_bg(grid_rows, cursor, cursor_visible, selection);
+        let tab_count = scroll.tab_titles.len();
+        let vert_count = self.paint_bg(grid_rows, cursor, cursor_visible, selection, tab_count);
         let overlay::OverlayOutput {
             scroll_to,
             selected_tab,
@@ -454,7 +457,7 @@ impl Renderer {
         let text_areas = [TextArea {
             buffer: &self.buffer,
             left: 0.0,
-            top: self.tab_bar_px(),
+            top: self.tab_bar_px(tab_count),
             scale: 1.0,
             bounds: TextBounds {
                 left: 0,
