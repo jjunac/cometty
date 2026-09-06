@@ -369,9 +369,10 @@ impl vte::Perform for Terminal {
                     self.grid.set_cursor_enabled(true);
                     self.grid.set_bracketed_paste(false);
                     self.grid.set_cursor_style(CursorStyle::default());
+                    // Reset pen before clearing so BCE erase uses default bg.
+                    self.grid.sgr(&[0]);
                     self.grid.clear_all();
                     self.grid.set_cursor(0, 0);
-                    self.grid.sgr(&[0]);
                     self.title.clear();
                 }
                 _ => {}
@@ -653,5 +654,19 @@ mod tests {
         // Full reset restores blinking block.
         feed_str(&mut t, "\x1bc");
         assert_eq!(t.cursor_style(), crate::grid::CursorStyle::default());
+    }
+
+    #[test]
+    fn erase_uses_pen_bg_and_reset_clears_to_default() {
+        let mut t = test_terminal(4, 2);
+        let theme = t.theme();
+        feed_str(&mut t, "\x1b[41m\x1b[2J");
+        let c = t.grid().cell(0, 0).unwrap();
+        assert_eq!(c.bg, theme.ansi(1));
+        assert_eq!(c.fg, theme.foreground);
+        // Full reset clears pen first, so BCE fill lands on default bg.
+        feed_str(&mut t, "\x1bc");
+        let c = t.grid().cell(0, 0).unwrap();
+        assert_eq!(c.bg, theme.background);
     }
 }

@@ -133,7 +133,7 @@ impl Grid {
                 // Don't store fully blank default lines to save memory? Keep for simplicity.
                 self.scrollback.push_back(top);
             }
-            self.cells.push(self.blank_row());
+            self.cells.push(self.erase_row());
         }
         self.bump();
     }
@@ -145,7 +145,7 @@ impl Grid {
                 break;
             }
             self.cells.pop();
-            self.cells.insert(0, self.blank_row());
+            self.cells.insert(0, self.erase_row());
         }
         self.bump();
     }

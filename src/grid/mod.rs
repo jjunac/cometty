@@ -338,6 +338,56 @@ mod tests {
     }
 
     #[test]
+    fn erase_uses_pen_bg_consistently() {
+        let theme = test_theme();
+        let red = theme.ansi(1);
+        let mut g = Grid::new(4, 3, theme);
+        g.sgr(&[41, 1]);
+        // ED 2 clears everything with pen bg, dropping bold.
+        g.erase_in_display(2);
+        let c = g.cell(0, 0).unwrap();
+        assert_eq!(c.bg, red);
+        assert_eq!(c.fg, theme.foreground);
+        assert!(!c.bold);
+
+        // EL 2 clears the cursor row with pen bg.
+        g.sgr(&[0]);
+        g.sgr(&[44, 1]);
+        let blue = theme.ansi(4);
+        g.set_cursor(1, 1);
+        g.erase_in_line(2);
+        let c = g.cell(0, 1).unwrap();
+        assert_eq!(c.bg, blue);
+        assert!(!c.bold);
+
+        // ED 1 (start to cursor) matches ED 0 / EL behavior.
+        g.set_cursor(2, 1);
+        g.erase_in_display(1);
+        assert_eq!(g.cell(0, 0).unwrap().bg, blue);
+        assert_eq!(g.cell(2, 1).unwrap().bg, blue);
+        // Below-cursor rows are untouched by ED 1.
+        assert_eq!(g.cell(0, 2).unwrap().bg, red);
+
+        // IL / DL fill with pen bg.
+        g.set_cursor(0, 0);
+        g.insert_lines(1);
+        assert_eq!(g.cell(0, 0).unwrap().bg, blue);
+        g.delete_lines(1);
+        assert_eq!(g.cell(0, 2).unwrap().bg, blue);
+
+        // Scroll fill uses pen bg.
+        g.scroll_up(1);
+        assert_eq!(g.cell(0, 2).unwrap().bg, blue);
+        g.scroll_down(1);
+        assert_eq!(g.cell(0, 0).unwrap().bg, blue);
+
+        // Structural resize growth stays theme-default, not pen bg.
+        g.resize(5, 4);
+        assert_eq!(g.cell(4, 0).unwrap().bg, theme.background);
+        assert_eq!(g.cell(0, 3).unwrap().bg, theme.background);
+    }
+
+    #[test]
     fn cursor_style_save_restore_across_alt() {
         use super::cell::{CursorShape, CursorStyle};
         let mut g = Grid::new(2, 2, test_theme());

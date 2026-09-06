@@ -90,24 +90,11 @@ impl Grid {
                 // cursor to end
                 let (cx, cy) = (self.cursor.x, self.cursor.y);
                 for x in cx..self.cols {
-                    // Erase uses current bg but blank fg? Use theme fg with current bg.
-                    self.cells[cy][x] = Cell {
-                        ch: ' ',
-                        fg: self.theme.foreground,
-                        bg: self.pen.bg,
-                        bold: false,
-                        underline: false,
-                    };
+                    self.cells[cy][x] = self.erase_cell();
                 }
                 for y in (cy + 1)..self.rows {
                     for x in 0..self.cols {
-                        self.cells[y][x] = Cell {
-                            ch: ' ',
-                            fg: self.theme.foreground,
-                            bg: self.pen.bg,
-                            bold: false,
-                            underline: false,
-                        };
+                        self.cells[y][x] = self.erase_cell();
                     }
                 }
             }
@@ -115,11 +102,11 @@ impl Grid {
                 let (cx, cy) = (self.cursor.x, self.cursor.y);
                 for y in 0..cy {
                     for x in 0..self.cols {
-                        self.cells[y][x] = self.blank_cell();
+                        self.cells[y][x] = self.erase_cell();
                     }
                 }
                 for x in 0..=cx.min(self.cols.saturating_sub(1)) {
-                    self.cells[cy][x] = self.blank_cell();
+                    self.cells[cy][x] = self.erase_cell();
                 }
             }
             2 => {
@@ -140,17 +127,17 @@ impl Grid {
         match mode {
             0 => {
                 for x in self.cursor.x..self.cols {
-                    self.cells[y][x] = self.blank_cell();
+                    self.cells[y][x] = self.erase_cell();
                 }
             }
             1 => {
                 for x in 0..=self.cursor.x.min(self.cols.saturating_sub(1)) {
-                    self.cells[y][x] = self.blank_cell();
+                    self.cells[y][x] = self.erase_cell();
                 }
             }
             2 => {
                 for x in 0..self.cols {
-                    self.cells[y][x] = self.blank_cell();
+                    self.cells[y][x] = self.erase_cell();
                 }
             }
             _ => {}
@@ -160,7 +147,7 @@ impl Grid {
 
     pub fn clear_all(&mut self) {
         self.stick_to_bottom();
-        let blank = self.blank_cell();
+        let blank = self.erase_cell();
         for row in &mut self.cells {
             for c in row.iter_mut() {
                 *c = blank;
@@ -174,7 +161,7 @@ impl Grid {
         let y = self.cursor.y.min(self.rows);
         for _ in 0..n {
             if y < self.rows {
-                self.cells.insert(y, self.blank_row());
+                self.cells.insert(y, self.erase_row());
                 self.cells.pop();
             }
         }
@@ -187,7 +174,7 @@ impl Grid {
         for _ in 0..n {
             if y < self.rows {
                 self.cells.remove(y);
-                self.cells.push(self.blank_row());
+                self.cells.push(self.erase_row());
             }
         }
         self.bump();

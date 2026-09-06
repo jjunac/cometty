@@ -28,7 +28,7 @@ cargo fmt --check
 - [x] Selection + copy/paste (mouse drag + double-click word, Ctrl+Shift+C/V, bracketed paste)
 - [x] Tabs (Ctrl+T / Cmd+T, Ghostty-style strip hidden for 1 tab: inset pill, equal-width tabs down to min then scroll, click to switch, hover × on left to close, + for new, ⌘1-9 hints, OSC title labels)
 - [x] Underline rendering + cursor shape (`?25`, `DECSCUSR` block/underline/bar, steady/blink) + window title (OSC `0/1/2`)
-- [ ] Consistent erase semantics (`ED 0` vs others)
+- [x] Consistent erase semantics (BCE: `ED/EL/IL/DL`/scroll fill use current pen bg)
 - [ ] Full keyboard: F1–F12, Ctrl/Shift+arrows, Alt+key → `ESC` prefix, keypad
 - [ ] Unicode: double-width / emoji / combining chars
 - [ ] Scroll regions (`CSI r`), origin / insert / auto-wrap modes

@@ -89,8 +89,26 @@ impl Grid {
         }
     }
 
+    /// BCE erase cell: blank char with current pen bg, default fg/attrs.
+    /// Used by ED/EL, clear, and IL/DL/scroll fill. `blank_cell()` stays for
+    /// structural fills (resize growth, fresh alt buffer) that must not
+    /// inherit the pen bg.
+    pub(crate) fn erase_cell(&self) -> Cell {
+        Cell {
+            ch: ' ',
+            fg: self.theme.foreground,
+            bg: self.pen.bg,
+            bold: false,
+            underline: false,
+        }
+    }
+
     pub fn blank_row(&self) -> Vec<Cell> {
         vec![self.blank_cell(); self.cols]
+    }
+
+    pub(crate) fn erase_row(&self) -> Vec<Cell> {
+        vec![self.erase_cell(); self.cols]
     }
 
     pub(crate) fn default_pen(&self) -> Pen {
