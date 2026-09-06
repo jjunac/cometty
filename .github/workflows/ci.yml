@@ -1,0 +1,20 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install GUI deps (winit/wgpu)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxkbcommon-dev libgl1-mesa-dev
+      - run: cargo test
+      - run: cargo clippy -- -D warnings
+      - run: cargo fmt --check

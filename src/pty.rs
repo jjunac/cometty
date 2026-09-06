@@ -3,6 +3,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::app::geometry::{MAX_DIM, MIN_DIM};
+
 pub enum PtyEvent {
     Data(Vec<u8>),
     Exit,
@@ -23,8 +25,8 @@ impl PtySession {
     ) -> anyhow::Result<Self> {
         let pty_system = native_pty_system();
         let size = PtySize {
-            rows: rows.clamp(1, 1024) as u16,
-            cols: cols.clamp(1, 1024) as u16,
+            rows: rows.clamp(MIN_DIM, MAX_DIM) as u16,
+            cols: cols.clamp(MIN_DIM, MAX_DIM) as u16,
             pixel_width: 0,
             pixel_height: 0,
         };
@@ -101,8 +103,8 @@ impl PtySession {
 
     pub fn resize(&self, cols: usize, rows: usize) {
         let _ = self.master.resize(portable_pty::PtySize {
-            rows: rows.clamp(1, 1024) as u16,
-            cols: cols.clamp(1, 1024) as u16,
+            rows: rows.clamp(MIN_DIM, MAX_DIM) as u16,
+            cols: cols.clamp(MIN_DIM, MAX_DIM) as u16,
             pixel_width: 0,
             pixel_height: 0,
         });
@@ -124,5 +126,3 @@ pub fn default_shell() -> String {
         "/bin/bash".to_string()
     }
 }
-
-// anyhow is used for ergonomics; add it to Cargo.toml via codegen below if missing.

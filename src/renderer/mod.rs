@@ -1,6 +1,10 @@
-use cosmic_text::{
-    Attrs, AttrsList, Buffer, BufferLine, Family, LineEnding, Metrics, Shaping, Weight, Wrap,
-};
+mod background;
+mod overlay;
+mod text;
+
+use background::{BG_SHADER, BgVertex};
+
+use cosmic_text::{Buffer, Metrics, Wrap};
 use glyphon::{
     Cache, FontSystem, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer,
     Viewport,
@@ -9,111 +13,6 @@ use wgpu::MultisampleState;
 
 use crate::grid::Cell;
 use crate::theme::Theme;
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct BgVertex {
-    pos: [f32; 2],
-    color: [f32; 3],
-}
-
-impl BgVertex {
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<BgVertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x2,
-                },
-                wgpu::VertexAttribute {
-                    offset: 8,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-            ],
-        }
-    }
-}
-
-const BG_SHADER: &str = r#"
-struct VsOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) color: vec3<f32>,
-};
-@vertex
-fn vs_main(@location(0) ndc: vec2<f32>, @location(1) color: vec3<f32>) -> VsOut {
-    var out: VsOut;
-    out.pos = vec4<f32>(ndc, 0.0, 1.0);
-    out.color = color;
-    return out;
-}
-@fragment
-fn fs_main(@location(0) color: vec3<f32>) -> @location(0) vec4<f32> {
-    return vec4<f32>(color, 1.0);
-}
-"#;
-
-fn build_buffer_lines(rows: &[Vec<Cell>], theme: &Theme) -> Vec<BufferLine> {
-    let mut lines = Vec::with_capacity(rows.len());
-    for row_cells in rows {
-        let text: String = row_cells.iter().map(|c| c.ch).collect();
-        let trimmed = text.trim_end();
-        let line_text = if trimmed.is_empty() {
-            " ".to_string()
-        } else {
-            trimmed.to_string()
-        };
-        let mut line = BufferLine::new(
-            line_text.clone(),
-            LineEnding::None,
-            AttrsList::new(&Attrs::new().family(Family::Monospace)),
-            Shaping::Advanced,
-        );
-        let mut attrs_list = AttrsList::new(
-            &Attrs::new()
-                .family(Family::Monospace)
-                .color(theme.foreground.as_glyphon_color()),
-        );
-        let visible_len = line_text.chars().count();
-        let mut byte_idx = 0;
-        let chars: Vec<char> = line_text.chars().collect();
-        let mut i = 0;
-        while i < visible_len {
-            let cell = &row_cells[i];
-            let color = cell.fg.as_glyphon_color();
-            let weight = if cell.bold {
-                Weight::BOLD
-            } else {
-                Weight::NORMAL
-            };
-            let attrs = Attrs::new()
-                .family(Family::Monospace)
-                .color(color)
-                .weight(weight);
-            let start_byte = byte_idx;
-            let mut j = i;
-            while j < visible_len {
-                let c2 = &row_cells[j];
-                let same = c2.fg == cell.fg && c2.bold == cell.bold;
-                if !same {
-                    break;
-                }
-                byte_idx += chars[j].len_utf8();
-                j += 1;
-            }
-            if j > i {
-                attrs_list.add_span(start_byte..byte_idx, &attrs);
-            }
-            i = j;
-        }
-        line.set_attrs_list(attrs_list);
-        lines.push(line);
-    }
-    lines
-}
 
 /// Logical font size in points. Scaled by the window scale factor to get
 /// physical pixels, so text looks the same size on 1x and 2x displays.
@@ -132,31 +31,6 @@ pub(crate) fn scaled_metrics(base: f32, scale: f32) -> (f32, f32, f32) {
 pub(crate) fn clamp_surface_size(width: u32, height: u32, max_dim: u32) -> (u32, u32) {
     let max_dim = max_dim.max(1);
     (width.max(1).min(max_dim), height.max(1).min(max_dim))
-}
-
-/// Hit-test a normalized view-space selection `((x0, y0), (x1, y1))`.
-fn in_view_selection(sel: Option<((usize, usize), (usize, usize))>, x: usize, y: usize) -> bool {
-    let Some(((ax, ay), (bx, by))) = sel else {
-        return false;
-    };
-    let (s, e) = if (by, bx) < (ay, ax) {
-        ((bx, by), (ax, ay))
-    } else {
-        ((ax, ay), (bx, by))
-    };
-    if y < s.1 || y > e.1 {
-        return false;
-    }
-    if s.1 == e.1 {
-        return x >= s.0 && x <= e.0;
-    }
-    if y == s.1 {
-        return x >= s.0;
-    }
-    if y == e.1 {
-        return x <= e.0;
-    }
-    true
 }
 
 /// egui chrome input for [`Renderer::render`]: overlay scrollbar only.
@@ -185,6 +59,7 @@ pub struct Renderer {
     bg_pipeline: wgpu::RenderPipeline,
     bg_vertex_buf: wgpu::Buffer,
     bg_vertex_capacity: usize,
+    bg_scratch: Vec<BgVertex>,
     theme: Theme,
     base_font_size: f32,
     scale_factor: f32,
@@ -343,6 +218,7 @@ impl Renderer {
             bg_pipeline,
             bg_vertex_buf,
             bg_vertex_capacity,
+            bg_scratch: Vec::new(),
             theme,
             base_font_size,
             scale_factor,
@@ -469,57 +345,9 @@ impl Renderer {
         crate::scrollbar::hit_test(x_phys / scale, screen_w_pts)
     }
 
-    pub fn rebuild_buffer(&mut self, rows: &[Vec<Cell>]) {
-        let metrics = Metrics::new(self.font_size, self.line_height);
-        self.buffer.set_metrics(metrics);
-        self.buffer.lines.clear();
-        for line in build_buffer_lines(rows, &self.theme) {
-            self.buffer.lines.push(line);
-        }
-        self.buffer
-            .set_size(Some(self.width as f32), Some(self.height as f32));
-        // `lines` was mutated directly, bypassing `Buffer`'s dirty flags, so
-        // `shape_until_scroll` alone would early-return via `resolve_dirty`.
-        // Lay out each line explicitly so `TextRenderer::prepare` finds glyphs.
-        let n = self.buffer.lines.len();
-        for i in 0..n {
-            self.buffer.line_layout(&mut self.font_system, i);
-        }
-    }
-
-    fn push_quad(&self, verts: &mut Vec<BgVertex>, x: f32, y: f32, w: f32, h: f32, col: [f32; 3]) {
-        let sw = self.width as f32;
-        let sh = self.height as f32;
-        let x0 = (x / sw) * 2.0 - 1.0;
-        let y0 = 1.0 - (y / sh) * 2.0;
-        let x1 = ((x + w) / sw) * 2.0 - 1.0;
-        let y1 = 1.0 - ((y + h) / sh) * 2.0;
-        verts.push(BgVertex {
-            pos: [x0, y0],
-            color: col,
-        });
-        verts.push(BgVertex {
-            pos: [x1, y0],
-            color: col,
-        });
-        verts.push(BgVertex {
-            pos: [x0, y1],
-            color: col,
-        });
-        verts.push(BgVertex {
-            pos: [x1, y0],
-            color: col,
-        });
-        verts.push(BgVertex {
-            pos: [x1, y1],
-            color: col,
-        });
-        verts.push(BgVertex {
-            pos: [x0, y1],
-            color: col,
-        });
-    }
-
+    /// Thin orchestrator: rebuild text on version change, paint bg +
+    /// overlay, then submit the frame. Heavy lifting lives in
+    /// `text` / `background` / `overlay`.
     pub fn render(
         &mut self,
         grid_rows: &[Vec<Cell>],
@@ -534,171 +362,12 @@ impl Renderer {
             self.last_grid_version = grid_version;
         }
 
-        let mut verts: Vec<BgVertex> = Vec::new();
-        for (y, row) in grid_rows.iter().enumerate() {
-            let py = y as f32 * self.line_height;
-            for (x, cell) in row.iter().enumerate() {
-                let is_cursor = cursor_visible && cursor.0 == x && cursor.1 == y;
-                let is_selected = in_view_selection(selection, x, y);
-                if cell.bg != self.theme.background || is_cursor || is_selected {
-                    let px = x as f32 * self.cell_width;
-                    let col = if is_cursor {
-                        self.theme.cursor_bg.as_linear_f32_array()
-                    } else if is_selected {
-                        self.theme.selection.as_linear_f32_array()
-                    } else {
-                        cell.bg.as_linear_f32_array()
-                    };
-                    self.push_quad(&mut verts, px, py, self.cell_width, self.line_height, col);
-                }
-            }
-        }
-
-        if verts.len() > self.bg_vertex_capacity {
-            self.bg_vertex_capacity = verts.len().next_power_of_two().max(1024);
-            self.bg_vertex_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("bg verts"),
-                size: (self.bg_vertex_capacity * std::mem::size_of::<BgVertex>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-        if !verts.is_empty() {
-            self.queue
-                .write_buffer(&self.bg_vertex_buf, 0, bytemuck::cast_slice(&verts));
-        }
-
-        // --- egui overlay: scrollbar (chrome only; terminal cells stay glyphon).
-        let ScrollCtx {
-            window,
-            ui: scrollbar,
-            total,
-            visible,
-            offset,
-            is_alt,
-        } = scroll;
-        let scale = self.scale_factor.max(1.0);
-        let screen_w_pts = self.width as f32 / scale;
-        let screen_h_pts = self.height as f32 / scale;
-        let theme = self.theme;
-        let opacity = scrollbar.opacity;
-        let mut scroll_to: Option<usize> = None;
-        let mut hovered = false;
-
-        let egui_input = self.egui_state.take_egui_input(window);
-        let ctx = self.egui_ctx.clone();
-        ctx.begin_pass(egui_input);
-        egui::Area::new(egui::Id::new("scrollbar"))
-            .fixed_pos(egui::pos2(0.0, 0.0))
-            .order(egui::Order::Foreground)
-            .show(&ctx, |ui| {
-                let Some((thumb_y, thumb_h)) =
-                    crate::scrollbar::geometry(screen_h_pts, total, visible, offset)
-                else {
-                    return;
-                };
-                if is_alt || (opacity <= 0.01 && !scrollbar.is_dragging()) {
-                    return;
-                }
-                let track_w = crate::scrollbar::TRACK_WIDTH_POINTS;
-                let pad = crate::scrollbar::TRACK_PAD_POINTS;
-                let track_rect = egui::Rect::from_min_size(
-                    egui::pos2(screen_w_pts - track_w - pad, 0.0),
-                    egui::vec2(track_w, screen_h_pts),
-                );
-                let thumb_rect = egui::Rect::from_min_size(
-                    egui::pos2(screen_w_pts - track_w - pad, thumb_y),
-                    egui::vec2(track_w, thumb_h),
-                );
-                let painter = ui.painter().clone();
-                let track_col = theme
-                    .scrollbar_track
-                    .as_egui_color()
-                    .gamma_multiply((opacity * 0.45).clamp(0.0, 1.0));
-                painter.rect_filled(track_rect, egui::CornerRadius::same(4), track_col);
-
-                let resp = ui.allocate_rect(track_rect, egui::Sense::click_and_drag());
-                hovered = resp.hovered() || resp.dragged();
-                let active = scrollbar.is_dragging() || resp.dragged() || resp.hovered();
-                let thumb_base = if active {
-                    theme.scrollbar_hover.as_egui_color()
-                } else {
-                    theme.scrollbar_thumb.as_egui_color()
-                };
-                painter.rect_filled(
-                    thumb_rect,
-                    egui::CornerRadius::same(4),
-                    thumb_base.gamma_multiply(opacity.clamp(0.0, 1.0)),
-                );
-
-                if resp.drag_started() {
-                    if let Some(pos) = resp.interact_pointer_pos() {
-                        let y = pos.y - track_rect.min.y;
-                        if y >= thumb_y && y <= thumb_y + thumb_h {
-                            scrollbar.begin_drag(y - thumb_y);
-                        } else {
-                            let target = crate::scrollbar::offset_for_thumb_y(
-                                y - thumb_h * 0.5,
-                                screen_h_pts,
-                                total,
-                                visible,
-                            );
-                            scroll_to = Some(target);
-                            scrollbar.begin_drag(thumb_h * 0.5);
-                        }
-                    }
-                } else if resp.dragged()
-                    && let (Some(pos), Some(grab)) =
-                        (resp.interact_pointer_pos(), scrollbar.drag_grab())
-                {
-                    let y = pos.y - track_rect.min.y - grab;
-                    scroll_to = Some(crate::scrollbar::offset_for_thumb_y(
-                        y,
-                        screen_h_pts,
-                        total,
-                        visible,
-                    ));
-                }
-                if resp.drag_stopped() {
-                    scrollbar.end_drag();
-                } else if resp.clicked()
-                    && let Some(pos) = resp.interact_pointer_pos()
-                {
-                    let y = pos.y - track_rect.min.y;
-                    if y < thumb_y || y > thumb_y + thumb_h {
-                        scroll_to = Some(crate::scrollbar::offset_for_thumb_y(
-                            y - thumb_h * 0.5,
-                            screen_h_pts,
-                            total,
-                            visible,
-                        ));
-                    }
-                }
-            });
-        let mut full_output = ctx.end_pass();
-        self.egui_state
-            .handle_platform_output(window, full_output.platform_output);
-        let paint_jobs = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
-        let now = std::time::Instant::now();
-        if scrollbar.update(now, total, visible, offset, is_alt, hovered) {
-            ctx.request_repaint();
-        }
-
-        let screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [self.width, self.height],
-            pixels_per_point: scale,
-        };
-        // Drain (not just borrow): egui panics on drop with unapplied deltas,
-        // and our early surface-loss returns below must not leak them either.
-        for (id, deltas) in full_output.textures_delta.set.drain() {
-            for delta in &deltas {
-                self.egui_renderer
-                    .update_texture(&self.device, &self.queue, id, delta);
-            }
-        }
-        for id in full_output.textures_delta.free.drain() {
-            self.egui_renderer.free_texture(&id);
-        }
+        let vert_count = self.paint_bg(grid_rows, cursor, cursor_visible, selection);
+        let overlay::OverlayOutput {
+            scroll_to,
+            paint_jobs,
+            screen_descriptor,
+        } = self.paint_overlay(scroll);
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
@@ -778,10 +447,10 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if !verts.is_empty() {
+            if vert_count > 0 {
                 pass.set_pipeline(&self.bg_pipeline);
                 pass.set_vertex_buffer(0, self.bg_vertex_buf.slice(..));
-                pass.draw(0..verts.len() as u32, 0..1);
+                pass.draw(0..vert_count as u32, 0..1);
             }
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
@@ -823,7 +492,7 @@ mod tests {
         let rows = vec![test_cells("hello"), test_cells("hi")];
         let theme = Theme::default();
         buffer.lines.clear();
-        for line in build_buffer_lines(&rows, &theme) {
+        for line in super::text::build_buffer_lines(&rows, &theme) {
             buffer.lines.push(line);
         }
 

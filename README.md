@@ -5,8 +5,8 @@ Single-binary GPU terminal emulator in Rust (`winit` + `wgpu` + `glyphon` + `por
 ## Run
 
 ```sh
-cargo run          # needs display + GPU
-cargo test         # headless-safe unit tests
+cargo run -- --theme tokyo-night   # needs display + GPU; see --list-themes
+cargo test                         # headless-safe unit tests
 cargo clippy -- -D warnings
 cargo fmt --check
 ```
@@ -21,7 +21,7 @@ cargo fmt --check
 - [x] Grid: scrollback buffer (10k lines, stored), insert/delete lines, erase display/line
 - [x] Input: text passthrough, Enter → `\r`, Backspace → `0x7F`, Esc, arrows, Home/End/PgUp/PgDn/Ins/Del, Ctrl+letter, Ctrl+Space
 - [x] Rendering: per-cell fg/bold + bg quads, block cursor + blink, version-cache to skip rebuild, surface-loss recovery
-- [x] Themes defined (`tokyo-night` default, `vscode`, `tomorrow-night`)
+- [x] Themes (`tokyo-night` default, `vscode`, `tomorrow-night`) via `--theme NAME` / `--list-themes`
 - [x] Alt screen (`?1049h/l`) + DECSET/DECRST (`?25`, `?2004`, …) for `vim` / `less` / `htop`
 - [x] Scrollback viewing (Shift+PgUp/Dn = page-minus-1, Shift+Home/End = top/bottom, mouse wheel)
 - [X] Scrollbar UI (no graphical scrollbar; use keys/wheel above)
@@ -32,5 +32,5 @@ cargo fmt --check
 - [ ] Unicode: double-width / emoji / combining chars
 - [ ] Scroll regions (`CSI r`), origin / insert / auto-wrap modes
 - [ ] Exit behavior: close window when shell exits (currently just logs)
-- [ ] User config: `--theme` flag + font/size selection (`Theme::from_name` / `set_theme` exist, unwired)
+- [ ] User config: font/size selection (theme is wired: `--theme` / `--list-themes`)
 - [ ] Bell (currently ignored)

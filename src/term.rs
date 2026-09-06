@@ -203,16 +203,14 @@ impl vte::Perform for Terminal {
             }
             'E' => {
                 let n = Self::param_or(params, 0, 1) as isize;
-                self.grid.move_cursor(0, n);
-                self.grid.carriage_return();
-                let x = 0;
-                let y = self.grid.cursor().y;
-                self.grid.set_cursor(x, y);
+                let y = self.grid.cursor().y as isize + n;
+                let y = y.clamp(0, self.grid.rows().saturating_sub(1) as isize) as usize;
+                self.grid.set_cursor(0, y);
             }
             'F' => {
                 let n = Self::param_or(params, 0, 1) as isize;
-                self.grid.move_cursor(0, -n);
-                let y = self.grid.cursor().y;
+                let y = self.grid.cursor().y as isize - n;
+                let y = y.clamp(0, self.grid.rows().saturating_sub(1) as isize) as usize;
                 self.grid.set_cursor(0, y);
             }
             'G' | '`' => {
@@ -417,5 +415,56 @@ mod tests {
         feed_str(&mut t, "ok\x1b[?9999h");
         assert_eq!(t.grid().cell(0, 0).unwrap().ch, 'o');
         assert!(!t.is_alt());
+    }
+
+    #[test]
+    fn cnl_and_cpl_move_to_column_zero() {
+        let mut t = test_terminal(5, 4);
+        feed_str(&mut t, "\x1b[3;3H"); // row 3, col 3 (1-based)
+        feed_str(&mut t, "\x1b[1E");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (0, 3));
+        feed_str(&mut t, "\x1b[2F");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (0, 1));
+        // Clamped at the margins, never panics.
+        feed_str(&mut t, "\x1b[99F");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (0, 0));
+        feed_str(&mut t, "\x1b[99E");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (0, 3));
+    }
+
+    #[test]
+    fn insert_and_delete_lines_shift_rows() {
+        let mut t = test_terminal(3, 3);
+        feed_str(&mut t, "a\r\nb\r\nc");
+        feed_str(&mut t, "\x1b[1;1H\x1b[1L");
+        assert_eq!(t.grid().cell(0, 0).unwrap().ch, ' ');
+        assert_eq!(t.grid().cell(0, 1).unwrap().ch, 'a');
+        feed_str(&mut t, "\x1b[1;1H\x1b[1M");
+        assert_eq!(t.grid().cell(0, 0).unwrap().ch, 'a');
+    }
+
+    #[test]
+    fn ed1_and_el_modes_clear() {
+        let mut t = test_terminal(4, 2);
+        feed_str(&mut t, "abcd\r\nwxyz\x1b[1;3H");
+        feed_str(&mut t, "\x1b[1K");
+        assert_eq!(t.grid().cell(0, 0).unwrap().ch, ' ');
+        assert_eq!(t.grid().cell(2, 0).unwrap().ch, ' ');
+        assert_eq!(t.grid().cell(3, 0).unwrap().ch, 'd');
+        feed_str(&mut t, "\x1b[1J");
+        assert_eq!(t.grid().cell(3, 0).unwrap().ch, 'd');
+        assert_eq!(t.grid().cell(0, 1).unwrap().ch, 'w');
+    }
+
+    #[test]
+    fn malformed_extended_sgr_is_ignored() {
+        let mut t = test_terminal(5, 2);
+        let before = t.grid().pen();
+        // Truncated tails must not panic or change the pen.
+        // (Note: leftover values that ARE real codes, e.g. the `1` in
+        // `38;2;1`, still apply as usual — only the truncated prefix is skipped.)
+        feed_str(&mut t, "\x1b[38;5mX\x1b[38;2;10mY\x1b[48mZ");
+        assert_eq!(t.grid().pen(), before);
+        assert_eq!(t.grid().cell(0, 0).unwrap().ch, 'X');
     }
 }
