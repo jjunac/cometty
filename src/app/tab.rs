@@ -85,6 +85,20 @@ pub fn display_title(index: usize, osc_title: &str) -> String {
     format!("{kept}…")
 }
 
+/// Map an old `active` tab index across removal of `removed` indices.
+///
+/// Counts how many removed tabs sat before `active` and shifts it down
+/// accordingly, clamping to the surviving range. When `active` itself
+/// was removed this lands on the tab that slid into its slot (or the
+/// new last tab when the old last tab went away).
+pub(crate) fn active_after_removals(active: usize, removed: &[usize], new_len: usize) -> usize {
+    if new_len == 0 {
+        return 0;
+    }
+    let shift = removed.iter().filter(|&&i| i < active).count();
+    active.saturating_sub(shift).min(new_len.saturating_sub(1))
+}
+
 /// OS window title for the active tab: the shell's OSC title when set,
 /// otherwise the app name. Tab-bar labels fall back to `Tab N`, but the
 /// window chrome keeps the stable `cometty` brand when the shell is quiet.
@@ -246,9 +260,7 @@ impl App {
         if self.tabs.is_empty() {
             return true;
         }
-        if self.active >= self.tabs.len() {
-            self.active = self.tabs.len() - 1;
-        }
+        self.active = active_after_removals(self.active, &[index], self.tabs.len());
         if let Some(r) = self.renderer.as_mut() {
             r.invalidate();
         }
@@ -336,5 +348,33 @@ mod tests {
     fn window_title_falls_back_to_app_name() {
         assert_eq!(window_title_for(""), "cometty");
         assert_eq!(window_title_for("nvim | ~/dev"), "nvim | ~/dev");
+    }
+
+    #[test]
+    fn active_index_ignores_removals_after_it() {
+        assert_eq!(active_after_removals(0, &[2], 2), 0);
+        assert_eq!(active_after_removals(1, &[2], 2), 1);
+    }
+
+    #[test]
+    fn active_index_shifts_down_past_removed_tabs() {
+        // Tab 0 exits while tab 1 is active: old tab 1 slides to 0.
+        assert_eq!(active_after_removals(1, &[0], 2), 0);
+        assert_eq!(active_after_removals(2, &[0], 2), 1);
+        assert_eq!(active_after_removals(2, &[0, 1], 1), 0);
+    }
+
+    #[test]
+    fn active_index_lands_on_next_tab_when_it_is_removed() {
+        // Active tab itself exits: focus the tab sliding into its slot.
+        assert_eq!(active_after_removals(1, &[1], 2), 1);
+        // ...or the new last tab when the old last tab went away.
+        assert_eq!(active_after_removals(2, &[2], 2), 1);
+        assert_eq!(active_after_removals(0, &[0], 1), 0);
+    }
+
+    #[test]
+    fn active_index_empty_tabs_stays_zero() {
+        assert_eq!(active_after_removals(0, &[0], 0), 0);
     }
 }

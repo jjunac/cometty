@@ -143,7 +143,6 @@ impl ApplicationHandler<UserEvent> for App {
         }
         match event {
             WindowEvent::CloseRequested => {
-                self.exited = true;
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {

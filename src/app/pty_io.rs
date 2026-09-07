@@ -1,7 +1,7 @@
 //! PTY drain + resize plumbing.
 
 use super::App;
-use crate::app::tab::term_height_px;
+use crate::app::tab::{active_after_removals, term_height_px};
 use crate::pty::PtyEvent;
 
 impl App {
@@ -40,13 +40,17 @@ impl App {
                 }
             }
         }
-        // Remove exited tabs from the back so indices stay valid.
+        // Remove exited tabs from the back so indices stay valid, then
+        // remap the active index once (tabs before it may have vanished).
         let removed = !exited.is_empty();
-        for i in exited.into_iter().rev() {
-            self.tabs.remove(i);
-            if self.active >= self.tabs.len() {
-                self.active = self.tabs.len().saturating_sub(1);
-            }
+        for i in exited.iter().rev() {
+            self.tabs.remove(*i);
+        }
+        if self.tabs.is_empty() {
+            return true;
+        }
+        if removed {
+            self.active = active_after_removals(self.active, &exited, self.tabs.len());
         }
         if self.tabs.is_empty() {
             return true;
