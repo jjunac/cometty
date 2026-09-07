@@ -12,7 +12,16 @@ impl App {
                 return;
             };
             let grid = tab.terminal.grid();
-            crate::selection::extract_text(sel, |g| grid.global_line_chars(g))
+            crate::selection::extract_text(sel, |g| {
+                grid.global_line_cells(g).map(|row| {
+                    row.into_iter()
+                        .map(|c| crate::selection::SelCell {
+                            text: c.cluster(),
+                            width: c.width,
+                        })
+                        .collect()
+                })
+            })
         };
         let Some(text) = text else { return };
         if text.is_empty() {

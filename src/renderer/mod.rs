@@ -589,6 +589,55 @@ mod tests {
     }
 
     #[test]
+    fn buffer_lines_skip_wide_continuations() {
+        let theme = Theme::default();
+        let lead = Cell {
+            ch: '中',
+            extra: None,
+            width: 2,
+            ..Default::default()
+        };
+        let cont = Cell {
+            ch: ' ',
+            extra: None,
+            width: 0,
+            ..Default::default()
+        };
+        let a = Cell {
+            ch: 'a',
+            ..Default::default()
+        };
+        let rows = vec![vec![lead, cont, a]];
+        let lines = super::text::build_buffer_lines(&rows, &theme);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text(), "中a");
+    }
+
+    #[test]
+    fn buffer_lines_include_zwj_cluster_once() {
+        let theme = Theme::default();
+        let cluster = "👨\u{200D}👩\u{200D}👧";
+        let mut chars = cluster.chars();
+        let first = chars.next().unwrap();
+        let rest: String = chars.collect();
+        let lead = Cell {
+            ch: first,
+            extra: Some(rest.into_boxed_str()),
+            width: 2,
+            ..Default::default()
+        };
+        let cont = Cell {
+            ch: ' ',
+            extra: None,
+            width: 0,
+            ..Default::default()
+        };
+        let rows = vec![vec![lead, cont]];
+        let lines = super::text::build_buffer_lines(&rows, &theme);
+        assert_eq!(lines[0].text(), cluster);
+    }
+
+    #[test]
     fn scaled_metrics_follow_scale_factor() {
         let (font_1x, line_1x, cell_1x) = scaled_metrics(16.0, 1.0);
         let (font_2x, line_2x, cell_2x) = scaled_metrics(16.0, 2.0);

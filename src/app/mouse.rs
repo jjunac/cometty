@@ -69,14 +69,21 @@ impl App {
                     && (pc, pr) == (col, view_row)
                     && let Some(tab) = self.active_tab()
                 {
-                    let row_chars: Vec<char> = tab
+                    let row_cells: Vec<crate::selection::SelCell> = tab
                         .terminal
                         .grid()
                         .view_rows()
                         .get(view_row)
-                        .map(|r| r.iter().map(|c| c.ch).collect())
+                        .map(|r| {
+                            r.iter()
+                                .map(|c| crate::selection::SelCell {
+                                    text: c.cluster(),
+                                    width: c.width,
+                                })
+                                .collect()
+                        })
                         .unwrap_or_default();
-                    let (sx, ex) = crate::selection::expand_word(&row_chars, col);
+                    let (sx, ex) = crate::selection::expand_word(&row_cells, col);
                     // Clamp to visible cols so a resized row can't overflow.
                     let cols = tab.terminal.cols();
                     let sx = sx.min(cols.saturating_sub(1));

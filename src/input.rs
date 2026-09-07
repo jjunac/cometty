@@ -1,5 +1,5 @@
 use winit::event::KeyEvent;
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey};
 
 #[cfg(any(
     target_os = "windows",
@@ -12,19 +12,123 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 ))]
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
+/// xterm modifier parameter: `1 + shift:1 + alt:2 + ctrl:4 + super:8`.
+fn xterm_mod(modifiers: &ModifiersState) -> u8 {
+    1 + u8::from(modifiers.shift_key())
+        + 2 * u8::from(modifiers.alt_key())
+        + 4 * u8::from(modifiers.control_key())
+        + 8 * u8::from(modifiers.super_key())
+}
+
+/// CSI for `~`-style keys (`PgUp/PgDn/Ins/Del/F5-F12`).
+fn tilde_seq(num: u8, mod_code: u8) -> Vec<u8> {
+    if mod_code == 1 {
+        format!("\x1b[{num}~").into_bytes()
+    } else {
+        format!("\x1b[{num};{mod_code}~").into_bytes()
+    }
+}
+
+/// CSI for letter-suffix keys with `1;mod` (`arrows/Home/End/F1-F4` mods).
+fn mod_letter(suffix: u8, mod_code: u8) -> Vec<u8> {
+    vec![0x1b, b'[', b'1', b';', b'0' + mod_code, suffix]
+}
+
+/// DECKPAM application-keypad byte for a numpad char.
+fn keypad_app_byte(ch: char) -> Option<&'static [u8]> {
+    match ch {
+        '0' => Some(b"\x1bOp"),
+        '1' => Some(b"\x1bOq"),
+        '2' => Some(b"\x1bOr"),
+        '3' => Some(b"\x1bOs"),
+        '4' => Some(b"\x1bOt"),
+        '5' => Some(b"\x1bOu"),
+        '6' => Some(b"\x1bOv"),
+        '7' => Some(b"\x1bOw"),
+        '8' => Some(b"\x1bOx"),
+        '9' => Some(b"\x1bOy"),
+        '-' => Some(b"\x1bOm"),
+        ',' => Some(b"\x1bOl"),
+        '.' => Some(b"\x1bOn"),
+        '+' => Some(b"\x1bOk"),
+        '*' => Some(b"\x1bOj"),
+        '/' => Some(b"\x1bOo"),
+        '=' => Some(b"\x1bOX"),
+        _ => None,
+    }
+}
+
+/// Base bytes for `Alt+character`: prefer the shifted logical char so
+/// `Alt+Shift+A` stays `ESC A`; fall back to the modifierless key when the
+/// logical key is an Option-composed char (macOS `Alt+a` -> `å`).
+fn alt_base_bytes(logical_key: &Key, key_without_modifiers: &Key, shift: bool) -> Option<Vec<u8>> {
+    let logic_s = match logical_key {
+        Key::Character(s) => Some(s.as_str()),
+        _ => None,
+    };
+    let plain_s = match key_without_modifiers {
+        Key::Character(s) => Some(s.as_str()),
+        _ => None,
+    };
+    match (logic_s, plain_s) {
+        (Some(l), Some(p)) if l == p => Some(l.as_bytes().to_vec()),
+        (Some(l), _) if l.is_ascii() && !l.is_empty() => Some(l.as_bytes().to_vec()),
+        (_, Some(p)) if !p.is_empty() => {
+            if shift && p.len() == 1 && p.as_bytes()[0].is_ascii_lowercase() {
+                Some(vec![p.as_bytes()[0].to_ascii_uppercase()])
+            } else {
+                Some(p.as_bytes().to_vec())
+            }
+        }
+        (Some(l), _) if !l.is_empty() => Some(l.as_bytes().to_vec()),
+        _ => None,
+    }
+}
+
 /// Testable core: map logical key + text to bytes.
+#[allow(clippy::too_many_arguments)]
 fn map_key(
     logical_key: &Key,
+    key_without_modifiers: &Key,
     text: Option<&str>,
     text_with_ctrl: Option<&str>,
+    location: KeyLocation,
     pressed: bool,
     modifiers: &ModifiersState,
+    cursor_app: bool,
+    keypad_app: bool,
 ) -> Option<Vec<u8>> {
     if !pressed {
         return None;
     }
 
-    if modifiers.control_key() && !modifiers.super_key() && !modifiers.alt_key() {
+    // Reserved for future tab switching; never reaches the PTY.
+    if is_tab_switch_shortcut(logical_key, modifiers) {
+        return None;
+    }
+    // Super combos never reach the PTY (OS / app shortcuts),
+    // except Cmd+Left/Right for beginning/end of line (all platforms).
+    if modifiers.super_key() {
+        let is_cmd_edit = matches!(
+            logical_key,
+            Key::Named(NamedKey::ArrowLeft)
+                | Key::Named(NamedKey::ArrowRight)
+                | Key::Named(NamedKey::Backspace)
+        ) && !modifiers.alt_key()
+            && !modifiers.control_key();
+        if !is_cmd_edit {
+            return None;
+        }
+    }
+
+    let shift = modifiers.shift_key();
+    let alt = modifiers.alt_key();
+    let ctrl = modifiers.control_key();
+    let mod_code = xterm_mod(modifiers);
+    // AltGr (`Ctrl+Alt`) produces text below; it must not take the Alt prefix.
+    let alt_prefix = alt && !ctrl;
+
+    if ctrl && !alt {
         if let Some(t) = text_with_ctrl
             && !t.is_empty()
             && (t.as_bytes()[0] < 0x20 || t.as_bytes()[0] == 0x7f)
@@ -51,24 +155,199 @@ fn map_key(
 
     match logical_key {
         Key::Named(named) => match named {
-            NamedKey::Enter => return Some(b"\r".to_vec()),
-            NamedKey::Backspace => return Some(vec![0x7f]),
-            NamedKey::Tab => return Some(b"\t".to_vec()),
-            NamedKey::Escape => return Some(vec![0x1b]),
-            NamedKey::ArrowUp => return Some(b"\x1b[A".to_vec()),
-            NamedKey::ArrowDown => return Some(b"\x1b[B".to_vec()),
-            NamedKey::ArrowRight => return Some(b"\x1b[C".to_vec()),
-            NamedKey::ArrowLeft => return Some(b"\x1b[D".to_vec()),
-            NamedKey::Home => return Some(b"\x1b[H".to_vec()),
-            NamedKey::End => return Some(b"\x1b[F".to_vec()),
-            NamedKey::PageUp => return Some(b"\x1b[5~".to_vec()),
-            NamedKey::PageDown => return Some(b"\x1b[6~".to_vec()),
-            NamedKey::Insert => return Some(b"\x1b[2~".to_vec()),
-            NamedKey::Delete => return Some(b"\x1b[3~".to_vec()),
+            NamedKey::Enter => {
+                if location == KeyLocation::Numpad && keypad_app && !ctrl {
+                    let base = b"\x1bOM".to_vec();
+                    if alt_prefix {
+                        let mut out = vec![0x1b];
+                        out.extend_from_slice(&base);
+                        return Some(out);
+                    }
+                    return Some(base);
+                }
+                if alt_prefix {
+                    return Some(vec![0x1b, b'\r']);
+                }
+                return Some(b"\r".to_vec());
+            }
+            NamedKey::Backspace => {
+                // Cmd+Backspace: delete to beginning of line (`Ctrl+U`).
+                if modifiers.super_key() {
+                    return Some(vec![0x15]);
+                }
+                if alt_prefix {
+                    return Some(vec![0x1b, 0x7f]);
+                }
+                return Some(vec![0x7f]);
+            }
+            NamedKey::Tab => {
+                if shift && !alt {
+                    return Some(b"\x1b[Z".to_vec());
+                }
+                if alt_prefix {
+                    if shift {
+                        return Some(b"\x1b\x1b[Z".to_vec());
+                    }
+                    return Some(vec![0x1b, b'\t']);
+                }
+                return Some(b"\t".to_vec());
+            }
+            NamedKey::Escape => {
+                if alt_prefix {
+                    return Some(vec![0x1b, 0x1b]);
+                }
+                return Some(vec![0x1b]);
+            }
+            NamedKey::Space => {
+                if alt_prefix {
+                    return Some(vec![0x1b, b' ']);
+                }
+                return Some(b" ".to_vec());
+            }
+            NamedKey::ArrowUp => {
+                if mod_code == 1 {
+                    if cursor_app {
+                        return Some(b"\x1bOA".to_vec());
+                    }
+                    return Some(b"\x1b[A".to_vec());
+                }
+                return Some(mod_letter(b'A', mod_code));
+            }
+            NamedKey::ArrowDown => {
+                if mod_code == 1 {
+                    if cursor_app {
+                        return Some(b"\x1bOB".to_vec());
+                    }
+                    return Some(b"\x1b[B".to_vec());
+                }
+                return Some(mod_letter(b'B', mod_code));
+            }
+            NamedKey::ArrowRight => {
+                // Cmd+Right: end of line (`Ctrl+E`, like other terminals;
+                // `ESC[F` is often unbound in stock zsh).
+                if modifiers.super_key() {
+                    return Some(vec![0x05]);
+                }
+                // Option+Right: forward word (`ESC f`).
+                if mod_code == 3 {
+                    return Some(b"\x1bf".to_vec());
+                }
+                if mod_code == 1 {
+                    if cursor_app {
+                        return Some(b"\x1bOC".to_vec());
+                    }
+                    return Some(b"\x1b[C".to_vec());
+                }
+                return Some(mod_letter(b'C', mod_code));
+            }
+            NamedKey::ArrowLeft => {
+                // Cmd+Left: beginning of line (`Ctrl+A`, like other terminals;
+                // `ESC[H` is often unbound in stock zsh).
+                if modifiers.super_key() {
+                    return Some(vec![0x01]);
+                }
+                // Option+Left: backward word (`ESC b`).
+                if mod_code == 3 {
+                    return Some(b"\x1bb".to_vec());
+                }
+                if mod_code == 1 {
+                    if cursor_app {
+                        return Some(b"\x1bOD".to_vec());
+                    }
+                    return Some(b"\x1b[D".to_vec());
+                }
+                return Some(mod_letter(b'D', mod_code));
+            }
+            NamedKey::Home => {
+                if mod_code == 1 {
+                    return Some(b"\x1b[H".to_vec());
+                }
+                return Some(mod_letter(b'H', mod_code));
+            }
+            NamedKey::End => {
+                if mod_code == 1 {
+                    return Some(b"\x1b[F".to_vec());
+                }
+                return Some(mod_letter(b'F', mod_code));
+            }
+            NamedKey::PageUp => return Some(tilde_seq(5, mod_code)),
+            NamedKey::PageDown => return Some(tilde_seq(6, mod_code)),
+            NamedKey::Insert => return Some(tilde_seq(2, mod_code)),
+            NamedKey::Delete => return Some(tilde_seq(3, mod_code)),
+            NamedKey::F1 => {
+                if mod_code == 1 {
+                    return Some(b"\x1bOP".to_vec());
+                }
+                return Some(mod_letter(b'P', mod_code));
+            }
+            NamedKey::F2 => {
+                if mod_code == 1 {
+                    return Some(b"\x1bOQ".to_vec());
+                }
+                return Some(mod_letter(b'Q', mod_code));
+            }
+            NamedKey::F3 => {
+                if mod_code == 1 {
+                    return Some(b"\x1bOR".to_vec());
+                }
+                return Some(mod_letter(b'R', mod_code));
+            }
+            NamedKey::F4 => {
+                if mod_code == 1 {
+                    return Some(b"\x1bOS".to_vec());
+                }
+                return Some(mod_letter(b'S', mod_code));
+            }
+            NamedKey::F5 => return Some(tilde_seq(15, mod_code)),
+            NamedKey::F6 => return Some(tilde_seq(17, mod_code)),
+            NamedKey::F7 => return Some(tilde_seq(18, mod_code)),
+            NamedKey::F8 => return Some(tilde_seq(19, mod_code)),
+            NamedKey::F9 => return Some(tilde_seq(20, mod_code)),
+            NamedKey::F10 => return Some(tilde_seq(21, mod_code)),
+            NamedKey::F11 => return Some(tilde_seq(23, mod_code)),
+            NamedKey::F12 => return Some(tilde_seq(24, mod_code)),
             _ => {}
         },
         Key::Character(_) => {}
         Key::Unidentified(_) | Key::Dead(_) => {}
+    }
+
+    // DECKPAM: numpad digits/ops send SS3 instead of ASCII.
+    if location == KeyLocation::Numpad && keypad_app && !ctrl {
+        let candidate = match logical_key {
+            Key::Character(s) => s.chars().next(),
+            _ => None,
+        }
+        .or_else(|| match key_without_modifiers {
+            Key::Character(s) => s.chars().next(),
+            _ => None,
+        })
+        .or_else(|| text.and_then(|t| t.chars().next()));
+        if let Some(ch) = candidate
+            && let Some(seq) = keypad_app_byte(ch)
+        {
+            if alt_prefix {
+                let mut out = vec![0x1b];
+                out.extend_from_slice(seq);
+                return Some(out);
+            }
+            return Some(seq.to_vec());
+        }
+    }
+
+    // Alt+key sends ESC + base (AltGr excluded above via `!ctrl`).
+    if alt_prefix {
+        if let Key::Character(_) = logical_key
+            && let Some(base) = alt_base_bytes(logical_key, key_without_modifiers, shift)
+        {
+            let mut out = vec![0x1b];
+            out.extend_from_slice(&base);
+            return Some(out);
+        }
+        // Alt + non-character without a CSI encoding has no sequence.
+        if let Key::Named(_) = logical_key {
+            return None;
+        }
     }
 
     if let Some(t) = text
@@ -146,8 +425,26 @@ pub fn is_new_tab_shortcut(logical_key: &Key, modifiers: &ModifiersState) -> boo
     modifiers.control_key() != modifiers.super_key()
 }
 
+/// Reserved tab-switch shortcut: `Ctrl+Tab` / `Ctrl+Shift+Tab`
+/// (plus `Cmd` equivalents). Consumed locally so the PTY never sees them;
+/// switching itself is a future TODO.
+pub fn is_tab_switch_shortcut(logical_key: &Key, modifiers: &ModifiersState) -> bool {
+    if *logical_key != Key::Named(NamedKey::Tab) {
+        return false;
+    }
+    if modifiers.alt_key() {
+        return false;
+    }
+    modifiers.control_key() != modifiers.super_key()
+}
+
 /// Map a winit KeyEvent to bytes to send to the PTY.
-pub fn key_to_bytes(event: &KeyEvent, modifiers: &ModifiersState) -> Option<Vec<u8>> {
+pub fn key_to_bytes(
+    event: &KeyEvent,
+    modifiers: &ModifiersState,
+    cursor_app: bool,
+    keypad_app: bool,
+) -> Option<Vec<u8>> {
     #[cfg(any(
         target_os = "windows",
         target_os = "macos",
@@ -169,12 +466,37 @@ pub fn key_to_bytes(event: &KeyEvent, modifiers: &ModifiersState) -> Option<Vec<
     )))]
     let text_with_ctrl: Option<&str> = None;
 
+    #[cfg(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    let without = event.key_without_modifiers();
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )))]
+    let without = event.logical_key.clone();
+
     map_key(
         &event.logical_key,
+        &without,
         event.text.as_deref(),
         text_with_ctrl,
+        event.location,
         event.state.is_pressed(),
         modifiers,
+        cursor_app,
+        keypad_app,
     )
 }
 
@@ -184,13 +506,25 @@ mod tests {
     use winit::event::ElementState;
     use winit::keyboard::ModifiersState;
 
+    fn plain(logical: &Key, text: Option<&str>, modifiers: &ModifiersState) -> Option<Vec<u8>> {
+        map_key(
+            logical,
+            logical,
+            text,
+            text,
+            KeyLocation::Standard,
+            true,
+            modifiers,
+            false,
+            false,
+        )
+    }
+
     #[test]
     fn enter_maps_to_cr() {
-        let out = map_key(
+        let out = plain(
             &Key::Named(NamedKey::Enter),
             Some("\r"),
-            Some("\r"),
-            true,
             &ModifiersState::empty(),
         );
         assert_eq!(out, Some(b"\r".to_vec()));
@@ -198,11 +532,9 @@ mod tests {
 
     #[test]
     fn arrows_map() {
-        let out = map_key(
+        let out = plain(
             &Key::Named(NamedKey::ArrowUp),
             None,
-            None,
-            true,
             &ModifiersState::empty(),
         );
         assert_eq!(out, Some(b"\x1b[A".to_vec()));
@@ -210,11 +542,9 @@ mod tests {
 
     #[test]
     fn text_passthrough() {
-        let out = map_key(
+        let out = plain(
             &Key::Character("a".into()),
             Some("a"),
-            Some("a"),
-            true,
             &ModifiersState::empty(),
         );
         assert_eq!(out, Some(b"a".to_vec()));
@@ -224,10 +554,14 @@ mod tests {
     fn release_ignored() {
         let out = map_key(
             &Key::Character("a".into()),
+            &Key::Character("a".into()),
             Some("a"),
             Some("a"),
+            KeyLocation::Standard,
             false,
             &ModifiersState::empty(),
+            false,
+            false,
         );
         assert_eq!(out, None);
     }
@@ -290,5 +624,252 @@ mod tests {
             &t,
             &(ModifiersState::CONTROL | ModifiersState::SUPER)
         ));
+    }
+
+    #[test]
+    fn f_keys_plain() {
+        assert_eq!(
+            plain(&Key::Named(NamedKey::F1), None, &ModifiersState::empty()),
+            Some(b"\x1bOP".to_vec())
+        );
+        assert_eq!(
+            plain(&Key::Named(NamedKey::F5), None, &ModifiersState::empty()),
+            Some(b"\x1b[15~".to_vec())
+        );
+        assert_eq!(
+            plain(&Key::Named(NamedKey::F12), None, &ModifiersState::empty()),
+            Some(b"\x1b[24~".to_vec())
+        );
+    }
+
+    #[test]
+    fn modified_arrows_and_home() {
+        let shift = ModifiersState::SHIFT;
+        let ctrl = ModifiersState::CONTROL;
+        let alt = ModifiersState::ALT;
+        assert_eq!(
+            plain(&Key::Named(NamedKey::ArrowUp), None, &shift),
+            Some(b"\x1b[1;2A".to_vec())
+        );
+        assert_eq!(
+            plain(&Key::Named(NamedKey::ArrowLeft), None, &ctrl),
+            Some(b"\x1b[1;5D".to_vec())
+        );
+        assert_eq!(
+            plain(&Key::Named(NamedKey::ArrowUp), None, &alt),
+            Some(b"\x1b[1;3A".to_vec())
+        );
+        assert_eq!(
+            plain(&Key::Named(NamedKey::Home), None, &shift),
+            Some(b"\x1b[1;2H".to_vec())
+        );
+        assert_eq!(
+            plain(&Key::Named(NamedKey::PageUp), None, &shift),
+            Some(b"\x1b[5;2~".to_vec())
+        );
+        assert_eq!(
+            plain(&Key::Named(NamedKey::F1), None, &ctrl),
+            Some(b"\x1b[1;5P".to_vec())
+        );
+        assert_eq!(
+            plain(&Key::Named(NamedKey::F5), None, &shift),
+            Some(b"\x1b[15;2~".to_vec())
+        );
+    }
+
+    #[test]
+    fn shift_tab_is_backtab() {
+        assert_eq!(
+            plain(
+                &Key::Named(NamedKey::Tab),
+                Some("\t"),
+                &ModifiersState::SHIFT
+            ),
+            Some(b"\x1b[Z".to_vec())
+        );
+    }
+
+    #[test]
+    fn tab_switch_is_reserved() {
+        let tab: Key = Key::Named(NamedKey::Tab);
+        assert!(is_tab_switch_shortcut(&tab, &ModifiersState::CONTROL));
+        assert!(is_tab_switch_shortcut(
+            &tab,
+            &(ModifiersState::CONTROL | ModifiersState::SHIFT)
+        ));
+        assert!(!is_tab_switch_shortcut(&tab, &ModifiersState::empty()));
+        assert!(!is_tab_switch_shortcut(&tab, &ModifiersState::SHIFT));
+        assert_eq!(plain(&tab, Some("\t"), &ModifiersState::CONTROL), None);
+    }
+
+    #[test]
+    fn alt_prefixes_printable() {
+        let a: Key = Key::Character("a".into());
+        assert_eq!(
+            plain(&a, None, &ModifiersState::ALT),
+            Some(vec![0x1b, b'a'])
+        );
+        let upper: Key = Key::Character("A".into());
+        assert_eq!(
+            plain(&upper, None, &ModifiersState::ALT),
+            Some(vec![0x1b, b'A'])
+        );
+        // Option+Left/Right move by word (`ESC b/f`).
+        assert_eq!(
+            plain(&Key::Named(NamedKey::ArrowLeft), None, &ModifiersState::ALT),
+            Some(b"\x1bb".to_vec())
+        );
+        assert_eq!(
+            plain(
+                &Key::Named(NamedKey::ArrowRight),
+                None,
+                &ModifiersState::ALT
+            ),
+            Some(b"\x1bf".to_vec())
+        );
+        // Alt+Enter is ESC + CR.
+        assert_eq!(
+            plain(
+                &Key::Named(NamedKey::Enter),
+                Some("\r"),
+                &ModifiersState::ALT
+            ),
+            Some(vec![0x1b, b'\r'])
+        );
+    }
+
+    #[test]
+    fn alt_uses_modifierless_base_for_option_chars() {
+        let composed: Key = Key::Character("å".into());
+        let base: Key = Key::Character("a".into());
+        let out = map_key(
+            &composed,
+            &base,
+            None,
+            None,
+            KeyLocation::Standard,
+            true,
+            &ModifiersState::ALT,
+            false,
+            false,
+        );
+        assert_eq!(out, Some(vec![0x1b, b'a']));
+    }
+
+    #[test]
+    fn cursor_app_sends_ss3_for_plain_arrows() {
+        let up = Key::Named(NamedKey::ArrowUp);
+        let out = map_key(
+            &up,
+            &up,
+            None,
+            None,
+            KeyLocation::Standard,
+            true,
+            &ModifiersState::empty(),
+            true,
+            false,
+        );
+        assert_eq!(out, Some(b"\x1bOA".to_vec()));
+        // Modified arrows stay CSI even in app mode.
+        let out = map_key(
+            &up,
+            &up,
+            None,
+            None,
+            KeyLocation::Standard,
+            true,
+            &ModifiersState::SHIFT,
+            true,
+            false,
+        );
+        assert_eq!(out, Some(b"\x1b[1;2A".to_vec()));
+    }
+
+    #[test]
+    fn keypad_app_sends_ss3() {
+        let one: Key = Key::Character("1".into());
+        let out = map_key(
+            &one,
+            &one,
+            Some("1"),
+            Some("1"),
+            KeyLocation::Numpad,
+            true,
+            &ModifiersState::empty(),
+            false,
+            true,
+        );
+        assert_eq!(out, Some(b"\x1bOq".to_vec()));
+        // Normal mode passes ASCII through.
+        let out = map_key(
+            &one,
+            &one,
+            Some("1"),
+            Some("1"),
+            KeyLocation::Numpad,
+            true,
+            &ModifiersState::empty(),
+            false,
+            false,
+        );
+        assert_eq!(out, Some(b"1".to_vec()));
+        // Keypad Enter in app mode is SS3 M.
+        let enter = Key::Named(NamedKey::Enter);
+        let out = map_key(
+            &enter,
+            &enter,
+            Some("\r"),
+            Some("\r"),
+            KeyLocation::Numpad,
+            true,
+            &ModifiersState::empty(),
+            false,
+            true,
+        );
+        assert_eq!(out, Some(b"\x1bOM".to_vec()));
+    }
+
+    #[test]
+    fn super_is_ignored() {
+        let a: Key = Key::Character("a".into());
+        assert_eq!(plain(&a, Some("a"), &ModifiersState::SUPER), None);
+    }
+
+    #[test]
+    fn cmd_arrows_move_to_line_edges() {
+        assert_eq!(
+            plain(
+                &Key::Named(NamedKey::ArrowLeft),
+                None,
+                &ModifiersState::SUPER
+            ),
+            Some(vec![0x01])
+        );
+        assert_eq!(
+            plain(
+                &Key::Named(NamedKey::ArrowRight),
+                None,
+                &ModifiersState::SUPER
+            ),
+            Some(vec![0x05])
+        );
+        // Cmd+Up/Down stay ignored.
+        assert_eq!(
+            plain(&Key::Named(NamedKey::ArrowUp), None, &ModifiersState::SUPER),
+            None
+        );
+    }
+
+    #[test]
+    fn cmd_backspace_kills_to_line_start() {
+        assert_eq!(
+            plain(
+                &Key::Named(NamedKey::Backspace),
+                Some("\x7f"),
+                &ModifiersState::SUPER
+            ),
+            Some(vec![0x15])
+        );
     }
 }

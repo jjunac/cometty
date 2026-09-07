@@ -96,6 +96,14 @@ impl Terminal {
         self.grid.bracketed_paste()
     }
 
+    pub fn cursor_app_mode(&self) -> bool {
+        self.grid.cursor_app_mode()
+    }
+
+    pub fn keypad_app_mode(&self) -> bool {
+        self.grid.keypad_app_mode()
+    }
+
     #[allow(dead_code)]
     pub fn is_alt(&self) -> bool {
         self.grid.is_alt()
@@ -158,7 +166,9 @@ impl Terminal {
 
     fn set_private_mode(&mut self, mode: u16, set: bool) {
         match mode {
+            1 => self.grid.set_cursor_app_mode(set),
             25 => self.grid.set_cursor_enabled(set),
+            66 => self.grid.set_keypad_app_mode(set),
             2004 => self.grid.set_bracketed_paste(set),
             47 | 1047 => {
                 if set {
@@ -223,10 +233,29 @@ impl Terminal {
 
 impl vte::Perform for Terminal {
     fn print(&mut self, c: char) {
+        // Pending wrap clamps the cursor onto the last cell: a combining /
+        // ZWJ continuation must attach there, not wrap and not attach one
+        // cell back. Preserve pending state for the next advancing char.
         if self.pending_wrap {
+            let cur = self.grid.cursor();
+            if self.grid.append_to_cell(cur.x, cur.y, c) {
+                return;
+            }
             self.grid.newline();
             self.pending_wrap = false;
-        } else {
+            // Fall through to write `c` fresh (it wasn't a continuation of
+            // the margin cell). Combining at a fresh line start attaches via
+            // the normal path below if applicable.
+        }
+        // Combining / ZWJ / flag continuations attach to the previous
+        // cluster without wrapping or moving the cursor.
+        if self.grid.is_append_continuation(c) {
+            self.grid.append_to_prev(c);
+            return;
+        }
+        if !self.pending_wrap {
+            // Pending case already newlined above; otherwise resolve an
+            // overfull cursor (e.g. after a direct grid write).
             self.grid.handle_wrap_if_needed();
         }
         // After newline, cursor.x is 0.
@@ -239,6 +268,8 @@ impl vte::Perform for Terminal {
             // put_char already advanced x to cols; set_cursor above fixes it.
             // Re-advance pending state: next print will newline.
             // But set_cursor cleared the >=cols condition; keep pending_wrap.
+            // Note: set_cursor snaps off continuations, so a wide lead at
+            // the margin keeps the visual cursor on its lead cell.
         }
     }
 
@@ -363,11 +394,15 @@ impl vte::Perform for Terminal {
                 }
                 b'7' => self.grid.save_cursor(),
                 b'8' => self.grid.restore_cursor(),
+                b'=' => self.grid.set_keypad_app_mode(true),
+                b'>' => self.grid.set_keypad_app_mode(false),
                 b'c' => {
                     // Full reset: back to main buffer with default modes.
                     self.grid.exit_alt();
                     self.grid.set_cursor_enabled(true);
                     self.grid.set_bracketed_paste(false);
+                    self.grid.set_cursor_app_mode(false);
+                    self.grid.set_keypad_app_mode(false);
                     self.grid.set_cursor_style(CursorStyle::default());
                     // Reset pen before clearing so BCE erase uses default bg.
                     self.grid.sgr(&[0]);
@@ -499,6 +534,30 @@ mod tests {
         assert!(t.bracketed_paste());
         feed_str(&mut t, "\x1b[?2004l");
         assert!(!t.bracketed_paste());
+    }
+
+    #[test]
+    fn decckm_and_keypad_app_modes() {
+        let mut t = test_terminal(5, 3);
+        assert!(!t.cursor_app_mode());
+        assert!(!t.keypad_app_mode());
+        feed_str(&mut t, "\x1b[?1h");
+        assert!(t.cursor_app_mode());
+        feed_str(&mut t, "\x1b[?1l");
+        assert!(!t.cursor_app_mode());
+        feed_str(&mut t, "\x1b[?66h");
+        assert!(t.keypad_app_mode());
+        feed_str(&mut t, "\x1b[?66l");
+        assert!(!t.keypad_app_mode());
+        // DECKPAM / DECKPNM legacy sequences.
+        feed_str(&mut t, "\x1b=");
+        assert!(t.keypad_app_mode());
+        feed_str(&mut t, "\x1b>");
+        assert!(!t.keypad_app_mode());
+        // Full reset clears both.
+        feed_str(&mut t, "\x1b[?1h\x1b=\x1bc");
+        assert!(!t.cursor_app_mode());
+        assert!(!t.keypad_app_mode());
     }
 
     #[test]
@@ -668,5 +727,35 @@ mod tests {
         feed_str(&mut t, "\x1bc");
         let c = t.grid().cell(0, 0).unwrap();
         assert_eq!(c.bg, theme.background);
+    }
+
+    #[test]
+    fn wide_emoji_feed_occupies_two_cols() {
+        let mut t = test_terminal(6, 2);
+        feed_str(&mut t, "😀");
+        let lead = t.grid().cell(0, 0).unwrap();
+        assert_eq!(lead.width, 2);
+        assert_eq!(lead.ch, '😀');
+        assert_eq!(t.grid().cell(1, 0).unwrap().width, 0);
+    }
+
+    #[test]
+    fn combining_feed_attaches_without_wrap() {
+        let mut t = test_terminal(3, 2);
+        feed_str(&mut t, "abc");
+        // Pending wrap is set (cursor past margin, clamped to last col).
+        feed_str(&mut t, "\u{0301}");
+        // Combining attaches to `c`, no newline.
+        assert_eq!(t.grid().cell(2, 0).unwrap().cluster(), "c\u{0301}");
+        assert_eq!(t.grid().cell(0, 1).unwrap().ch, ' ');
+    }
+
+    #[test]
+    fn zwj_feed_stays_in_one_cell() {
+        let mut t = test_terminal(8, 2);
+        feed_str(&mut t, "👨\u{200D}👩\u{200D}👧");
+        let lead = t.grid().cell(0, 0).unwrap();
+        assert_eq!(lead.width, 2);
+        assert_eq!(lead.cluster(), "👨\u{200D}👩\u{200D}👧");
     }
 }

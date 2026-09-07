@@ -20,6 +20,49 @@ pub struct Selection {
     pub active: CellPos,
 }
 
+/// One grid column for selection math: `text` is the full grapheme cluster
+/// for a lead/narrow cell, `width` is 0 (continuation), 1 or 2.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelCell {
+    pub text: String,
+    pub width: u8,
+}
+
+impl SelCell {
+    pub fn narrow(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+            width: 1,
+        }
+    }
+
+    /// Test/helper constructor for a wide lead cell.
+    #[allow(dead_code)]
+    pub fn wide(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+            width: 2,
+        }
+    }
+
+    /// Test/helper constructor for a wide continuation placeholder.
+    #[allow(dead_code)]
+    pub fn continuation() -> Self {
+        Self {
+            text: String::new(),
+            width: 0,
+        }
+    }
+
+    pub fn is_continuation(&self) -> bool {
+        self.width == 0
+    }
+
+    pub fn is_blank(&self) -> bool {
+        self.width == 1 && self.text == " "
+    }
+}
+
 impl Selection {
     pub fn new(anchor: CellPos) -> Self {
         Self {
@@ -102,25 +145,75 @@ pub fn selection_to_view(
     Some((clamp_view(s), clamp_view(e)))
 }
 
+/// Resolve a column to its cluster lead: a continuation maps back to the
+/// wide lead so double-click / copy never splits a wide char.
+fn resolve_lead(cells: &[SelCell], x: usize) -> usize {
+    if cells.is_empty() {
+        return 0;
+    }
+    let mut x = x.min(cells.len().saturating_sub(1));
+    if cells[x].is_continuation() && x > 0 {
+        x -= 1;
+    }
+    x
+}
+
 /// Expand a cell to its word on a single visual row.
 /// Word chars are `[A-Za-z0-9_]`; anything else (including spaces) breaks.
-pub fn expand_word(row_text: &[char], x: usize) -> (usize, usize) {
-    if row_text.is_empty() {
+/// Wide / emoji clusters select as a single unit (lead + continuation).
+pub fn expand_word(row: &[SelCell], x: usize) -> (usize, usize) {
+    if row.is_empty() {
         return (0, 0);
     }
-    let x = x.min(row_text.len().saturating_sub(1));
-    if !is_word_char(row_text[x]) {
+    let x = resolve_lead(row, x);
+    // Wide clusters (CJK / emoji / ZWJ) select the whole cell pair.
+    if row[x].width == 2 {
+        let end = (x + 1).min(row.len().saturating_sub(1));
+        return (x, end);
+    }
+    let text: Vec<char> = row
+        .iter()
+        .map(|c| c.text.chars().next().unwrap_or(' '))
+        .collect();
+    let x = x.min(text.len().saturating_sub(1));
+    if !is_word_char(text[x]) {
         return (x, x);
     }
     let mut start = x;
-    while start > 0 && is_word_char(row_text[start - 1]) {
-        start -= 1;
+    while start > 0 {
+        let prev = start - 1;
+        // Don't cross a wide cluster boundary.
+        if row[prev].width == 2 || row[prev].is_continuation() || row[start].is_continuation() {
+            break;
+        }
+        if !is_word_char(text[prev]) {
+            break;
+        }
+        start = prev;
     }
     let mut end = x;
-    while end + 1 < row_text.len() && is_word_char(row_text[end + 1]) {
-        end += 1;
+    while end + 1 < text.len() {
+        let next = end + 1;
+        if row[next].width == 2 || row[next].is_continuation() {
+            break;
+        }
+        if !is_word_char(text[next]) {
+            break;
+        }
+        end = next;
     }
     (start, end)
+}
+
+/// Backwards-compatible word expansion over plain chars (tests / callers
+/// without width info). Wide handling lives in the `SelCell` overload.
+#[allow(dead_code)]
+pub fn expand_word_chars(row_text: &[char], x: usize) -> (usize, usize) {
+    let cells: Vec<SelCell> = row_text
+        .iter()
+        .map(|c| SelCell::narrow(&c.to_string()))
+        .collect();
+    expand_word(&cells, x)
 }
 
 fn is_word_char(ch: char) -> bool {
@@ -129,12 +222,14 @@ fn is_word_char(ch: char) -> bool {
 
 /// Extract selected text from lines resolved by `line_at`.
 ///
-/// `line_at(global)` returns the full row's chars (untrimmed); missing lines
-/// are treated as blank. Each line is trimmed of trailing spaces and lines
-/// are joined with `\n`.
+/// `line_at(global)` returns the row's per-column cells (lead text +
+/// continuation markers); missing lines are blank. Wide leads emit their
+/// cluster once, continuations emit nothing (but a selection starting on a
+/// continuation still includes its lead). Each line is trimmed of trailing
+/// spaces and lines are joined with `\n`.
 pub fn extract_text(
     sel: &Selection,
-    line_at: impl Fn(usize) -> Option<Vec<char>>,
+    line_at: impl Fn(usize) -> Option<Vec<SelCell>>,
 ) -> Option<String> {
     if sel.is_empty() {
         return None;
@@ -143,25 +238,76 @@ pub fn extract_text(
     let mut out = String::new();
     for y in s.y..=e.y {
         let line = line_at(y).unwrap_or_default();
-        let trimmed_end = line
-            .iter()
-            .rposition(|c| *c != ' ')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let from = if y == s.y { s.x.min(trimmed_end) } else { 0 };
-        let to = if y == e.y {
-            e.x.saturating_add(1).min(trimmed_end)
-        } else {
-            trimmed_end
-        };
+        // Trim trailing blanks (spaces + missing tails), but keep a trailing
+        // wide cluster (lead + continuation).
+        let mut end = line.len();
+        while end > 0 {
+            let c = &line[end - 1];
+            if c.is_continuation() {
+                break;
+            }
+            if c.is_blank() {
+                end -= 1;
+            } else {
+                break;
+            }
+        }
+        let mut from = if y == s.y { s.x } else { 0 };
+        let mut to = if y == e.y { e.x.saturating_add(1) } else { end };
+        from = from.min(end);
+        to = to.min(end);
+        // Selection starting on a continuation includes its lead.
+        if from < end && line[from].is_continuation() && from > 0 {
+            from -= 1;
+        }
+        // Selection ending on a wide lead includes its continuation.
+        if to > 0 && to < line.len() && line[to - 1].width == 2 && line[to].is_continuation() {
+            to += 1;
+        }
+        // Selection ending just before a continuation whose lead is
+        // included: also include the continuation (covered above). When `to`
+        // points at a lone continuation (started inside it), the `from`
+        // back-step already handled it.
         if y > s.y {
             out.push('\n');
         }
-        if from < to {
-            out.extend(line[from..to].iter());
+        for c in line.iter().take(to).skip(from) {
+            if c.is_continuation() {
+                continue;
+            }
+            // Skip trailing filler already trimmed; inner blanks kept.
+            out.push_str(&c.text);
+        }
+        // Trim trailing spaces that came from inner blanks at line end
+        // (already handled by `end`, but a partial-line copy can end on a
+        // blank: strip it to match the `Vec<char>` legacy behavior).
+        let trimmed_len = out.trim_end_matches(' ').len();
+        // Only trim the current line's tail, not earlier newlines.
+        if let Some(last_nl) = out.rfind('\n') {
+            let tail = &out[last_nl + 1..];
+            let tail_trimmed = tail.trim_end_matches(' ');
+            out.truncate(last_nl + 1 + tail_trimmed.len());
+        } else {
+            out.truncate(trimmed_len);
         }
     }
     Some(out)
+}
+
+/// Legacy `Vec<char>` extraction (kept for tests): treats each char as a
+/// narrow cell.
+#[allow(dead_code)]
+pub fn extract_text_chars(
+    sel: &Selection,
+    line_at: impl Fn(usize) -> Option<Vec<char>>,
+) -> Option<String> {
+    extract_text(sel, |y| {
+        line_at(y).map(|v| {
+            v.into_iter()
+                .map(|c| SelCell::narrow(&c.to_string()))
+                .collect()
+        })
+    })
 }
 
 /// Map physical pixels to a cell `(col, row)`.
@@ -203,6 +349,10 @@ mod tests {
             anchor: CellPos { x: ax, y: ay },
             active: CellPos { x: bx, y: by },
         }
+    }
+
+    fn narrow_row(s: &str) -> Vec<SelCell> {
+        s.chars().map(|c| SelCell::narrow(&c.to_string())).collect()
     }
 
     #[test]
@@ -255,8 +405,7 @@ mod tests {
 
     #[test]
     fn extract_trims_and_joins() {
-        let lines: Vec<Vec<char>> =
-            vec!["hello   ".chars().collect(), "  hi    ".chars().collect()];
+        let lines: Vec<Vec<SelCell>> = vec![narrow_row("hello   "), narrow_row("  hi    ")];
         let s = sel(1, 0, 3, 1);
         let text = extract_text(&s, |y| lines.get(y).cloned()).unwrap();
         assert_eq!(text, "ello\n  hi");
@@ -264,12 +413,41 @@ mod tests {
 
     #[test]
     fn expand_word_stops_at_delimiters() {
-        let row: Vec<char> = "foo bar_baz-qux".chars().collect();
+        let row = narrow_row("foo bar_baz-qux");
         assert_eq!(expand_word(&row, 1), (0, 2));
         assert_eq!(expand_word(&row, 5), (4, 10));
         // On a delimiter selects just that cell.
         assert_eq!(expand_word(&row, 3), (3, 3));
         assert_eq!(expand_word(&row, 11), (11, 11));
+    }
+
+    #[test]
+    fn expand_word_selects_wide_as_unit() {
+        let row = vec![
+            SelCell::wide("中"),
+            SelCell::continuation(),
+            SelCell::narrow("a"),
+        ];
+        assert_eq!(expand_word(&row, 0), (0, 1));
+        assert_eq!(expand_word(&row, 1), (0, 1));
+        assert_eq!(expand_word(&row, 2), (2, 2));
+    }
+
+    #[test]
+    fn extract_skips_continuations() {
+        let row = vec![
+            SelCell::wide("中"),
+            SelCell::continuation(),
+            SelCell::narrow("a"),
+            SelCell::narrow(" "),
+        ];
+        let s = sel(0, 0, 2, 0);
+        let text = extract_text(&s, |_| Some(row.clone())).unwrap();
+        assert_eq!(text, "中a");
+        // Starting on the continuation still copies the cluster.
+        let s2 = sel(1, 0, 2, 0);
+        let text2 = extract_text(&s2, |_| Some(row.clone())).unwrap();
+        assert_eq!(text2, "中a");
     }
 
     #[test]

@@ -14,12 +14,25 @@ pub(crate) fn build_buffer_lines(
 ) -> Vec<BufferLine> {
     let mut lines = Vec::with_capacity(rows.len());
     for row_cells in rows {
-        let text: String = row_cells.iter().map(|c| c.ch).collect();
-        let trimmed = text.trim_end();
-        let line_text = if trimmed.is_empty() {
-            " ".to_string()
+        // Build the shaped string from cluster leads only; wide
+        // continuations occupy a grid column but no glyphs.
+        let mut clusters: Vec<(usize, String)> = Vec::new();
+        for (col, cell) in row_cells.iter().enumerate() {
+            if cell.width == 0 {
+                continue;
+            }
+            clusters.push((col, cell.cluster()));
+        }
+        // Trim trailing blank cells (single-space narrow cells only; wide
+        // clusters and ZWJ sequences are never whitespace-trimmed).
+        while clusters.last().is_some_and(|(_, s)| s == " ") {
+            clusters.pop();
+        }
+        let line_string: String = clusters.iter().map(|(_, s)| s.as_str()).collect();
+        let (line_text, visible_clusters) = if line_string.trim().is_empty() {
+            (" ".to_string(), Vec::new())
         } else {
-            trimmed.to_string()
+            (line_string, clusters)
         };
         let mut line = BufferLine::new(
             line_text.clone(),
@@ -32,12 +45,13 @@ pub(crate) fn build_buffer_lines(
                 .family(Family::Monospace)
                 .color(theme.foreground.as_glyphon_color()),
         );
-        let visible_len = line_text.chars().count();
-        let mut byte_idx = 0;
-        let chars: Vec<char> = line_text.chars().collect();
-        let mut i = 0;
-        while i < visible_len {
-            let cell = &row_cells[i];
+        // Attr spans keyed by grid column so bold/color follow cells, not
+        // characters: a ZWJ cluster is many chars but one cell.
+        let mut byte_idx = 0usize;
+        let mut i = 0usize;
+        while i < visible_clusters.len() {
+            let (col, _) = visible_clusters[i];
+            let cell = &row_cells[col];
             let color = cell.fg.as_glyphon_color();
             let weight = if cell.bold {
                 Weight::BOLD
@@ -50,13 +64,14 @@ pub(crate) fn build_buffer_lines(
                 .weight(weight);
             let start_byte = byte_idx;
             let mut j = i;
-            while j < visible_len {
-                let c2 = &row_cells[j];
+            while j < visible_clusters.len() {
+                let (col2, s2) = &visible_clusters[j];
+                let c2 = &row_cells[*col2];
                 let same = c2.fg == cell.fg && c2.bold == cell.bold;
                 if !same {
                     break;
                 }
-                byte_idx += chars[j].len_utf8();
+                byte_idx += s2.len();
                 j += 1;
             }
             if j > i {

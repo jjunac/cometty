@@ -56,6 +56,28 @@ impl Grid {
         }
     }
 
+    pub fn cursor_app_mode(&self) -> bool {
+        self.cursor_app
+    }
+
+    pub fn set_cursor_app_mode(&mut self, enabled: bool) {
+        if self.cursor_app != enabled {
+            self.cursor_app = enabled;
+            self.bump();
+        }
+    }
+
+    pub fn keypad_app_mode(&self) -> bool {
+        self.keypad_app
+    }
+
+    pub fn set_keypad_app_mode(&mut self, enabled: bool) {
+        if self.keypad_app != enabled {
+            self.keypad_app = enabled;
+            self.bump();
+        }
+    }
+
     pub fn cursor_style(&self) -> CursorStyle {
         self.cursor_style
     }

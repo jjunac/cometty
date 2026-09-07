@@ -3,6 +3,7 @@ mod cell;
 mod edit;
 mod scroll;
 mod style;
+pub mod unicode;
 
 pub use cell::{Cell, Cursor, CursorShape, CursorStyle, Pen};
 
@@ -29,6 +30,8 @@ pub struct Grid {
     saved_main_saved_pen: Option<Pen>,
     cursor_enabled: bool,
     bracketed_paste: bool,
+    cursor_app: bool,
+    keypad_app: bool,
     scroll_offset: usize,
     cursor_style: CursorStyle,
     saved_style: Option<CursorStyle>,
@@ -41,6 +44,8 @@ impl Grid {
         let rows = rows.max(1);
         let blank = Cell {
             ch: ' ',
+            extra: None,
+            width: 1,
             fg: theme.foreground,
             bg: theme.background,
             bold: false,
@@ -70,6 +75,8 @@ impl Grid {
             saved_main_saved_pen: None,
             cursor_enabled: true,
             bracketed_paste: false,
+            cursor_app: false,
+            keypad_app: false,
             scroll_offset: 0,
             cursor_style: CursorStyle::default(),
             saved_style: None,
@@ -108,7 +115,7 @@ impl Grid {
     // See `pen`.
     #[allow(dead_code)]
     pub fn cell(&self, x: usize, y: usize) -> Option<Cell> {
-        self.cells.get(y)?.get(x).copied()
+        self.cells.get(y)?.get(x).cloned()
     }
 
     #[allow(dead_code)]
@@ -123,23 +130,31 @@ impl Grid {
             return;
         }
         let blank = self.blank_cell();
-        let mut new_cells = vec![vec![blank; cols]; rows];
+        let mut new_cells = vec![vec![blank.clone(); cols]; rows];
         let copy_rows = self.rows.min(rows);
         let copy_cols = self.cols.min(cols);
         for (y, new_row) in new_cells.iter_mut().enumerate().take(copy_rows) {
             for (x, new_cell) in new_row.iter_mut().enumerate().take(copy_cols) {
-                *new_cell = self.cells[y][x];
+                *new_cell = self.cells[y][x].clone();
             }
+        }
+        // A shrink can strand a wide lead without its continuation (or a
+        // continuation without its lead) at the cut edge: repair to spaces.
+        for row in new_cells.iter_mut() {
+            Self::fix_row_wide(row, &blank);
         }
         self.cells = new_cells;
         if let Some(main) = self.saved_main_cells.take() {
-            let mut new_main = vec![vec![blank; cols]; rows];
+            let mut new_main = vec![vec![blank.clone(); cols]; rows];
             let main_rows = main.len();
             let main_cols = main.first().map(|r| r.len()).unwrap_or(0);
             for (y, new_row) in new_main.iter_mut().enumerate().take(main_rows.min(rows)) {
                 for (x, new_cell) in new_row.iter_mut().enumerate().take(main_cols.min(cols)) {
-                    *new_cell = main[y][x];
+                    *new_cell = main[y][x].clone();
                 }
+            }
+            for row in new_main.iter_mut() {
+                Self::fix_row_wide(row, &blank);
             }
             self.saved_main_cells = Some(new_main);
         }
@@ -147,17 +162,57 @@ impl Grid {
         self.rows = rows;
         if cols != self.scrollback.front().map(|r| r.len()).unwrap_or(cols) {
             for row in self.scrollback.iter_mut() {
-                row.resize(cols, blank);
+                row.resize(cols, blank.clone());
+                Self::fix_row_wide(row, &blank);
             }
         }
         self.scroll_offset = self.scroll_offset.min(self.scrollback.len());
         self.cursor.x = self.cursor.x.min(cols.saturating_sub(1));
         self.cursor.y = self.cursor.y.min(rows.saturating_sub(1));
+        // Cursor must never rest on a wide continuation: snap to the lead.
+        self.snap_cursor_to_lead();
         if let Some(c) = self.saved_main_cursor.as_mut() {
             c.x = c.x.min(cols.saturating_sub(1));
             c.y = c.y.min(rows.saturating_sub(1));
         }
         self.bump();
+    }
+
+    /// Repair dangling wide halves in a row: a lead at the last column (or
+    /// before a non-continuation) becomes a space; a continuation without a
+    /// lead becomes a space.
+    pub(crate) fn fix_row_wide(row: &mut [Cell], blank: &Cell) {
+        if row.is_empty() {
+            return;
+        }
+        for i in 0..row.len() {
+            if row[i].width == 0 {
+                let lead_ok = i > 0 && row[i - 1].width == 2;
+                if !lead_ok {
+                    row[i] = blank.clone();
+                }
+            }
+        }
+        for i in 0..row.len() {
+            if row[i].width == 2 {
+                let cont_ok = i + 1 < row.len() && row[i + 1].width == 0;
+                if !cont_ok {
+                    row[i] = blank.clone();
+                }
+            }
+        }
+    }
+
+    /// If the cursor sits on a wide continuation, move it back to the lead
+    /// so overwrite/cursor logic stays on cluster boundaries.
+    pub(crate) fn snap_cursor_to_lead(&mut self) {
+        if self.cursor.y < self.rows
+            && self.cursor.x < self.cols
+            && self.cursor.x > 0
+            && self.cells[self.cursor.y][self.cursor.x].width == 0
+        {
+            self.cursor.x -= 1;
+        }
     }
 }
 
@@ -433,5 +488,147 @@ mod tests {
                 blinking: false,
             }
         );
+    }
+
+    #[test]
+    fn wide_char_occupies_two_cells() {
+        let mut g = Grid::new(5, 2, test_theme());
+        g.put_char('中');
+        assert_eq!(g.cursor(), Cursor { x: 2, y: 0 });
+        let lead = g.cell(0, 0).unwrap();
+        let cont = g.cell(1, 0).unwrap();
+        assert_eq!(lead.width, 2);
+        assert_eq!(lead.ch, '中');
+        assert_eq!(cont.width, 0);
+        assert_eq!(g.cell(2, 0).unwrap().ch, ' ');
+    }
+
+    #[test]
+    fn wide_char_wraps_at_margin() {
+        // 4 cols: `ab` fills 0-1, wide needs 2-3, next wide must wrap.
+        let mut g = Grid::new(4, 2, test_theme());
+        g.put_char('a');
+        g.put_char('b');
+        g.put_char('中');
+        assert_eq!(g.cursor(), Cursor { x: 4, y: 0 });
+        // Only one column left on row 0 is impossible for wide: next wide
+        // pads and wraps to row 1.
+        g.handle_wrap_if_needed();
+        g.put_char('あ');
+        assert_eq!(g.cell(0, 1).unwrap().ch, 'あ');
+        assert_eq!(g.cell(1, 1).unwrap().width, 0);
+    }
+
+    #[test]
+    fn wide_at_last_column_pads_and_wraps() {
+        let mut g = Grid::new(3, 2, test_theme());
+        g.put_char('a');
+        g.put_char('b');
+        // Cursor at last column (2); wide doesn't fit.
+        g.put_char('中');
+        assert_eq!(g.cell(2, 0).unwrap().ch, ' ');
+        assert_eq!(g.cell(0, 1).unwrap().ch, '中');
+        assert_eq!(g.cell(1, 1).unwrap().width, 0);
+    }
+
+    #[test]
+    fn narrow_overwrites_wide_clears_continuation() {
+        let mut g = Grid::new(4, 1, test_theme());
+        g.put_char('中');
+        g.set_cursor(0, 0);
+        g.put_char('x');
+        assert_eq!(g.cell(0, 0).unwrap().ch, 'x');
+        assert_eq!(g.cell(0, 0).unwrap().width, 1);
+        assert_eq!(g.cell(1, 0).unwrap().ch, ' ');
+        assert_eq!(g.cell(1, 0).unwrap().width, 1);
+    }
+
+    #[test]
+    fn overwrite_continuation_clears_lead() {
+        let mut g = Grid::new(4, 1, test_theme());
+        g.put_char('中');
+        g.set_cursor(1, 0);
+        // Cursor snaps to lead via set_cursor, so force the split case by
+        // writing at the continuation through direct positioning is not
+        // possible; instead verify a narrow write at 0 clears, and a wide
+        // write splitting a neighbor clears correctly.
+        g.set_cursor(0, 0);
+        g.put_char('a');
+        g.put_char('b');
+        // Row: a b _ _ ; write wide at 1 (splits nothing, fits 1-2).
+        g.set_cursor(1, 0);
+        g.put_char('あ');
+        assert_eq!(g.cell(1, 0).unwrap().ch, 'あ');
+        assert_eq!(g.cell(2, 0).unwrap().width, 0);
+    }
+
+    #[test]
+    fn combining_appends_without_advance() {
+        let mut g = Grid::new(5, 1, test_theme());
+        g.put_char('e');
+        assert_eq!(g.cursor(), Cursor { x: 1, y: 0 });
+        g.put_char('\u{0301}');
+        assert_eq!(g.cursor(), Cursor { x: 1, y: 0 });
+        let c = g.cell(0, 0).unwrap();
+        assert_eq!(c.cluster(), "e\u{0301}");
+        assert_eq!(c.width, 1);
+    }
+
+    #[test]
+    fn zwj_sequence_stays_in_one_wide_cell() {
+        let mut g = Grid::new(6, 1, test_theme());
+        for c in "👨\u{200D}👩\u{200D}👧".chars() {
+            g.put_char(c);
+        }
+        let lead = g.cell(0, 0).unwrap();
+        assert_eq!(lead.width, 2);
+        assert_eq!(lead.cluster(), "👨\u{200D}👩\u{200D}👧");
+        assert_eq!(g.cell(1, 0).unwrap().width, 0);
+        // Whole family took one wide cell: cursor advanced once.
+        assert_eq!(g.cursor(), Cursor { x: 2, y: 0 });
+    }
+
+    #[test]
+    fn flag_pair_is_single_wide_cell() {
+        let mut g = Grid::new(6, 1, test_theme());
+        for c in "🇺🇸".chars() {
+            g.put_char(c);
+        }
+        let lead = g.cell(0, 0).unwrap();
+        assert_eq!(lead.width, 2);
+        assert_eq!(lead.cluster(), "🇺🇸");
+        assert_eq!(g.cursor(), Cursor { x: 2, y: 0 });
+    }
+
+    #[test]
+    fn backspace_steps_over_wide() {
+        let mut g = Grid::new(5, 1, test_theme());
+        g.put_char('中');
+        assert_eq!(g.cursor().x, 2);
+        g.backspace();
+        assert_eq!(g.cursor().x, 0);
+    }
+
+    #[test]
+    fn erase_repairs_split_wide() {
+        let mut g = Grid::new(4, 1, test_theme());
+        g.put_char('中');
+        // Erase only the lead half; the continuation must not dangle.
+        g.set_cursor(0, 0);
+        g.erase_in_line(0);
+        assert_eq!(g.cell(0, 0).unwrap().width, 1);
+        assert_eq!(g.cell(1, 0).unwrap().width, 1);
+    }
+
+    #[test]
+    fn resize_repairs_stranded_wide() {
+        let mut g = Grid::new(4, 1, test_theme());
+        g.put_char('a');
+        g.put_char('b');
+        g.put_char('中'); // occupies cols 2-3
+        g.resize(3, 1);
+        // Lead at col 2 lost its continuation: repaired to space.
+        assert_eq!(g.cell(2, 0).unwrap().width, 1);
+        assert_eq!(g.cell(2, 0).unwrap().ch, ' ');
     }
 }

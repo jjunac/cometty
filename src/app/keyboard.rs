@@ -30,10 +30,20 @@ impl App {
                 self.spawn_tab_for_window();
                 return true;
             }
+            // Reserved for future tab switching; consume so the PTY never
+            // sees Ctrl+Tab / Ctrl+Shift+Tab (TODO: switch_tab).
+            if crate::input::is_tab_switch_shortcut(&event.logical_key, &self.modifiers) {
+                return true;
+            }
         }
         // Shift+PgUp/PgDn/Home/End scrolls locally instead of sending to the PTY.
+        // Only plain Shift (no Ctrl/Alt/Super) scrolls; e.g. Ctrl+Shift+PgUp
+        // still goes to the PTY as `ESC[5;6~`.
         if event.state == ElementState::Pressed
             && self.modifiers.shift_key()
+            && !self.modifiers.control_key()
+            && !self.modifiers.alt_key()
+            && !self.modifiers.super_key()
             && let Key::Named(named) = &event.logical_key
         {
             let handled = match named {
@@ -79,10 +89,15 @@ impl App {
         }
         // Regular keys go to the active tab's PTY.
         if event.state == ElementState::Pressed
-            && let Some(bytes) = crate::input::key_to_bytes(event, &self.modifiers)
             && let Some(tab) = self.active_tab()
         {
-            tab.pty.write(bytes);
+            let cursor_app = tab.terminal.cursor_app_mode();
+            let keypad_app = tab.terminal.keypad_app_mode();
+            if let Some(bytes) =
+                crate::input::key_to_bytes(event, &self.modifiers, cursor_app, keypad_app)
+            {
+                tab.pty.write(bytes);
+            }
         }
         true
     }

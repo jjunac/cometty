@@ -148,17 +148,31 @@ impl super::Renderer {
         let pad = self.scale_factor.max(1.0);
         for (y, row) in grid_rows.iter().enumerate() {
             let py = y_off + y as f32 * self.line_height;
-            for (x, cell) in row.iter().enumerate() {
-                let is_cursor = cursor_visible && cursor.0 == x && cursor.1 == y;
-                let is_selected = in_view_selection(selection, x, y);
+            let mut x = 0usize;
+            while x < row.len() {
+                let cell = &row[x];
+                // Wide continuations are painted as part of their lead.
+                if cell.width == 0 {
+                    x += 1;
+                    continue;
+                }
+                let span = if cell.width == 2 { 2 } else { 1 };
+                let w_px = self.cell_width * span as f32;
                 let px = x as f32 * self.cell_width;
+                // A wide cluster is selected when either half is selected.
+                let is_selected = (0..span).any(|d| in_view_selection(selection, x + d, y));
+                // Cursor on either half of a wide cluster highlights the
+                // whole cluster for block cursors.
+                let is_cursor = cursor_visible
+                    && cursor.1 == y
+                    && (cursor.0 == x || (span == 2 && cursor.0 == x + 1));
                 // Base background (selection overrides cell bg).
                 if is_selected {
                     self.push_quad(
                         &mut verts,
                         px,
                         py,
-                        self.cell_width,
+                        w_px,
                         self.line_height,
                         self.theme.selection.as_linear_f32_array(),
                     );
@@ -167,7 +181,7 @@ impl super::Renderer {
                         &mut verts,
                         px,
                         py,
-                        self.cell_width,
+                        w_px,
                         self.line_height,
                         cell.bg.as_linear_f32_array(),
                     );
@@ -179,7 +193,7 @@ impl super::Renderer {
                         &mut verts,
                         px,
                         uy,
-                        self.cell_width,
+                        w_px,
                         underline_h,
                         cell.fg.as_linear_f32_array(),
                     );
@@ -189,14 +203,7 @@ impl super::Renderer {
                     let cursor_col = self.theme.foreground.as_linear_f32_array();
                     match cursor_shape {
                         crate::grid::CursorShape::Block => {
-                            self.push_quad(
-                                &mut verts,
-                                px,
-                                py,
-                                self.cell_width,
-                                self.line_height,
-                                cursor_col,
-                            );
+                            self.push_quad(&mut verts, px, py, w_px, self.line_height, cursor_col);
                         }
                         crate::grid::CursorShape::Underline => {
                             let uy = py + self.line_height - cursor_underline_h - pad;
@@ -204,7 +211,7 @@ impl super::Renderer {
                                 &mut verts,
                                 px,
                                 uy,
-                                self.cell_width,
+                                w_px,
                                 cursor_underline_h,
                                 cursor_col,
                             );
@@ -214,6 +221,7 @@ impl super::Renderer {
                         }
                     }
                 }
+                x += span;
             }
         }
         let vert_count = verts.len();

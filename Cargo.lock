@@ -435,6 +435,8 @@ dependencies = [
  "log",
  "pollster",
  "portable-pty",
+ "unicode-segmentation",
+ "unicode-width",
  "vte",
  "wgpu",
  "winit",

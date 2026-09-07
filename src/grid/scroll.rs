@@ -40,14 +40,21 @@ impl Grid {
 
     /// Chars of a global line (`0` = oldest scrollback). Returns `None`
     /// when out of range. Used by selection text extraction.
+    /// Legacy single-char view (first char of each cluster); prefer
+    /// [`Self::global_line_cells`] for Unicode-aware copy.
+    #[allow(dead_code)]
     pub fn global_line_chars(&self, global: usize) -> Option<Vec<char>> {
+        self.global_line_cells(global)
+            .map(|row| row.iter().map(|c| c.ch).collect())
+    }
+
+    /// Full cells of a global line for Unicode-aware selection copy.
+    pub fn global_line_cells(&self, global: usize) -> Option<Vec<Cell>> {
         let sb = self.scrollback.len();
         if global < sb {
-            Some(self.scrollback[global].iter().map(|c| c.ch).collect())
+            Some(self.scrollback[global].clone())
         } else {
-            self.cells
-                .get(global - sb)
-                .map(|row| row.iter().map(|c| c.ch).collect())
+            self.cells.get(global - sb).cloned()
         }
     }
 
