@@ -17,22 +17,38 @@ impl App {
         }
         // Explicit copy/paste never reaches the PTY.
         if event.state == ElementState::Pressed {
-            if crate::input::is_copy_shortcut(&event.logical_key, &self.modifiers) {
+            if crate::input::is_copy_shortcut(
+                &event.logical_key,
+                &self.modifiers,
+                &self.config.input,
+            ) {
                 self.copy_selection();
                 return true;
             }
-            if crate::input::is_paste_shortcut(&event.logical_key, &self.modifiers) {
+            if crate::input::is_paste_shortcut(
+                &event.logical_key,
+                &self.modifiers,
+                &self.config.input,
+            ) {
                 self.paste_from_clipboard();
                 return true;
             }
             // New tab never reaches the PTY either.
-            if crate::input::is_new_tab_shortcut(&event.logical_key, &self.modifiers) {
+            if crate::input::is_new_tab_shortcut(
+                &event.logical_key,
+                &self.modifiers,
+                &self.config.input,
+            ) {
                 self.spawn_tab_for_window();
                 return true;
             }
             // Reserved for future tab switching; consume so the PTY never
             // sees Ctrl+Tab / Ctrl+Shift+Tab (TODO: switch_tab).
-            if crate::input::is_tab_switch_shortcut(&event.logical_key, &self.modifiers) {
+            if crate::input::is_tab_switch_shortcut(
+                &event.logical_key,
+                &self.modifiers,
+                &self.config.input,
+            ) {
                 return true;
             }
         }
@@ -40,6 +56,7 @@ impl App {
         // Only plain Shift (no Ctrl/Alt/Super) scrolls; e.g. Ctrl+Shift+PgUp
         // still goes to the PTY as `ESC[5;6~`.
         if event.state == ElementState::Pressed
+            && self.config.input.shift_page_scroll
             && self.modifiers.shift_key()
             && !self.modifiers.control_key()
             && !self.modifiers.alt_key()
@@ -93,9 +110,13 @@ impl App {
         {
             let cursor_app = tab.terminal.cursor_app_mode();
             let keypad_app = tab.terminal.keypad_app_mode();
-            if let Some(bytes) =
-                crate::input::key_to_bytes(event, &self.modifiers, cursor_app, keypad_app)
-            {
+            if let Some(bytes) = crate::input::key_to_bytes(
+                event,
+                &self.modifiers,
+                cursor_app,
+                keypad_app,
+                &self.config.input,
+            ) {
                 tab.pty.write(bytes);
             }
         }

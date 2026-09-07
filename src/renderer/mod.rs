@@ -11,25 +11,22 @@ use glyphon::{
 };
 use wgpu::MultisampleState;
 
+use crate::config::{Config, FontConfig};
 use crate::grid::Cell;
 use crate::theme::Theme;
 
-/// Logical font size in points. Scaled by the window scale factor to get
-/// physical pixels, so text looks the same size on 1x and 2x displays.
-const BASE_FONT_SIZE_LOGICAL: f32 = 14.0;
-
-/// Tab-bar height in logical points. The terminal grid is laid out in the
-/// window area below it; all glyphon/GL coordinates add the scaled offset.
-pub const TAB_BAR_HEIGHT_POINTS: f32 = 38.0;
-
-pub(crate) fn scaled_metrics(base: f32, scale: f32) -> (f32, f32, f32) {
+pub(crate) fn scaled_metrics(base: f32, scale: f32, font: &FontConfig) -> (f32, f32, f32) {
     let s = if scale.is_finite() && scale > 0.0 {
         scale
     } else {
         1.0
     };
     let font_size = base * s;
-    (font_size, font_size * 1.25, font_size * 0.602)
+    (
+        font_size,
+        font_size * font.line_height_factor,
+        font_size * font.cell_width_factor,
+    )
 }
 
 pub(crate) fn clamp_surface_size(width: u32, height: u32, max_dim: u32) -> (u32, u32) {
@@ -83,6 +80,7 @@ pub struct Renderer {
     bg_vertex_capacity: usize,
     bg_scratch: Vec<BgVertex>,
     theme: Theme,
+    user_config: Config,
     base_font_size: f32,
     scale_factor: f32,
     max_surface_dim: u32,
@@ -104,14 +102,16 @@ impl Renderer {
         height: u32,
         scale_factor: f32,
         theme: Theme,
+        user_config: &Config,
     ) -> anyhow::Result<Self> {
         let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
             scale_factor
         } else {
             1.0
         };
-        let base_font_size = BASE_FONT_SIZE_LOGICAL;
-        let (font_size, line_height, cell_width) = scaled_metrics(base_font_size, scale_factor);
+        let base_font_size = user_config.font.size;
+        let (font_size, line_height, cell_width) =
+            scaled_metrics(base_font_size, scale_factor, &user_config.font);
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance.create_surface(window.clone())?;
@@ -242,6 +242,7 @@ impl Renderer {
             bg_vertex_capacity,
             bg_scratch: Vec::new(),
             theme,
+            user_config: user_config.clone(),
             base_font_size,
             scale_factor,
             max_surface_dim,
@@ -299,8 +300,11 @@ impl Renderer {
             return false;
         }
         self.scale_factor = scale;
-        let (font_size, line_height, cell_width) =
-            scaled_metrics(self.base_font_size, self.scale_factor);
+        let (font_size, line_height, cell_width) = scaled_metrics(
+            self.base_font_size,
+            self.scale_factor,
+            &self.user_config.font,
+        );
         self.font_size = font_size;
         self.line_height = line_height;
         self.cell_width = cell_width;
@@ -359,7 +363,7 @@ impl Renderer {
     /// Tab-bar height in physical pixels at the current scale.
     /// Hidden (0.0) for a single tab; callers pass `tab_count`.
     pub fn tab_bar_px(&self, tab_count: usize) -> f32 {
-        crate::app::tab::tab_bar_px(self.scale_factor, tab_count)
+        crate::app::tab::tab_bar_px(self.scale_factor, tab_count, &self.user_config.tabbar)
     }
 
     /// Forget the cached grid version so the next `render` reshapes text.
@@ -406,7 +410,7 @@ impl Renderer {
     pub fn over_scrollbar(&self, x_phys: f32) -> bool {
         let scale = self.scale_factor.max(1.0);
         let screen_w_pts = self.width as f32 / scale;
-        crate::scrollbar::hit_test(x_phys / scale, screen_w_pts)
+        crate::scrollbar::hit_test(x_phys / scale, screen_w_pts, &self.user_config.scrollbar)
     }
 
     /// Thin orchestrator: rebuild text on version change, paint bg +
@@ -572,8 +576,9 @@ mod tests {
 
         let rows = vec![test_cells("hello"), test_cells("hi")];
         let theme = Theme::default();
+        let font = crate::config::FontConfig::default();
         buffer.lines.clear();
-        for line in super::text::build_buffer_lines(&rows, &theme) {
+        for line in super::text::build_buffer_lines(&rows, &theme, &font) {
             buffer.lines.push(line);
         }
 
@@ -591,6 +596,7 @@ mod tests {
     #[test]
     fn buffer_lines_skip_wide_continuations() {
         let theme = Theme::default();
+        let font = crate::config::FontConfig::default();
         let lead = Cell {
             ch: '中',
             extra: None,
@@ -608,7 +614,7 @@ mod tests {
             ..Default::default()
         };
         let rows = vec![vec![lead, cont, a]];
-        let lines = super::text::build_buffer_lines(&rows, &theme);
+        let lines = super::text::build_buffer_lines(&rows, &theme, &font);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text(), "中a");
     }
@@ -616,6 +622,7 @@ mod tests {
     #[test]
     fn buffer_lines_include_zwj_cluster_once() {
         let theme = Theme::default();
+        let font = crate::config::FontConfig::default();
         let cluster = "👨\u{200D}👩\u{200D}👧";
         let mut chars = cluster.chars();
         let first = chars.next().unwrap();
@@ -633,14 +640,16 @@ mod tests {
             ..Default::default()
         };
         let rows = vec![vec![lead, cont]];
-        let lines = super::text::build_buffer_lines(&rows, &theme);
+        let lines = super::text::build_buffer_lines(&rows, &theme, &font);
         assert_eq!(lines[0].text(), cluster);
     }
 
     #[test]
     fn scaled_metrics_follow_scale_factor() {
-        let (font_1x, line_1x, cell_1x) = scaled_metrics(16.0, 1.0);
-        let (font_2x, line_2x, cell_2x) = scaled_metrics(16.0, 2.0);
+        use crate::config::FontConfig;
+        let font = FontConfig::default();
+        let (font_1x, line_1x, cell_1x) = scaled_metrics(16.0, 1.0, &font);
+        let (font_2x, line_2x, cell_2x) = scaled_metrics(16.0, 2.0, &font);
         assert_eq!(font_1x, 16.0);
         assert_eq!(font_2x, 32.0);
         assert_eq!(line_2x, line_1x * 2.0);

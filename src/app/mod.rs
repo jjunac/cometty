@@ -22,11 +22,9 @@ use std::time::Instant;
 use winit::keyboard::ModifiersState;
 use winit::window::Window;
 
+use crate::config::Config;
 use crate::renderer::Renderer;
 use crate::theme::Theme;
-
-/// Double-click threshold for word selection.
-pub const DOUBLE_CLICK_MS: u128 = 400;
 
 #[derive(Debug)]
 pub enum UserEvent {
@@ -40,6 +38,7 @@ pub struct App {
     pub(crate) active: usize,
     pub(crate) proxy: Option<winit::event_loop::EventLoopProxy<UserEvent>>,
     pub(crate) theme: Theme,
+    pub(crate) config: Config,
     pub(crate) modifiers: ModifiersState,
     pub(crate) cursor_visible: bool,
     pub(crate) last_blink: Instant,
@@ -53,7 +52,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(proxy: Option<winit::event_loop::EventLoopProxy<UserEvent>>, theme: Theme) -> Self {
+    pub fn new(
+        proxy: Option<winit::event_loop::EventLoopProxy<UserEvent>>,
+        theme: Theme,
+        config: Config,
+    ) -> Self {
+        let window_title = config.window.title.clone();
         Self {
             window: None,
             renderer: None,
@@ -61,6 +65,7 @@ impl App {
             active: 0,
             proxy,
             theme,
+            config,
             modifiers: ModifiersState::empty(),
             cursor_visible: true,
             last_blink: Instant::now(),
@@ -70,7 +75,7 @@ impl App {
             cursor_pos: None,
             last_click: None,
             clipboard: None,
-            window_title: String::from("cometty"),
+            window_title,
         }
     }
 }

@@ -18,6 +18,9 @@ pub struct Grid {
     cells: Vec<Vec<Cell>>,
     scrollback: VecDeque<Vec<Cell>>,
     max_scrollback: usize,
+    tab_stop: usize,
+    min_dim: usize,
+    max_dim: usize,
     cursor: Cursor,
     pen: Pen,
     saved_cursor: Option<Cursor>,
@@ -50,10 +53,34 @@ pub struct Grid {
     saved_main_saved_origin: Option<bool>,
 }
 
+fn cursor_style_from_config(config: &crate::config::Config) -> CursorStyle {
+    let shape = match config.cursor.default_shape.to_ascii_lowercase().as_str() {
+        "underline" => CursorShape::Underline,
+        "bar" => CursorShape::Bar,
+        _ => CursorShape::Block,
+    };
+    CursorStyle {
+        shape,
+        blinking: config.cursor.default_blinking,
+    }
+}
+
 impl Grid {
+    #[allow(dead_code)]
     pub fn new(cols: usize, rows: usize, theme: Theme) -> Self {
-        let cols = cols.max(1);
-        let rows = rows.max(1);
+        Self::new_with_config(cols, rows, theme, &crate::config::Config::default())
+    }
+
+    pub fn new_with_config(
+        cols: usize,
+        rows: usize,
+        theme: Theme,
+        config: &crate::config::Config,
+    ) -> Self {
+        let min_dim = config.terminal.min_dim.max(1);
+        let max_dim = config.terminal.max_dim.max(min_dim);
+        let cols = cols.clamp(min_dim, max_dim);
+        let rows = rows.clamp(min_dim, max_dim);
         let blank = Cell {
             ch: ' ',
             extra: None,
@@ -69,7 +96,10 @@ impl Grid {
             theme,
             cells: vec![vec![blank; cols]; rows],
             scrollback: VecDeque::new(),
-            max_scrollback: 10_000,
+            max_scrollback: config.terminal.scrollback_lines,
+            tab_stop: config.terminal.tab_stop.max(1),
+            min_dim,
+            max_dim,
             cursor: Cursor { x: 0, y: 0 },
             pen: Pen {
                 fg: theme.foreground,
@@ -90,7 +120,7 @@ impl Grid {
             cursor_app: false,
             keypad_app: false,
             scroll_offset: 0,
-            cursor_style: CursorStyle::default(),
+            cursor_style: cursor_style_from_config(config),
             saved_style: None,
             saved_main_saved_style: None,
             scroll_top: 0,
@@ -148,8 +178,10 @@ impl Grid {
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
-        let cols = cols.clamp(1, 1024);
-        let rows = rows.clamp(1, 1024);
+        let min_dim = self.min_dim.max(1);
+        let max_dim = self.max_dim.max(min_dim);
+        let cols = cols.clamp(min_dim, max_dim);
+        let rows = rows.clamp(min_dim, max_dim);
         if cols == self.cols && rows == self.rows {
             return;
         }

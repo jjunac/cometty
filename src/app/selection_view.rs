@@ -24,6 +24,7 @@ impl App {
                 grid.scrollback_len() + grid.rows(),
                 grid.rows(),
                 grid.scroll_offset(),
+                &self.config.scrollbar,
             )
             .is_some()
     }

@@ -159,9 +159,14 @@ fn resolve_lead(cells: &[SelCell], x: usize) -> usize {
 }
 
 /// Expand a cell to its word on a single visual row.
-/// Word chars are `[A-Za-z0-9_]`; anything else (including spaces) breaks.
+/// Word chars are ASCII alphanumeric plus `config.word_extra_chars`
+/// (default `"_"`); anything else (including spaces) breaks.
 /// Wide / emoji clusters select as a single unit (lead + continuation).
-pub fn expand_word(row: &[SelCell], x: usize) -> (usize, usize) {
+pub fn expand_word(
+    row: &[SelCell],
+    x: usize,
+    config: &crate::config::SelectionConfig,
+) -> (usize, usize) {
     if row.is_empty() {
         return (0, 0);
     }
@@ -176,7 +181,7 @@ pub fn expand_word(row: &[SelCell], x: usize) -> (usize, usize) {
         .map(|c| c.text.chars().next().unwrap_or(' '))
         .collect();
     let x = x.min(text.len().saturating_sub(1));
-    if !is_word_char(text[x]) {
+    if !is_word_char(text[x], config) {
         return (x, x);
     }
     let mut start = x;
@@ -186,7 +191,7 @@ pub fn expand_word(row: &[SelCell], x: usize) -> (usize, usize) {
         if row[prev].width == 2 || row[prev].is_continuation() || row[start].is_continuation() {
             break;
         }
-        if !is_word_char(text[prev]) {
+        if !is_word_char(text[prev], config) {
             break;
         }
         start = prev;
@@ -197,7 +202,7 @@ pub fn expand_word(row: &[SelCell], x: usize) -> (usize, usize) {
         if row[next].width == 2 || row[next].is_continuation() {
             break;
         }
-        if !is_word_char(text[next]) {
+        if !is_word_char(text[next], config) {
             break;
         }
         end = next;
@@ -213,11 +218,11 @@ pub fn expand_word_chars(row_text: &[char], x: usize) -> (usize, usize) {
         .iter()
         .map(|c| SelCell::narrow(&c.to_string()))
         .collect();
-    expand_word(&cells, x)
+    expand_word(&cells, x, &crate::config::SelectionConfig::default())
 }
 
-fn is_word_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_'
+fn is_word_char(ch: char, config: &crate::config::SelectionConfig) -> bool {
+    ch.is_ascii_alphanumeric() || config.word_extra_chars.contains(ch)
 }
 
 /// Extract selected text from lines resolved by `line_at`.
@@ -413,24 +418,28 @@ mod tests {
 
     #[test]
     fn expand_word_stops_at_delimiters() {
+        use crate::config::SelectionConfig;
+        let cfg = SelectionConfig::default();
         let row = narrow_row("foo bar_baz-qux");
-        assert_eq!(expand_word(&row, 1), (0, 2));
-        assert_eq!(expand_word(&row, 5), (4, 10));
+        assert_eq!(expand_word(&row, 1, &cfg), (0, 2));
+        assert_eq!(expand_word(&row, 5, &cfg), (4, 10));
         // On a delimiter selects just that cell.
-        assert_eq!(expand_word(&row, 3), (3, 3));
-        assert_eq!(expand_word(&row, 11), (11, 11));
+        assert_eq!(expand_word(&row, 3, &cfg), (3, 3));
+        assert_eq!(expand_word(&row, 11, &cfg), (11, 11));
     }
 
     #[test]
     fn expand_word_selects_wide_as_unit() {
+        use crate::config::SelectionConfig;
+        let cfg = SelectionConfig::default();
         let row = vec![
             SelCell::wide("中"),
             SelCell::continuation(),
             SelCell::narrow("a"),
         ];
-        assert_eq!(expand_word(&row, 0), (0, 1));
-        assert_eq!(expand_word(&row, 1), (0, 1));
-        assert_eq!(expand_word(&row, 2), (2, 2));
+        assert_eq!(expand_word(&row, 0, &cfg), (0, 1));
+        assert_eq!(expand_word(&row, 1, &cfg), (0, 1));
+        assert_eq!(expand_word(&row, 2, &cfg), (2, 2));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 
-use super::{App, DOUBLE_CLICK_MS};
+use super::App;
 use crate::selection::{CellPos, Selection};
 
 impl App {
@@ -65,7 +65,8 @@ impl App {
                 };
                 // Double-click: expand to word on the same visual row.
                 if let Some((t, (pc, pr))) = self.last_click
-                    && now.duration_since(t).as_millis() <= DOUBLE_CLICK_MS
+                    && now.duration_since(t).as_millis()
+                        <= u128::from(self.config.selection.double_click_ms)
                     && (pc, pr) == (col, view_row)
                     && let Some(tab) = self.active_tab()
                 {
@@ -83,7 +84,8 @@ impl App {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    let (sx, ex) = crate::selection::expand_word(&row_cells, col);
+                    let (sx, ex) =
+                        crate::selection::expand_word(&row_cells, col, &self.config.selection);
                     // Clamp to visible cols so a resized row can't overflow.
                     let cols = tab.terminal.cols();
                     let sx = sx.min(cols.saturating_sub(1));
@@ -145,24 +147,31 @@ impl App {
         };
         let scale = renderer.scale_factor().max(1.0);
         let screen_w_pts = window.inner_size().width.max(1) as f32 / scale;
-        let bar_h = super::tab::bar_height_points(self.tabs.len());
-        if crate::tabbar::is_titlebar_drag(x_phys / scale, y_phys / scale, screen_w_pts, bar_h) {
+        let bar_h = super::tab::bar_height_points(self.tabs.len(), &self.config.tabbar);
+        if crate::tabbar::is_titlebar_drag(
+            x_phys / scale,
+            y_phys / scale,
+            screen_w_pts,
+            bar_h,
+            &self.config.tabbar,
+        ) {
             let _ = window.drag_window();
         }
     }
 
     pub(crate) fn on_wheel(&mut self, delta: MouseScrollDelta) {
-        const LINES_PER_TICK: f64 = 7.0;
+        let lines_per_tick = self.config.input.lines_per_tick;
         match delta {
             MouseScrollDelta::LineDelta(_, y) => {
-                self.scroll_terminal((y as f64 * LINES_PER_TICK).round() as isize);
+                self.scroll_terminal((f64::from(y) * lines_per_tick).round() as isize);
             }
             MouseScrollDelta::PixelDelta(pos) => {
+                let fallback = f64::from(self.config.input.pixel_fallback_line_height).max(1.0);
                 let line_height = self
                     .renderer
                     .as_ref()
                     .map(|r| f64::from(r.line_height))
-                    .unwrap_or(20.0)
+                    .unwrap_or(fallback)
                     .max(1.0);
                 self.wheel_accum += pos.y / line_height;
                 let lines = self.wheel_accum.trunc() as isize;

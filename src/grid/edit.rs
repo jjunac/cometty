@@ -350,7 +350,8 @@ impl Grid {
     }
 
     pub fn tab(&mut self) {
-        let next = ((self.cursor.x / 8) + 1) * 8;
+        let stop = self.tab_stop.max(1);
+        let next = ((self.cursor.x / stop) + 1) * stop;
         self.cursor.x = next.min(self.cols.saturating_sub(1));
         self.snap_cursor_to_lead();
         self.bump();

@@ -98,9 +98,14 @@ impl App {
         };
         renderer.set_scale_factor(scale);
         renderer.resize(width, height);
-        let term_h = term_height_px(height, scale, self.tabs.len());
-        let (cols, rows) =
-            super::compute_grid_size(width, term_h, renderer.cell_width, renderer.line_height);
+        let term_h = term_height_px(height, scale, self.tabs.len(), &self.config.tabbar);
+        let (cols, rows) = super::compute_grid_size(
+            width,
+            term_h,
+            renderer.cell_width,
+            renderer.line_height,
+            &self.config.terminal,
+        );
         for tab in &mut self.tabs {
             if cols != tab.terminal.cols() || rows != tab.terminal.rows() {
                 tab.terminal.resize(cols, rows);

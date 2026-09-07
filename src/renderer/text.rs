@@ -8,9 +8,20 @@ use crate::grid::Cell;
 
 use super::Renderer;
 
+pub(crate) fn font_family(name: &str) -> Family<'static> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "sans" | "sans-serif" => Family::SansSerif,
+        "serif" => Family::Serif,
+        "cursive" => Family::Cursive,
+        "fantasy" => Family::Fantasy,
+        _ => Family::Monospace,
+    }
+}
+
 pub(crate) fn build_buffer_lines(
     rows: &[Vec<Cell>],
     theme: &crate::theme::Theme,
+    font: &crate::config::FontConfig,
 ) -> Vec<BufferLine> {
     let mut lines = Vec::with_capacity(rows.len());
     for row_cells in rows {
@@ -34,15 +45,16 @@ pub(crate) fn build_buffer_lines(
         } else {
             (line_string, clusters)
         };
+        let family = font_family(&font.family);
         let mut line = BufferLine::new(
             line_text.clone(),
             LineEnding::None,
-            AttrsList::new(&Attrs::new().family(Family::Monospace)),
+            AttrsList::new(&Attrs::new().family(family)),
             Shaping::Advanced,
         );
         let mut attrs_list = AttrsList::new(
             &Attrs::new()
-                .family(Family::Monospace)
+                .family(family)
                 .color(theme.foreground.as_glyphon_color()),
         );
         // Attr spans keyed by grid column so bold/color follow cells, not
@@ -58,10 +70,7 @@ pub(crate) fn build_buffer_lines(
             } else {
                 Weight::NORMAL
             };
-            let attrs = Attrs::new()
-                .family(Family::Monospace)
-                .color(color)
-                .weight(weight);
+            let attrs = Attrs::new().family(family).color(color).weight(weight);
             let start_byte = byte_idx;
             let mut j = i;
             while j < visible_clusters.len() {
@@ -90,7 +99,7 @@ impl Renderer {
         let metrics = Metrics::new(self.font_size, self.line_height);
         self.buffer.set_metrics(metrics);
         self.buffer.lines.clear();
-        for line in build_buffer_lines(rows, &self.theme) {
+        for line in build_buffer_lines(rows, &self.theme, &self.user_config.font) {
             self.buffer.lines.push(line);
         }
         self.buffer

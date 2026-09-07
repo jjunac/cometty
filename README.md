@@ -6,9 +6,77 @@ Single-binary GPU terminal emulator in Rust (`winit` + `wgpu` + `glyphon` + `por
 
 ```sh
 cargo run -- --theme tokyo-night   # needs display + GPU; see --list-themes
+cargo run -- --config ~/.config/cometty/config.toml
 cargo test                         # headless-safe unit tests
 cargo clippy -- -D warnings
 cargo fmt --check
+```
+
+## Config
+
+TOML file at `$HOME/.config/cometty/config.toml` (missing file or keys = defaults).
+Precedence: `defaults < file < --theme/--config` CLI flags.
+
+```toml
+[theme]
+name = "tokyo-night"  # tokyo-night | vscode | tomorrow-night
+
+[font]
+family = "monospace"  # monospace | sans | serif | cursive | fantasy
+size = 14.0
+line_height_factor = 1.25
+cell_width_factor = 0.602
+
+[window]
+title = "cometty"
+width = 800
+height = 600
+
+[terminal]
+scrollback_lines = 10000
+min_dim = 1
+max_dim = 1024
+tab_stop = 8
+max_title_chars = 256
+
+[shell]
+shell = ""  # empty = $SHELL or /bin/bash
+term = "xterm-256color"
+cwd = ""    # empty = $HOME
+
+[cursor]
+blink_ms = 530
+default_shape = "block"
+default_blinking = true
+
+[scrollbar]
+track_width = 10.0
+min_thumb = 20.0
+pad = 2.0
+fade_delay_ms = 800
+fade_speed = 5.0
+
+[tabbar]
+height = 38.0
+min_tab_width = 100.0
+max_label_chars = 32
+# + insets, corner radii, reserves, plus-button sizes (see src/config.rs)
+
+[selection]
+double_click_ms = 400
+word_extra_chars = "_"
+
+[input]
+copy_key = "c"
+paste_key = "v"
+new_tab_key = "t"
+copy_ctrl_shift = true
+copy_super = true
+paste_ctrl_shift = true
+paste_super = true
+new_tab_ctrl = true
+new_tab_super = true
+lines_per_tick = 7.0
 ```
 
 ## Features
@@ -33,5 +101,6 @@ cargo fmt --check
 - [x] Unicode: double-width / emoji / combining chars (CJK wide, ZWJ sequences, flags, skin tones, VS16, combining marks; cluster cells with continuation placeholders)
 - [x] Scroll regions (`CSI r`), origin / insert / auto-wrap modes
 - [x] Exit behavior: last shell exit closes the window, other exits close just that tab
-- [ ] User config: font/size selection (theme is wired: `--theme` / `--list-themes`)
+- [x] User config: TOML file (`$HOME/.config/cometty/config.toml`) for theme/font/window/terminal/shell/cursor/scrollbar/tabbar/selection/input (see `src/config.rs`); CLI `--theme` / `--config` override file
+- [ ] Settings UI (config struct is ready for live editing)
 - [ ] Bell (currently ignored)

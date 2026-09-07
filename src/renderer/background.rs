@@ -48,18 +48,21 @@ fn fs_main(@location(0) color: vec3<f32>) -> @location(0) vec4<f32> {
 
 /// Thickness of the text-underline strip, derived from the (already
 /// DPI-scaled) line height so it stays ~1px at 1x and scales on HiDPI.
-pub(crate) fn underline_thickness(line_height: f32) -> f32 {
-    (line_height * 0.07).max(1.0)
+pub(crate) fn underline_thickness(line_height: f32, font: &crate::config::FontConfig) -> f32 {
+    (line_height * font.underline_factor).max(1.0)
 }
 
 /// Thicker strip used for the underline cursor shape (DECSCUSR 3/4).
-pub(crate) fn cursor_underline_thickness(line_height: f32) -> f32 {
-    (line_height * 0.14).max(1.0)
+pub(crate) fn cursor_underline_thickness(
+    line_height: f32,
+    cursor: &crate::config::CursorConfig,
+) -> f32 {
+    (line_height * cursor.underline_factor).max(1.0)
 }
 
 /// Width of the bar cursor shape (DECSCUSR 5/6).
-pub(crate) fn bar_cursor_width(cell_width: f32) -> f32 {
-    (cell_width * 0.3).max(1.0)
+pub(crate) fn bar_cursor_width(cell_width: f32, cursor: &crate::config::CursorConfig) -> f32 {
+    (cell_width * cursor.bar_width_factor).max(1.0)
 }
 
 /// Hit-test a normalized view-space selection `((x0, y0), (x1, y1))`.
@@ -142,9 +145,10 @@ impl super::Renderer {
         let mut verts = std::mem::take(&mut self.bg_scratch);
         verts.clear();
         let y_off = self.tab_bar_px(tab_count);
-        let underline_h = underline_thickness(self.line_height);
-        let cursor_underline_h = cursor_underline_thickness(self.line_height);
-        let bar_w = bar_cursor_width(self.cell_width);
+        let underline_h = underline_thickness(self.line_height, &self.user_config.font);
+        let cursor_underline_h =
+            cursor_underline_thickness(self.line_height, &self.user_config.cursor);
+        let bar_w = bar_cursor_width(self.cell_width, &self.user_config.cursor);
         let pad = self.scale_factor.max(1.0);
         for (y, row) in grid_rows.iter().enumerate() {
             let py = y_off + y as f32 * self.line_height;
@@ -250,19 +254,22 @@ impl super::Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{CursorConfig, FontConfig};
 
     #[test]
     fn underline_and_cursor_metrics_scale() {
+        let font = FontConfig::default();
+        let cursor = CursorConfig::default();
         // 1x metrics (14pt base): line ~17.5, cell ~8.4.
-        let h1 = underline_thickness(17.5);
-        let ch1 = cursor_underline_thickness(17.5);
-        let b1 = bar_cursor_width(8.4);
+        let h1 = underline_thickness(17.5, &font);
+        let ch1 = cursor_underline_thickness(17.5, &cursor);
+        let b1 = bar_cursor_width(8.4, &cursor);
         assert!(h1 >= 1.0 && h1 < 3.0, "h1={h1}");
         assert!(ch1 >= h1, "cursor underline thicker than text");
         assert!(b1 >= 1.0 && b1 < 8.4, "b1={b1}");
         // 2x scales proportionally.
-        let h2 = underline_thickness(35.0);
-        let b2 = bar_cursor_width(16.8);
+        let h2 = underline_thickness(35.0, &font);
+        let b2 = bar_cursor_width(16.8, &cursor);
         assert!((h2 - h1 * 2.0).abs() < 0.01, "h2={h2}");
         assert!((b2 - b1 * 2.0).abs() < 0.01, "b2={b2}");
     }

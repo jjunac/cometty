@@ -97,13 +97,14 @@ fn map_key(
     modifiers: &ModifiersState,
     cursor_app: bool,
     keypad_app: bool,
+    input_config: &crate::config::InputConfig,
 ) -> Option<Vec<u8>> {
     if !pressed {
         return None;
     }
 
     // Reserved for future tab switching; never reaches the PTY.
-    if is_tab_switch_shortcut(logical_key, modifiers) {
+    if is_tab_switch_shortcut(logical_key, modifiers, input_config) {
         return None;
     }
     // Super combos never reach the PTY (OS / app shortcuts),
@@ -374,68 +375,96 @@ pub fn wrap_bracketed_paste(text: &str, enabled: bool) -> Vec<u8> {
     }
 }
 
-/// Explicit-copy shortcut: `Ctrl+Shift+C` everywhere, plus `Cmd+C` on macOS.
-pub fn is_copy_shortcut(logical_key: &Key, modifiers: &ModifiersState) -> bool {
+/// Explicit-copy shortcut, gated by [`crate::config::InputConfig`].
+pub fn is_copy_shortcut(
+    logical_key: &Key,
+    modifiers: &ModifiersState,
+    config: &crate::config::InputConfig,
+) -> bool {
     let Key::Character(s) = logical_key else {
         return false;
     };
-    if s.to_ascii_lowercase() != "c" {
+    if s.to_ascii_lowercase() != config.copy_key.to_ascii_lowercase() {
         return false;
     }
-    if modifiers.super_key() && !modifiers.control_key() && !modifiers.alt_key() {
+    if config.copy_super
+        && modifiers.super_key()
+        && !modifiers.control_key()
+        && !modifiers.alt_key()
+    {
         return true;
     }
-    modifiers.control_key()
+    config.copy_ctrl_shift
+        && modifiers.control_key()
         && modifiers.shift_key()
         && !modifiers.super_key()
         && !modifiers.alt_key()
 }
 
-/// Explicit-paste shortcut: `Ctrl+Shift+V` everywhere, plus `Cmd+V` on macOS.
-pub fn is_paste_shortcut(logical_key: &Key, modifiers: &ModifiersState) -> bool {
+/// Explicit-paste shortcut, gated by [`crate::config::InputConfig`].
+pub fn is_paste_shortcut(
+    logical_key: &Key,
+    modifiers: &ModifiersState,
+    config: &crate::config::InputConfig,
+) -> bool {
     let Key::Character(s) = logical_key else {
         return false;
     };
-    if s.to_ascii_lowercase() != "v" {
+    if s.to_ascii_lowercase() != config.paste_key.to_ascii_lowercase() {
         return false;
     }
-    if modifiers.super_key() && !modifiers.control_key() && !modifiers.alt_key() {
+    if config.paste_super
+        && modifiers.super_key()
+        && !modifiers.control_key()
+        && !modifiers.alt_key()
+    {
         return true;
     }
-    modifiers.control_key()
+    config.paste_ctrl_shift
+        && modifiers.control_key()
         && modifiers.shift_key()
         && !modifiers.super_key()
         && !modifiers.alt_key()
 }
 
-/// New-tab shortcut: `Ctrl+T` everywhere, plus `Cmd+T` on macOS.
+/// New-tab shortcut, gated by [`crate::config::InputConfig`].
 /// Shift is excluded so `Ctrl+Shift+T` stays free for a future
 /// reopen-closed-tab binding. Consumed locally, never reaches the PTY.
-pub fn is_new_tab_shortcut(logical_key: &Key, modifiers: &ModifiersState) -> bool {
+pub fn is_new_tab_shortcut(
+    logical_key: &Key,
+    modifiers: &ModifiersState,
+    config: &crate::config::InputConfig,
+) -> bool {
     let Key::Character(s) = logical_key else {
         return false;
     };
-    if s.to_ascii_lowercase() != "t" {
+    if s.to_ascii_lowercase() != config.new_tab_key.to_ascii_lowercase() {
         return false;
     }
     if modifiers.shift_key() || modifiers.alt_key() {
         return false;
     }
-    // Exactly one of Ctrl / Super.
-    modifiers.control_key() != modifiers.super_key()
+    let ctrl = config.new_tab_ctrl && modifiers.control_key() && !modifiers.super_key();
+    let sup = config.new_tab_super && modifiers.super_key() && !modifiers.control_key();
+    ctrl != sup
 }
 
-/// Reserved tab-switch shortcut: `Ctrl+Tab` / `Ctrl+Shift+Tab`
-/// (plus `Cmd` equivalents). Consumed locally so the PTY never sees them;
-/// switching itself is a future TODO.
-pub fn is_tab_switch_shortcut(logical_key: &Key, modifiers: &ModifiersState) -> bool {
+/// Reserved tab-switch shortcut, gated by [`crate::config::InputConfig`].
+/// Consumed locally so the PTY never sees them; switching itself is a future TODO.
+pub fn is_tab_switch_shortcut(
+    logical_key: &Key,
+    modifiers: &ModifiersState,
+    config: &crate::config::InputConfig,
+) -> bool {
     if *logical_key != Key::Named(NamedKey::Tab) {
         return false;
     }
     if modifiers.alt_key() {
         return false;
     }
-    modifiers.control_key() != modifiers.super_key()
+    let ctrl = config.tab_switch_ctrl && modifiers.control_key() && !modifiers.super_key();
+    let sup = config.tab_switch_super && modifiers.super_key() && !modifiers.control_key();
+    ctrl != sup
 }
 
 /// Map a winit KeyEvent to bytes to send to the PTY.
@@ -444,6 +473,7 @@ pub fn key_to_bytes(
     modifiers: &ModifiersState,
     cursor_app: bool,
     keypad_app: bool,
+    input_config: &crate::config::InputConfig,
 ) -> Option<Vec<u8>> {
     #[cfg(any(
         target_os = "windows",
@@ -497,14 +527,20 @@ pub fn key_to_bytes(
         modifiers,
         cursor_app,
         keypad_app,
+        input_config,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::InputConfig;
     use winit::event::ElementState;
     use winit::keyboard::ModifiersState;
+
+    fn cfg() -> InputConfig {
+        InputConfig::default()
+    }
 
     fn plain(logical: &Key, text: Option<&str>, modifiers: &ModifiersState) -> Option<Vec<u8>> {
         map_key(
@@ -517,6 +553,7 @@ mod tests {
             modifiers,
             false,
             false,
+            &cfg(),
         )
     }
 
@@ -562,6 +599,7 @@ mod tests {
             &ModifiersState::empty(),
             false,
             false,
+            &cfg(),
         );
         assert_eq!(out, None);
     }
@@ -586,43 +624,52 @@ mod tests {
     #[test]
     fn copy_paste_shortcuts() {
         use winit::keyboard::ModifiersState;
+        let cfg = cfg();
         let c: Key = Key::Character("c".into());
         let v: Key = Key::Character("v".into());
         let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
-        assert!(is_copy_shortcut(&c, &ctrl_shift));
-        assert!(!is_copy_shortcut(&v, &ctrl_shift));
-        assert!(is_paste_shortcut(&v, &ctrl_shift));
-        assert!(!is_paste_shortcut(&c, &ctrl_shift));
-        assert!(!is_copy_shortcut(&c, &ModifiersState::CONTROL));
+        assert!(is_copy_shortcut(&c, &ctrl_shift, &cfg));
+        assert!(!is_copy_shortcut(&v, &ctrl_shift, &cfg));
+        assert!(is_paste_shortcut(&v, &ctrl_shift, &cfg));
+        assert!(!is_paste_shortcut(&c, &ctrl_shift, &cfg));
+        assert!(!is_copy_shortcut(&c, &ModifiersState::CONTROL, &cfg));
         let cmd = ModifiersState::SUPER;
-        assert!(is_copy_shortcut(&c, &cmd));
-        assert!(is_paste_shortcut(&v, &cmd));
+        assert!(is_copy_shortcut(&c, &cmd, &cfg));
+        assert!(is_paste_shortcut(&v, &cmd, &cfg));
     }
 
     #[test]
     fn new_tab_shortcut() {
         use winit::keyboard::ModifiersState;
+        let cfg = cfg();
         let t: Key = Key::Character("t".into());
         let t_upper: Key = Key::Character("T".into());
         let c: Key = Key::Character("c".into());
-        assert!(is_new_tab_shortcut(&t, &ModifiersState::CONTROL));
-        assert!(is_new_tab_shortcut(&t, &ModifiersState::SUPER));
-        assert!(is_new_tab_shortcut(&t_upper, &ModifiersState::CONTROL));
-        assert!(!is_new_tab_shortcut(&c, &ModifiersState::CONTROL));
-        assert!(!is_new_tab_shortcut(&t, &ModifiersState::empty()));
+        assert!(is_new_tab_shortcut(&t, &ModifiersState::CONTROL, &cfg));
+        assert!(is_new_tab_shortcut(&t, &ModifiersState::SUPER, &cfg));
+        assert!(is_new_tab_shortcut(
+            &t_upper,
+            &ModifiersState::CONTROL,
+            &cfg
+        ));
+        assert!(!is_new_tab_shortcut(&c, &ModifiersState::CONTROL, &cfg));
+        assert!(!is_new_tab_shortcut(&t, &ModifiersState::empty(), &cfg));
         // Shift / Alt variants stay free for future bindings.
         assert!(!is_new_tab_shortcut(
             &t,
-            &(ModifiersState::CONTROL | ModifiersState::SHIFT)
+            &(ModifiersState::CONTROL | ModifiersState::SHIFT),
+            &cfg
         ));
         assert!(!is_new_tab_shortcut(
             &t,
-            &(ModifiersState::CONTROL | ModifiersState::ALT)
+            &(ModifiersState::CONTROL | ModifiersState::ALT),
+            &cfg
         ));
         // Both modifiers at once is not a tab shortcut.
         assert!(!is_new_tab_shortcut(
             &t,
-            &(ModifiersState::CONTROL | ModifiersState::SUPER)
+            &(ModifiersState::CONTROL | ModifiersState::SUPER),
+            &cfg
         ));
     }
 
@@ -691,14 +738,20 @@ mod tests {
 
     #[test]
     fn tab_switch_is_reserved() {
+        let cfg = cfg();
         let tab: Key = Key::Named(NamedKey::Tab);
-        assert!(is_tab_switch_shortcut(&tab, &ModifiersState::CONTROL));
+        assert!(is_tab_switch_shortcut(&tab, &ModifiersState::CONTROL, &cfg));
         assert!(is_tab_switch_shortcut(
             &tab,
-            &(ModifiersState::CONTROL | ModifiersState::SHIFT)
+            &(ModifiersState::CONTROL | ModifiersState::SHIFT),
+            &cfg
         ));
-        assert!(!is_tab_switch_shortcut(&tab, &ModifiersState::empty()));
-        assert!(!is_tab_switch_shortcut(&tab, &ModifiersState::SHIFT));
+        assert!(!is_tab_switch_shortcut(
+            &tab,
+            &ModifiersState::empty(),
+            &cfg
+        ));
+        assert!(!is_tab_switch_shortcut(&tab, &ModifiersState::SHIFT, &cfg));
         assert_eq!(plain(&tab, Some("\t"), &ModifiersState::CONTROL), None);
     }
 
@@ -752,6 +805,7 @@ mod tests {
             &ModifiersState::ALT,
             false,
             false,
+            &cfg(),
         );
         assert_eq!(out, Some(vec![0x1b, b'a']));
     }
@@ -769,6 +823,7 @@ mod tests {
             &ModifiersState::empty(),
             true,
             false,
+            &cfg(),
         );
         assert_eq!(out, Some(b"\x1bOA".to_vec()));
         // Modified arrows stay CSI even in app mode.
@@ -782,6 +837,7 @@ mod tests {
             &ModifiersState::SHIFT,
             true,
             false,
+            &cfg(),
         );
         assert_eq!(out, Some(b"\x1b[1;2A".to_vec()));
     }
@@ -799,6 +855,7 @@ mod tests {
             &ModifiersState::empty(),
             false,
             true,
+            &cfg(),
         );
         assert_eq!(out, Some(b"\x1bOq".to_vec()));
         // Normal mode passes ASCII through.
@@ -812,6 +869,7 @@ mod tests {
             &ModifiersState::empty(),
             false,
             false,
+            &cfg(),
         );
         assert_eq!(out, Some(b"1".to_vec()));
         // Keypad Enter in app mode is SS3 M.
@@ -826,6 +884,7 @@ mod tests {
             &ModifiersState::empty(),
             false,
             true,
+            &cfg(),
         );
         assert_eq!(out, Some(b"\x1bOM".to_vec()));
     }

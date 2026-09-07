@@ -27,7 +27,9 @@ impl Renderer {
         let screen_w_pts = self.width as f32 / scale;
         let screen_h_pts = self.height as f32 / scale;
         // Hidden for a single tab: the grid gets the full window height.
-        let tab_h = crate::app::tab::bar_height_points(tab_titles.len());
+        let tab_h = crate::app::tab::bar_height_points(tab_titles.len(), &self.user_config.tabbar);
+        let tabbar_cfg = self.user_config.tabbar.clone();
+        let scrollbar_cfg = self.user_config.scrollbar.clone();
         let theme = self.theme;
         let opacity = scrollbar.opacity;
         let mut scroll_to: Option<usize> = None;
@@ -46,7 +48,7 @@ impl Renderer {
         // active tab is a nested pill with a 1px border; inactive tabs are
         // separated by thin dividers. Close `×` is reserved on the left of
         // each tab (painted on hover only); `⌘N` sits right-aligned.
-        if crate::app::tab::bar_height_points(tab_titles.len()) > 0.0 {
+        if crate::app::tab::bar_height_points(tab_titles.len(), &tabbar_cfg) > 0.0 {
             egui::Area::new(egui::Id::new("tabbar"))
                 .fixed_pos(egui::pos2(0.0, 0.0))
                 .order(egui::Order::Foreground)
@@ -61,13 +63,14 @@ impl Renderer {
                         0.0,
                         theme.background.as_egui_color(),
                     );
-                    let bar_inset_y = crate::tabbar::BAR_INSET_Y_POINTS;
-                    let plus_d = crate::tabbar::PLUS_DIAMETER_POINTS;
-                    let plus_gap = crate::tabbar::PLUS_GAP_POINTS;
+                    let bar_inset_y = tabbar_cfg.inset_y;
+                    let plus_d = tabbar_cfg.plus_diameter;
+                    let plus_gap = tabbar_cfg.plus_gap;
                     // macOS: the container starts right of the traffic
                     // lights; elsewhere `leading` is just the margin.
-                    let leading = crate::tabbar::leading_inset_points();
-                    let container_w = crate::tabbar::container_width_points(screen_w_pts);
+                    let leading = crate::tabbar::leading_inset_points(&tabbar_cfg);
+                    let container_w =
+                        crate::tabbar::container_width_points(screen_w_pts, &tabbar_cfg);
                     let container_h = (tab_h - bar_inset_y * 2.0).max(1.0);
                     let container_rect = egui::Rect::from_min_size(
                         egui::pos2(leading, bar_inset_y),
@@ -75,11 +78,11 @@ impl Renderer {
                     );
                     ui.painter().rect_filled(
                         container_rect,
-                        egui::CornerRadius::same(crate::tabbar::BAR_CORNER_RADIUS_POINTS),
+                        egui::CornerRadius::same(tabbar_cfg.corner_radius_bar),
                         theme.background.as_egui_color(),
                     );
                     let tab_count = tab_titles.len();
-                    let tab_w = crate::tabbar::tab_width(container_w, tab_count);
+                    let tab_w = crate::tabbar::tab_width(container_w, tab_count, &tabbar_cfg);
                     let font_id = egui::TextStyle::Body.resolve(ui.style());
                     let fg = theme.foreground.as_egui_color();
                     let dim = fg.gamma_multiply(0.55);
@@ -125,7 +128,7 @@ impl Renderer {
                                                     crate::tabbar::TAB_PILL_INSET_Y,
                                                 ));
                                                 let pill_radius = egui::CornerRadius::same(
-                                                    crate::tabbar::TAB_CORNER_RADIUS_POINTS,
+                                                    tabbar_cfg.corner_radius_tab,
                                                 );
                                                 if is_active {
                                                     painter.rect_filled(
@@ -177,6 +180,7 @@ impl Renderer {
                                                 let max_title = crate::tabbar::title_max_width(
                                                     tab_w,
                                                     shortcut.is_some(),
+                                                    &tabbar_cfg,
                                                 );
                                                 let fitted = crate::tabbar::fit_title(
                                                     title, max_title, &measure,
@@ -206,6 +210,7 @@ impl Renderer {
                                                 let ch = crate::tabbar::close_hit(
                                                     tab_rect.min.x,
                                                     container_h,
+                                                    &tabbar_cfg,
                                                 );
                                                 let ch_rect = egui::Rect::from_min_size(
                                                     egui::pos2(ch[0], tab_rect.min.y),
@@ -292,15 +297,15 @@ impl Renderer {
             .show(&ctx, |ui| {
                 let track_h = screen_h_pts - tab_h;
                 let Some((thumb_y, thumb_h)) =
-                    crate::scrollbar::geometry(track_h, total, visible, offset)
+                    crate::scrollbar::geometry(track_h, total, visible, offset, &scrollbar_cfg)
                 else {
                     return;
                 };
                 if is_alt || (opacity <= 0.01 && !scrollbar.is_dragging()) {
                     return;
                 }
-                let track_w = crate::scrollbar::TRACK_WIDTH_POINTS;
-                let pad = crate::scrollbar::TRACK_PAD_POINTS;
+                let track_w = scrollbar_cfg.track_width;
+                let pad = scrollbar_cfg.pad;
                 let track_rect = egui::Rect::from_min_size(
                     egui::pos2(screen_w_pts - track_w - pad, tab_h),
                     egui::vec2(track_w, track_h),
@@ -341,6 +346,7 @@ impl Renderer {
                                 track_h,
                                 total,
                                 visible,
+                                &scrollbar_cfg,
                             );
                             scroll_to = Some(target);
                             scrollbar.begin_drag(thumb_h * 0.5);
@@ -352,7 +358,11 @@ impl Renderer {
                 {
                     let y = pos.y - track_rect.min.y - grab;
                     scroll_to = Some(crate::scrollbar::offset_for_thumb_y(
-                        y, track_h, total, visible,
+                        y,
+                        track_h,
+                        total,
+                        visible,
+                        &scrollbar_cfg,
                     ));
                 }
                 if resp.drag_stopped() {
@@ -367,6 +377,7 @@ impl Renderer {
                             track_h,
                             total,
                             visible,
+                            &scrollbar_cfg,
                         ));
                     }
                 }
@@ -376,7 +387,7 @@ impl Renderer {
             .handle_platform_output(window, full_output.platform_output);
         let paint_jobs = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
         let now = std::time::Instant::now();
-        if scrollbar.update(now, total, visible, offset, is_alt, hovered) {
+        if scrollbar.update(now, total, visible, offset, is_alt, hovered, &scrollbar_cfg) {
             ctx.request_repaint();
         }
 

@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod grid;
 mod input;
 mod pty;
@@ -18,14 +19,15 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 use app::{App, UserEvent};
+use config::Config;
 use renderer::Renderer;
 use theme::Theme;
 
-/// Resolve `--theme NAME` / `--list-themes` from argv.
-/// Returns `None` when the flag was informational (`--help`,
-/// `--list-themes`) and the caller should exit successfully.
-fn resolve_theme() -> anyhow::Result<Option<Theme>> {
-    let mut theme = Theme::default();
+/// CLI overrides layered on top of the TOML file.
+/// Returns `(theme, config_path_override)` or `None` for `--help`/`--list-themes`.
+fn resolve_cli() -> anyhow::Result<Option<(Option<Theme>, Option<String>)>> {
+    let mut theme_override: Option<Theme> = None;
+    let mut config_path: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--list-themes" {
@@ -37,19 +39,31 @@ fn resolve_theme() -> anyhow::Result<Option<Theme>> {
             let name = args
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("--theme requires a value (try --list-themes)"))?;
-            theme = Theme::from_name(&name)
-                .ok_or_else(|| anyhow::anyhow!("unknown theme {name:?} (try --list-themes)"))?;
+            theme_override =
+                Some(Theme::from_name(&name).ok_or_else(|| {
+                    anyhow::anyhow!("unknown theme {name:?} (try --list-themes)")
+                })?);
         } else if let Some(name) = arg.strip_prefix("--theme=") {
-            theme = Theme::from_name(name)
-                .ok_or_else(|| anyhow::anyhow!("unknown theme {name:?} (try --list-themes)"))?;
+            theme_override =
+                Some(Theme::from_name(name).ok_or_else(|| {
+                    anyhow::anyhow!("unknown theme {name:?} (try --list-themes)")
+                })?);
+        } else if arg == "--config" {
+            let path = args
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--config requires a value"))?;
+            config_path = Some(path);
+        } else if let Some(path) = arg.strip_prefix("--config=") {
+            config_path = Some(path.to_string());
         } else if arg == "-h" || arg == "--help" {
-            println!("cometty [--theme NAME] [--list-themes]");
+            println!("cometty [--theme NAME] [--config PATH] [--list-themes]");
+            println!("Config file: $HOME/.config/cometty/config.toml");
             return Ok(None);
         } else {
             return Err(anyhow::anyhow!("unknown argument {arg:?} (try --help)"));
         }
     }
-    Ok(Some(theme))
+    Ok(Some((theme_override, config_path)))
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -58,8 +72,11 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title("cometty")
-            .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0));
+            .with_title(self.config.window.title.clone())
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                self.config.window.width as f64,
+                self.config.window.height as f64,
+            ));
         // Brave-style merged titlebar on macOS: transparent titlebar with
         // fullsize content view. The tab strip paints into the titlebar
         // area; the OS keeps drawing the traffic lights on top. The title
@@ -83,7 +100,7 @@ impl ApplicationHandler<UserEvent> for App {
         let size = window.inner_size();
         let (w, h) = (size.width.max(1), size.height.max(1));
         let scale = window.scale_factor() as f32;
-        let renderer = match Renderer::new(window.clone(), w, h, scale, self.theme) {
+        let renderer = match Renderer::new(window.clone(), w, h, scale, self.theme, &self.config) {
             Ok(r) => r,
             Err(e) => {
                 log::error!("failed to init renderer: {e:#}");
@@ -92,9 +109,14 @@ impl ApplicationHandler<UserEvent> for App {
             }
         };
         // Single tab: no bar, so the grid gets the full height.
-        let term_h = app::tab::term_height_px(h, scale, 1);
-        let (cols, rows) =
-            app::compute_grid_size(w, term_h, renderer.cell_width, renderer.line_height);
+        let term_h = app::tab::term_height_px(h, scale, 1, &self.config.tabbar);
+        let (cols, rows) = app::compute_grid_size(
+            w,
+            term_h,
+            renderer.cell_width,
+            renderer.line_height,
+            &self.config.terminal,
+        );
 
         self.window = Some(window);
         self.renderer = Some(renderer);
@@ -213,8 +235,9 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
+        let blink_ms = self.config.cursor.blink_ms;
         let now = Instant::now();
-        if now.duration_since(self.last_blink) >= Duration::from_millis(530) {
+        if now.duration_since(self.last_blink) >= Duration::from_millis(blink_ms) {
             self.cursor_visible = !self.cursor_visible;
             self.last_blink = now;
             if let Some(w) = self.window.as_ref() {
@@ -222,19 +245,27 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         // Wake up for next blink toggle.
-        let next = self.last_blink + Duration::from_millis(530);
+        let next = self.last_blink + Duration::from_millis(blink_ms);
         event_loop.set_control_flow(ControlFlow::WaitUntil(next));
     }
 }
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
-    let Some(theme) = resolve_theme()? else {
+    let Some((theme_override, config_path)) = resolve_cli()? else {
         return Ok(());
     };
+    let config = if let Some(path) = config_path {
+        Config::load_from_path(std::path::Path::new(&path)).unwrap_or_default()
+    } else {
+        Config::load()
+    };
+    let theme = theme_override
+        .or_else(|| Theme::from_name(&config.theme.name))
+        .unwrap_or_default();
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
-    let mut app = App::new(Some(proxy), theme);
+    let mut app = App::new(Some(proxy), theme, config);
     event_loop.run_app(&mut app)?;
     Ok(())
 }

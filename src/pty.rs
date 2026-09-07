@@ -3,7 +3,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
-use crate::app::geometry::{MAX_DIM, MIN_DIM};
+use crate::config::Config;
 
 pub enum PtyEvent {
     Data(Vec<u8>),
@@ -15,6 +15,8 @@ pub struct PtySession {
     pub rx_from_pty: Receiver<PtyEvent>,
     master: Box<dyn MasterPty + Send>,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
+    min_dim: usize,
+    max_dim: usize,
 }
 
 impl PtySession {
@@ -22,21 +24,28 @@ impl PtySession {
         cols: usize,
         rows: usize,
         waker: impl Fn() + Send + 'static,
+        config: &Config,
     ) -> anyhow::Result<Self> {
+        let min_dim = config.terminal.min_dim.max(1);
+        let max_dim = config.terminal.max_dim.max(min_dim);
         let pty_system = native_pty_system();
         let size = PtySize {
-            rows: rows.clamp(MIN_DIM, MAX_DIM) as u16,
-            cols: cols.clamp(MIN_DIM, MAX_DIM) as u16,
+            rows: rows.clamp(min_dim, max_dim) as u16,
+            cols: cols.clamp(min_dim, max_dim) as u16,
             pixel_width: 0,
             pixel_height: 0,
         };
         let pair = pty_system.openpty(size)?;
 
-        let shell = default_shell();
+        let shell = configured_shell(&config.shell);
         let mut cmd = CommandBuilder::new(shell.clone());
-        // Login-ish behavior: keep env TERM.
-        cmd.env("TERM", "xterm-256color");
-        cmd.cwd(std::env::var("HOME").unwrap_or_else(|_| "/".to_string()));
+        let term = if config.shell.term.is_empty() {
+            "xterm-256color".to_string()
+        } else {
+            config.shell.term.clone()
+        };
+        cmd.env("TERM", term);
+        cmd.cwd(configured_cwd(&config.shell));
 
         let child = pair
             .slave
@@ -90,6 +99,8 @@ impl PtySession {
             rx_from_pty,
             master: pair.master,
             _child: child,
+            min_dim,
+            max_dim,
         })
     }
 
@@ -103,12 +114,26 @@ impl PtySession {
 
     pub fn resize(&self, cols: usize, rows: usize) {
         let _ = self.master.resize(portable_pty::PtySize {
-            rows: rows.clamp(MIN_DIM, MAX_DIM) as u16,
-            cols: cols.clamp(MIN_DIM, MAX_DIM) as u16,
+            rows: rows.clamp(self.min_dim, self.max_dim) as u16,
+            cols: cols.clamp(self.min_dim, self.max_dim) as u16,
             pixel_width: 0,
             pixel_height: 0,
         });
     }
+}
+
+fn configured_shell(shell_config: &crate::config::ShellConfig) -> String {
+    if !shell_config.shell.trim().is_empty() {
+        return shell_config.shell.clone();
+    }
+    default_shell()
+}
+
+fn configured_cwd(shell_config: &crate::config::ShellConfig) -> String {
+    if !shell_config.cwd.trim().is_empty() {
+        return shell_config.cwd.clone();
+    }
+    std::env::var("HOME").unwrap_or_else(|_| "/".to_string())
 }
 
 pub fn default_shell() -> String {

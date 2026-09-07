@@ -11,11 +11,8 @@ pub struct Terminal {
     // Last OSC 0/1/2 title set by the shell; empty when none seen.
     // Drives tab-bar labels (falls back to `Tab N`).
     title: String,
+    max_title_chars: usize,
 }
-
-/// Maximum stored OSC title length (chars) so a runaway escape can't
-/// grow memory without bound; the tab bar truncates further anyway.
-const MAX_TITLE_CHARS: usize = 256;
 
 /// Extract an `OSC 0/1/2` window-title update from vte's split params.
 ///
@@ -23,7 +20,7 @@ const MAX_TITLE_CHARS: usize = 256;
 /// `[b"0", b"foo"]` and a title containing `;` arrives as extra pieces
 /// (`[b"0", b"a", b"b"]` for `a;b`). A single unsplit param (`[b"0;foo"]`)
 /// is handled too for robustness.
-fn osc_title(params: &[&[u8]]) -> Option<String> {
+fn osc_title(params: &[&[u8]], max_chars: usize) -> Option<String> {
     let (num, rest) = match params {
         [] => return None,
         [single] => match single.iter().position(|&b| b == b';') {
@@ -47,17 +44,29 @@ fn osc_title(params: &[&[u8]]) -> Option<String> {
         bytes.extend_from_slice(piece);
     }
     let s = String::from_utf8_lossy(&bytes).trim().to_string();
-    let truncated: String = s.chars().take(MAX_TITLE_CHARS).collect();
+    let max_chars = max_chars.max(1);
+    let truncated: String = s.chars().take(max_chars).collect();
     Some(truncated)
 }
 
 impl Terminal {
+    #[allow(dead_code)]
     pub fn new(cols: usize, rows: usize, theme: Theme) -> Self {
+        Self::new_with_config(cols, rows, theme, &crate::config::Config::default())
+    }
+
+    pub fn new_with_config(
+        cols: usize,
+        rows: usize,
+        theme: Theme,
+        config: &crate::config::Config,
+    ) -> Self {
         Self {
-            grid: Grid::new(cols, rows, theme),
+            grid: Grid::new_with_config(cols, rows, theme, config),
             parser: Parser::new(),
             pending_wrap: false,
             title: String::new(),
+            max_title_chars: config.terminal.max_title_chars.max(1),
         }
     }
 
@@ -457,7 +466,7 @@ impl vte::Perform for Terminal {
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         // Only window/icon titles (0/1/2) are tracked; they feed tab labels.
-        if let Some(title) = osc_title(params) {
+        if let Some(title) = osc_title(params, self.max_title_chars) {
             self.title = title;
         }
     }
@@ -682,14 +691,14 @@ mod tests {
 
     #[test]
     fn osc_title_parser_shapes() {
-        assert_eq!(osc_title(&[]), None);
-        assert_eq!(osc_title(&[b"4", b"1;red"]), None);
-        assert_eq!(osc_title(&[b"0", b"hi"]), Some("hi".to_string()));
+        assert_eq!(osc_title(&[], 256), None);
+        assert_eq!(osc_title(&[b"4", b"1;red"], 256), None);
+        assert_eq!(osc_title(&[b"0", b"hi"], 256), Some("hi".to_string()));
         assert_eq!(
-            osc_title(&[b"2;split;title"]),
+            osc_title(&[b"2;split;title"], 256),
             Some("split;title".to_string())
         );
-        assert_eq!(osc_title(&[b"0"]), None);
+        assert_eq!(osc_title(&[b"0"], 256), None);
     }
 
     #[test]
