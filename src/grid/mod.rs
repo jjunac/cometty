@@ -36,6 +36,18 @@ pub struct Grid {
     cursor_style: CursorStyle,
     saved_style: Option<CursorStyle>,
     saved_main_saved_style: Option<CursorStyle>,
+    scroll_top: usize,
+    scroll_bottom: usize,
+    origin_mode: bool,
+    insert_mode: bool,
+    auto_wrap: bool,
+    saved_origin: Option<bool>,
+    saved_main_scroll_top: Option<usize>,
+    saved_main_scroll_bottom: Option<usize>,
+    saved_main_origin: Option<bool>,
+    saved_main_insert: Option<bool>,
+    saved_main_wrap: Option<bool>,
+    saved_main_saved_origin: Option<bool>,
 }
 
 impl Grid {
@@ -81,6 +93,18 @@ impl Grid {
             cursor_style: CursorStyle::default(),
             saved_style: None,
             saved_main_saved_style: None,
+            scroll_top: 0,
+            scroll_bottom: rows.saturating_sub(1),
+            origin_mode: false,
+            insert_mode: false,
+            auto_wrap: true,
+            saved_origin: None,
+            saved_main_scroll_top: None,
+            saved_main_scroll_bottom: None,
+            saved_main_origin: None,
+            saved_main_insert: None,
+            saved_main_wrap: None,
+            saved_main_saved_origin: None,
         }
     }
 
@@ -160,6 +184,13 @@ impl Grid {
         }
         self.cols = cols;
         self.rows = rows;
+        // Resize resets scroll margins to full (DECSTBM).
+        self.scroll_top = 0;
+        self.scroll_bottom = rows.saturating_sub(1);
+        if self.saved_main_scroll_top.is_some() {
+            self.saved_main_scroll_top = Some(0);
+            self.saved_main_scroll_bottom = Some(rows.saturating_sub(1));
+        }
         if cols != self.scrollback.front().map(|r| r.len()).unwrap_or(cols) {
             for row in self.scrollback.iter_mut() {
                 row.resize(cols, blank.clone());
@@ -630,5 +661,182 @@ mod tests {
         // Lead at col 2 lost its continuation: repaired to space.
         assert_eq!(g.cell(2, 0).unwrap().width, 1);
         assert_eq!(g.cell(2, 0).unwrap().ch, ' ');
+    }
+
+    #[test]
+    fn scroll_region_newline_preserves_outside() {
+        let mut g = Grid::new(3, 5, test_theme());
+        for (y, ch) in [(0, 'a'), (1, 'b'), (2, 'c'), (3, 'd'), (4, 'e')] {
+            g.set_cursor(0, y);
+            g.put_char(ch);
+        }
+        assert!(g.set_scroll_region(1, 3));
+        assert_eq!(g.scroll_region(), (1, 3));
+        // Cursor homes to region top (origin off).
+        assert_eq!(g.cursor(), Cursor { x: 0, y: 0 });
+        g.set_cursor(0, 3);
+        g.newline();
+        // Region [b,c,d] scrolled to [c,d,blank]; outside untouched.
+        assert_eq!(g.cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(g.cell(0, 1).unwrap().ch, 'c');
+        assert_eq!(g.cell(0, 2).unwrap().ch, 'd');
+        assert_eq!(g.cell(0, 3).unwrap().ch, ' ');
+        assert_eq!(g.cell(0, 4).unwrap().ch, 'e');
+        // Partial-region scroll never touches scrollback.
+        assert_eq!(g.scrollback_len(), 0);
+    }
+
+    #[test]
+    fn scroll_region_invalid_is_ignored() {
+        let mut g = Grid::new(3, 4, test_theme());
+        assert!(!g.set_scroll_region(2, 2));
+        assert!(!g.set_scroll_region(3, 1));
+        assert_eq!(g.scroll_region(), (0, 3));
+    }
+
+    #[test]
+    fn newline_outside_region_does_not_scroll() {
+        let mut g = Grid::new(2, 4, test_theme());
+        assert!(g.set_scroll_region(0, 1));
+        g.set_cursor(0, 3);
+        g.newline();
+        // Stays on the last row, region untouched, no scrollback.
+        assert_eq!(g.cursor().y, 3);
+        assert_eq!(g.scrollback_len(), 0);
+    }
+
+    #[test]
+    fn reverse_index_at_region_top_scrolls_down() {
+        let mut g = Grid::new(2, 4, test_theme());
+        for (y, ch) in [(0, 'a'), (1, 'b'), (2, 'c'), (3, 'd')] {
+            g.set_cursor(0, y);
+            g.put_char(ch);
+        }
+        assert!(g.set_scroll_region(1, 2));
+        g.set_cursor(0, 1);
+        g.reverse_index();
+        assert_eq!(g.cell(0, 1).unwrap().ch, ' ');
+        assert_eq!(g.cell(0, 2).unwrap().ch, 'b');
+        assert_eq!(g.cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(g.cell(0, 3).unwrap().ch, 'd');
+    }
+
+    #[test]
+    fn insert_delete_lines_constrained_to_region() {
+        let mut g = Grid::new(2, 4, test_theme());
+        for (y, ch) in [(0, 'a'), (1, 'b'), (2, 'c'), (3, 'd')] {
+            g.set_cursor(0, y);
+            g.put_char(ch);
+        }
+        assert!(g.set_scroll_region(1, 2));
+        g.set_cursor(0, 1);
+        g.insert_lines(1);
+        assert_eq!(g.cell(0, 1).unwrap().ch, ' ');
+        assert_eq!(g.cell(0, 2).unwrap().ch, 'b');
+        assert_eq!(g.cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(g.cell(0, 3).unwrap().ch, 'd');
+        g.delete_lines(1);
+        assert_eq!(g.cell(0, 1).unwrap().ch, 'b');
+        assert_eq!(g.cell(0, 2).unwrap().ch, ' ');
+        // Outside the margins IL/DL are no-ops.
+        g.set_cursor(0, 0);
+        g.insert_lines(1);
+        assert_eq!(g.cell(0, 0).unwrap().ch, 'a');
+        g.delete_lines(1);
+        assert_eq!(g.cell(0, 0).unwrap().ch, 'a');
+    }
+
+    #[test]
+    fn origin_mode_clamps_cursor_to_margins() {
+        let mut g = Grid::new(3, 5, test_theme());
+        assert!(g.set_scroll_region(1, 3));
+        g.set_origin_mode(true);
+        // DECOM homes to the region top.
+        assert_eq!(g.cursor(), Cursor { x: 0, y: 1 });
+        g.set_cursor(0, 0);
+        assert_eq!(g.cursor().y, 1);
+        g.set_cursor(0, 4);
+        assert_eq!(g.cursor().y, 3);
+        g.set_cursor(0, 2);
+        g.move_cursor(0, -5);
+        assert_eq!(g.cursor().y, 1);
+        g.move_cursor(0, 5);
+        assert_eq!(g.cursor().y, 3);
+        g.set_origin_mode(false);
+        g.set_cursor(0, 0);
+        assert_eq!(g.cursor().y, 0);
+    }
+
+    #[test]
+    fn insert_mode_shifts_line_right() {
+        let mut g = Grid::new(4, 1, test_theme());
+        g.set_cursor(0, 0);
+        g.put_char('a');
+        g.put_char('b');
+        g.put_char('c');
+        g.set_cursor(1, 0);
+        g.set_insert_mode(true);
+        g.put_char('X');
+        assert_eq!(g.cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(g.cell(1, 0).unwrap().ch, 'X');
+        assert_eq!(g.cell(2, 0).unwrap().ch, 'b');
+        assert_eq!(g.cell(3, 0).unwrap().ch, 'c');
+    }
+
+    #[test]
+    fn no_wrap_overwrites_last_column() {
+        let mut g = Grid::new(3, 2, test_theme());
+        g.set_auto_wrap(false);
+        g.set_cursor(0, 0);
+        g.put_char('a');
+        g.put_char('b');
+        g.put_char('c');
+        g.put_char('d');
+        assert_eq!(g.cell(0, 0).unwrap().ch, 'a');
+        assert_eq!(g.cell(1, 0).unwrap().ch, 'b');
+        assert_eq!(g.cell(2, 0).unwrap().ch, 'd');
+        assert_eq!(g.cursor(), Cursor { x: 2, y: 0 });
+        assert_eq!(g.cell(0, 1).unwrap().ch, ' ');
+    }
+
+    #[test]
+    fn save_restore_keeps_origin_mode() {
+        let mut g = Grid::new(3, 4, test_theme());
+        assert!(g.set_scroll_region(1, 2));
+        g.set_origin_mode(true);
+        g.set_cursor(1, 1);
+        g.save_cursor();
+        g.set_origin_mode(false);
+        g.set_cursor(0, 0);
+        g.restore_cursor();
+        assert!(g.origin_mode());
+        assert_eq!(g.cursor(), Cursor { x: 1, y: 1 });
+    }
+
+    #[test]
+    fn alt_buffer_saves_and_restores_margins_and_modes() {
+        let mut g = Grid::new(3, 4, test_theme());
+        assert!(g.set_scroll_region(1, 2));
+        g.set_origin_mode(true);
+        g.set_insert_mode(true);
+        g.set_auto_wrap(false);
+        g.enter_alt(true);
+        assert_eq!(g.scroll_region(), (0, 3));
+        assert!(!g.origin_mode());
+        assert!(!g.insert_mode());
+        assert!(g.auto_wrap());
+        g.exit_alt();
+        assert_eq!(g.scroll_region(), (1, 2));
+        assert!(g.origin_mode());
+        assert!(g.insert_mode());
+        assert!(!g.auto_wrap());
+    }
+
+    #[test]
+    fn resize_resets_margins_to_full() {
+        let mut g = Grid::new(3, 4, test_theme());
+        assert!(g.set_scroll_region(1, 2));
+        g.resize(3, 5);
+        assert_eq!(g.scroll_region(), (0, 4));
     }
 }

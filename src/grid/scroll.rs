@@ -119,15 +119,148 @@ impl Grid {
         self.bump();
     }
 
-    /// New cell output sticks the view to the live bottom.
-    /// Called at the top of content-mutating ops (their trailing `bump`
-    /// covers the version change, so this deliberately doesn't bump).
     pub(crate) fn stick_to_bottom(&mut self) {
         self.scroll_offset = 0;
     }
 
+    /// Scroll margins (DECSTBM), 0-based inclusive. Full screen when
+    /// `top == 0 && bottom + 1 == rows`.
+    pub fn scroll_region(&self) -> (usize, usize) {
+        (self.scroll_top, self.scroll_bottom)
+    }
+
+    pub fn is_full_region(&self) -> bool {
+        self.rows == 0 || (self.scroll_top == 0 && self.scroll_bottom + 1 >= self.rows)
+    }
+
+    fn clamp_region(&self, top: usize, bottom: usize) -> (usize, usize) {
+        if self.rows == 0 {
+            return (0, 0);
+        }
+        let max = self.rows - 1;
+        (top.min(max), bottom.min(max))
+    }
+
+    /// Set scroll margins (0-based inclusive). Returns false when the
+    /// request is invalid (`top >= bottom`): the region is left unchanged
+    /// and the caller should ignore the sequence.
+    pub fn set_scroll_region(&mut self, top: usize, bottom: usize) -> bool {
+        let (top, bottom) = self.clamp_region(top, bottom);
+        if top >= bottom {
+            return false;
+        }
+        self.scroll_top = top;
+        self.scroll_bottom = bottom;
+        // Cursor homes on DECSTBM (origin-aware).
+        self.home_cursor();
+        self.bump();
+        true
+    }
+
+    /// Reset margins to the full screen without moving the cursor.
+    /// Used by resize / alt-buffer switches / full reset.
+    pub fn reset_scroll_region(&mut self) {
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows.saturating_sub(1);
+    }
+
+    /// Origin-aware cursor home: `(0, top)` in origin mode, else `(0, 0)`.
+    pub fn home_cursor(&mut self) {
+        let y = if self.origin_mode {
+            self.scroll_top.min(self.rows.saturating_sub(1))
+        } else {
+            0
+        };
+        self.cursor.x = 0;
+        self.cursor.y = y;
+        self.snap_cursor_to_lead();
+    }
+
+    /// Clamp the cursor into the margins. Used after absolute moves while
+    /// origin mode is on.
+    pub fn clamp_cursor_to_margins(&mut self) {
+        if self.origin_mode && self.rows > 0 {
+            let max = self.rows.saturating_sub(1);
+            let top = self.scroll_top.min(max);
+            let bottom = self.scroll_bottom.min(max);
+            if self.cursor.y < top {
+                self.cursor.y = top;
+            } else if self.cursor.y > bottom {
+                self.cursor.y = bottom;
+            }
+        }
+    }
+
+    pub(crate) fn scroll_region_up_inner(&mut self, n: usize) {
+        if self.rows == 0 {
+            return;
+        }
+        let max = self.rows - 1;
+        let top = self.scroll_top.min(max);
+        let bottom = self.scroll_bottom.min(max);
+        if top >= bottom && n > 0 {
+            return;
+        }
+        for _ in 0..n {
+            if top >= self.cells.len() || bottom >= self.cells.len() {
+                break;
+            }
+            self.cells.remove(top);
+            // After removal the region shrank by one; re-insert fill at
+            // `bottom` so only `[top..=bottom]` rotates.
+            let fill = self.erase_row();
+            if bottom <= self.cells.len() {
+                self.cells.insert(bottom, fill);
+            } else {
+                self.cells.push(fill);
+            }
+        }
+    }
+
+    pub(crate) fn scroll_region_down_inner(&mut self, n: usize) {
+        if self.rows == 0 {
+            return;
+        }
+        let max = self.rows - 1;
+        let top = self.scroll_top.min(max);
+        let bottom = self.scroll_bottom.min(max);
+        if top >= bottom && n > 0 {
+            return;
+        }
+        for _ in 0..n {
+            if top >= self.cells.len() || bottom >= self.cells.len() {
+                break;
+            }
+            self.cells.remove(bottom);
+            let fill = self.erase_row();
+            self.cells.insert(top, fill);
+        }
+    }
+
+    /// Scroll the margin region up (no scrollback). Full-region callers
+    /// that want history should use [`Self::scroll_up`].
+    #[allow(dead_code)]
+    pub fn scroll_region_up(&mut self, n: usize) {
+        self.stick_to_bottom();
+        self.scroll_region_up_inner(n);
+        self.bump();
+    }
+
+    /// Scroll the margin region down (no scrollback).
+    #[allow(dead_code)]
+    pub fn scroll_region_down(&mut self, n: usize) {
+        self.stick_to_bottom();
+        self.scroll_region_down_inner(n);
+        self.bump();
+    }
+
     pub fn scroll_up(&mut self, n: usize) {
         self.stick_to_bottom();
+        if !self.is_full_region() {
+            self.scroll_region_up_inner(n);
+            self.bump();
+            return;
+        }
         for _ in 0..n {
             if self.rows == 0 {
                 break;
@@ -147,6 +280,11 @@ impl Grid {
 
     pub fn scroll_down(&mut self, n: usize) {
         self.stick_to_bottom();
+        if !self.is_full_region() {
+            self.scroll_region_down_inner(n);
+            self.bump();
+            return;
+        }
         for _ in 0..n {
             if self.cells.is_empty() {
                 break;

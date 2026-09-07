@@ -177,23 +177,52 @@ impl Grid {
         if self.append_to_prev(ch) {
             return;
         }
-        let w = char_width(ch).clamp(1, 2);
+        let mut w = char_width(ch).clamp(1, 2);
         self.stick_to_bottom();
         if self.cursor.y >= self.rows {
             self.scroll_up(1);
             self.cursor.y = self.rows.saturating_sub(1);
         }
         if self.cursor.x >= self.cols {
-            self.newline();
+            if self.auto_wrap {
+                self.newline();
+            } else {
+                self.cursor.x = self.cols.saturating_sub(1);
+            }
         }
         // Wide char with only one column left: pad with a space and wrap,
-        // matching xterm's `auto-wrap` behavior.
+        // matching xterm's `auto-wrap` behavior. With DECAWM off the wide
+        // char degrades to narrow so the cursor stays on the last column.
         if w == 2 && self.cols >= 2 && self.cursor.x + 1 >= self.cols {
-            let (cx, cy) = (self.cursor.x, self.cursor.y);
-            if cx < self.cols && cy < self.rows {
-                self.cells[cy][cx] = self.erase_cell();
+            if self.auto_wrap {
+                let (cx, cy) = (self.cursor.x, self.cursor.y);
+                if cx < self.cols && cy < self.rows {
+                    self.cells[cy][cx] = self.erase_cell();
+                }
+                self.newline();
+            } else {
+                w = 1;
             }
-            self.newline();
+        }
+        // Insert mode (IRM): shift the line right before writing.
+        if self.insert_mode
+            && self.cursor.y < self.rows
+            && self.cursor.x < self.cols
+            && self.cursor.x + w <= self.cols
+        {
+            let (cx, cy) = (self.cursor.x, self.cursor.y);
+            let shift = w;
+            for i in (cx..self.cols.saturating_sub(shift)).rev() {
+                let v = self.cells[cy][i].clone();
+                self.cells[cy][i + shift] = v;
+            }
+            let fill = self.erase_cell();
+            for i in cx..(cx + shift).min(self.cols) {
+                self.cells[cy][i] = fill.clone();
+            }
+            // A shifted wide lead at the edge loses its continuation.
+            let edge_fix = self.erase_cell();
+            Self::fix_row_wide(&mut self.cells[cy], &edge_fix);
         }
         if self.cursor.y < self.rows && self.cursor.x < self.cols {
             // 1-column grid can't fit a wide char: degrade to narrow.
@@ -214,6 +243,10 @@ impl Grid {
                     self.cells[cy][cx + 1] = self.placeholder_cell();
                 }
                 self.cursor.x += w;
+                if !self.auto_wrap && self.cursor.x >= self.cols {
+                    // DECAWM off: stay on the last column, overwriting it.
+                    self.cursor.x = self.cols.saturating_sub(1);
+                }
             }
             if self.cursor.x >= self.cols {
                 // Defer wrap until next printable or explicit newline handling
@@ -225,18 +258,68 @@ impl Grid {
 
     pub fn handle_wrap_if_needed(&mut self) {
         if self.cursor.x >= self.cols {
-            self.newline();
+            if self.auto_wrap {
+                self.newline();
+            } else {
+                self.cursor.x = self.cols.saturating_sub(1);
+            }
         }
     }
 
     pub fn newline(&mut self) {
         self.stick_to_bottom();
         self.cursor.x = 0;
-        if self.cursor.y + 1 >= self.rows {
-            self.scroll_up(1);
-        } else {
-            self.cursor.y += 1;
+        let max = self.rows.saturating_sub(1);
+        let top = self.scroll_top.min(max);
+        let bottom = self.scroll_bottom.min(max);
+        let in_region = self.rows > 0 && self.cursor.y >= top && self.cursor.y <= bottom;
+        if in_region {
+            if self.cursor.y == bottom {
+                if top == 0 && bottom == max {
+                    // Full-screen scroll keeps history.
+                    let cur_top = self.cells.remove(0);
+                    if !self.in_alt {
+                        if self.scrollback.len() >= self.max_scrollback {
+                            self.scrollback.pop_front();
+                        }
+                        self.scrollback.push_back(cur_top);
+                    }
+                    self.cells.push(self.erase_row());
+                } else {
+                    self.scroll_region_up_inner(1);
+                }
+            } else {
+                self.cursor.y += 1;
+            }
+        } else if self.rows > 0 {
+            // Outside the margins: move down without scrolling.
+            if self.cursor.y + 1 < self.rows {
+                self.cursor.y += 1;
+            }
         }
+        self.bump();
+    }
+
+    /// Reverse index (`ESC M`): up one, scrolling the margin region down
+    /// when at its top. No scroll when outside the region.
+    pub fn reverse_index(&mut self) {
+        self.stick_to_bottom();
+        if self.rows == 0 {
+            return;
+        }
+        let max = self.rows - 1;
+        let top = self.scroll_top.min(max);
+        let bottom = self.scroll_bottom.min(max);
+        if self.cursor.y >= top && self.cursor.y <= bottom {
+            if self.cursor.y == top {
+                self.scroll_region_down_inner(1);
+            } else {
+                self.cursor.y -= 1;
+            }
+        } else if self.cursor.y > 0 {
+            self.cursor.y -= 1;
+        }
+        self.snap_cursor_to_lead();
         self.bump();
     }
 
@@ -275,10 +358,12 @@ impl Grid {
 
     pub fn move_cursor(&mut self, dx: isize, dy: isize) {
         let nx = (self.cursor.x as isize + dx).clamp(0, self.cols.saturating_sub(1) as isize);
-        let ny = (self.cursor.y as isize + dy).clamp(0, self.rows.saturating_sub(1) as isize);
+        let max_y = self.rows.saturating_sub(1) as isize;
+        let ny = (self.cursor.y as isize + dy).clamp(0, max_y);
         self.cursor.x = nx as usize;
         self.cursor.y = ny as usize;
         self.snap_cursor_to_lead();
+        self.clamp_cursor_to_margins();
         self.bump();
     }
 
@@ -286,6 +371,7 @@ impl Grid {
         self.cursor.x = x.min(self.cols.saturating_sub(1));
         self.cursor.y = y.min(self.rows.saturating_sub(1));
         self.snap_cursor_to_lead();
+        self.clamp_cursor_to_margins();
         self.bump();
     }
 
@@ -375,10 +461,28 @@ impl Grid {
 
     pub fn insert_lines(&mut self, n: usize) {
         self.stick_to_bottom();
-        let y = self.cursor.y.min(self.rows);
+        if self.rows == 0 {
+            self.bump();
+            return;
+        }
+        let max = self.rows - 1;
+        let top = self.scroll_top.min(max);
+        let bottom = self.scroll_bottom.min(max);
+        let y = self.cursor.y.min(max);
+        // IL is a no-op when the cursor is outside the margins.
+        if y < top || y > bottom {
+            self.bump();
+            return;
+        }
         for _ in 0..n {
-            if y < self.rows {
-                self.cells.insert(y, self.erase_row());
+            if y > bottom || y >= self.cells.len() {
+                break;
+            }
+            self.cells.insert(y, self.erase_row());
+            // Drop the overflow inside the region, not at screen bottom.
+            if bottom + 1 < self.cells.len() {
+                self.cells.remove(bottom + 1);
+            } else {
                 self.cells.pop();
             }
         }
@@ -387,11 +491,29 @@ impl Grid {
 
     pub fn delete_lines(&mut self, n: usize) {
         self.stick_to_bottom();
-        let y = self.cursor.y.min(self.rows);
+        if self.rows == 0 {
+            self.bump();
+            return;
+        }
+        let max = self.rows - 1;
+        let top = self.scroll_top.min(max);
+        let bottom = self.scroll_bottom.min(max);
+        let y = self.cursor.y.min(max);
+        // DL is a no-op when the cursor is outside the margins.
+        if y < top || y > bottom {
+            self.bump();
+            return;
+        }
         for _ in 0..n {
-            if y < self.rows {
-                self.cells.remove(y);
-                self.cells.push(self.erase_row());
+            if y > bottom || y >= self.cells.len() {
+                break;
+            }
+            self.cells.remove(y);
+            let fill = self.erase_row();
+            if bottom <= self.cells.len() {
+                self.cells.insert(bottom, fill);
+            } else {
+                self.cells.push(fill);
             }
         }
         self.bump();

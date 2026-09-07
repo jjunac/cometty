@@ -31,7 +31,7 @@ cargo fmt --check
 - [x] Consistent erase semantics (BCE: `ED/EL/IL/DL`/scroll fill use current pen bg)
 - [x] Full keyboard: F1–F12, Ctrl/Shift+arrows, Alt+key → `ESC` prefix, keypad (+`DECCKM`/`DECKPAM`, `Ctrl+Tab` reserved, Opt+arrows word jump, Cmd+arrows line edges)
 - [x] Unicode: double-width / emoji / combining chars (CJK wide, ZWJ sequences, flags, skin tones, VS16, combining marks; cluster cells with continuation placeholders)
-- [ ] Scroll regions (`CSI r`), origin / insert / auto-wrap modes
+- [x] Scroll regions (`CSI r`), origin / insert / auto-wrap modes
 - [ ] Exit behavior: close window when shell exits (currently just logs)
 - [ ] User config: font/size selection (theme is wired: `--theme` / `--list-themes`)
 - [ ] Bell (currently ignored)

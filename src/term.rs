@@ -167,6 +167,14 @@ impl Terminal {
     fn set_private_mode(&mut self, mode: u16, set: bool) {
         match mode {
             1 => self.grid.set_cursor_app_mode(set),
+            4 => self.grid.set_insert_mode(set),
+            6 => self.grid.set_origin_mode(set),
+            7 => {
+                self.grid.set_auto_wrap(set);
+                if !set {
+                    self.pending_wrap = false;
+                }
+            }
             25 => self.grid.set_cursor_enabled(set),
             66 => self.grid.set_keypad_app_mode(set),
             2004 => self.grid.set_bracketed_paste(set),
@@ -233,6 +241,10 @@ impl Terminal {
 
 impl vte::Perform for Terminal {
     fn print(&mut self, c: char) {
+        // DECAWM off: no pending wrap; Grid clamps to the last column.
+        if !self.grid.auto_wrap() {
+            self.pending_wrap = false;
+        }
         // Pending wrap clamps the cursor onto the last cell: a combining /
         // ZWJ continuation must attach there, not wrap and not attach one
         // cell back. Preserve pending state for the next advancing char.
@@ -260,7 +272,7 @@ impl vte::Perform for Terminal {
         }
         // After newline, cursor.x is 0.
         self.grid.put_char(c);
-        if self.grid.cursor().x >= self.grid.cols() {
+        if self.grid.auto_wrap() && self.grid.cursor().x >= self.grid.cols() {
             self.pending_wrap = true;
             // Clamp visual cursor to last column until wrap resolves.
             let y = self.grid.cursor().y;
@@ -270,6 +282,8 @@ impl vte::Perform for Terminal {
             // But set_cursor cleared the >=cols condition; keep pending_wrap.
             // Note: set_cursor snaps off continuations, so a wide lead at
             // the margin keeps the visual cursor on its lead cell.
+        } else if !self.grid.auto_wrap() {
+            self.pending_wrap = false;
         }
     }
 
@@ -302,6 +316,31 @@ impl vte::Perform for Terminal {
         }
         self.pending_wrap = false;
         match action {
+            'h' | 'l' => {
+                // SM / RM without `?`: only IRM (4) is supported.
+                let set = action == 'h';
+                for mode in Self::params_flat(params) {
+                    if mode == 4 {
+                        self.grid.set_insert_mode(set);
+                    }
+                }
+            }
+            'r' => {
+                // DECSTBM: `CSI top;bottom r` (1-based). Empty = full reset.
+                let flat = Self::params_flat(params);
+                if flat.is_empty() {
+                    self.grid.reset_scroll_region();
+                    self.grid.home_cursor();
+                } else {
+                    let rows = self.grid.rows();
+                    let top = Self::param_or(params, 0, 1);
+                    let bottom = Self::param_or(params, 1, rows.max(1) as u16);
+                    let top0 = top.saturating_sub(1) as usize;
+                    let bottom0 = bottom.saturating_sub(1) as usize;
+                    // Invalid (`top >= bottom`) is ignored.
+                    self.grid.set_scroll_region(top0, bottom0);
+                }
+            }
             'A' => {
                 let n = Self::param_or(params, 0, 1) as isize;
                 self.grid.move_cursor(0, -n);
@@ -336,13 +375,19 @@ impl vte::Perform for Terminal {
                 self.grid.set_cursor(col, y);
             }
             'd' => {
-                let row = Self::param_or(params, 0, 1).saturating_sub(1) as usize;
+                let mut row = Self::param_or(params, 0, 1).saturating_sub(1) as usize;
+                if self.grid.origin_mode() {
+                    row = row.saturating_add(self.grid.scroll_region().0);
+                }
                 let x = self.grid.cursor().x;
                 self.grid.set_cursor(x, row);
             }
             'H' | 'f' => {
-                let row = Self::param_or(params, 0, 1).saturating_sub(1) as usize;
+                let mut row = Self::param_or(params, 0, 1).saturating_sub(1) as usize;
                 let col = Self::param_or(params, 1, 1).saturating_sub(1) as usize;
+                if self.grid.origin_mode() {
+                    row = row.saturating_add(self.grid.scroll_region().0);
+                }
                 self.grid.set_cursor(col, row);
             }
             'J' => {
@@ -383,15 +428,7 @@ impl vte::Perform for Terminal {
         self.pending_wrap = false;
         if intermediates.is_empty() {
             match byte {
-                b'M' => {
-                    // Reverse index
-                    let cur = self.grid.cursor();
-                    if cur.y == 0 {
-                        self.grid.scroll_down(1);
-                    } else {
-                        self.grid.set_cursor(cur.x, cur.y.saturating_sub(1));
-                    }
-                }
+                b'M' => self.grid.reverse_index(),
                 b'7' => self.grid.save_cursor(),
                 b'8' => self.grid.restore_cursor(),
                 b'=' => self.grid.set_keypad_app_mode(true),
@@ -404,6 +441,7 @@ impl vte::Perform for Terminal {
                     self.grid.set_cursor_app_mode(false);
                     self.grid.set_keypad_app_mode(false);
                     self.grid.set_cursor_style(CursorStyle::default());
+                    self.grid.reset_margins_and_modes();
                     // Reset pen before clearing so BCE erase uses default bg.
                     self.grid.sgr(&[0]);
                     self.grid.clear_all();
@@ -757,5 +795,84 @@ mod tests {
         let lead = t.grid().cell(0, 0).unwrap();
         assert_eq!(lead.width, 2);
         assert_eq!(lead.cluster(), "👨\u{200D}👩\u{200D}👧");
+    }
+
+    #[test]
+    fn decstbm_sets_region_and_homes() {
+        let mut t = test_terminal(4, 5);
+        feed_str(&mut t, "\x1b[2;4r");
+        assert_eq!(t.grid().scroll_region(), (1, 3));
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (0, 0));
+        // Empty params reset to full.
+        feed_str(&mut t, "\x1b[r");
+        assert_eq!(t.grid().scroll_region(), (0, 4));
+        // Invalid region is ignored.
+        feed_str(&mut t, "\x1b[4;2r");
+        assert_eq!(t.grid().scroll_region(), (0, 4));
+    }
+
+    #[test]
+    fn decom_makes_cup_relative() {
+        let mut t = test_terminal(4, 5);
+        feed_str(&mut t, "\x1b[2;4r\x1b[?6h");
+        assert!(t.grid().origin_mode());
+        // CUP 1;1 homes to the region top, not screen top.
+        feed_str(&mut t, "\x1b[1;1H");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (0, 1));
+        feed_str(&mut t, "\x1b[2;1H");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (0, 2));
+        // VPA is relative too.
+        feed_str(&mut t, "\x1b[1d");
+        assert_eq!(t.grid().cursor().y, 1);
+        feed_str(&mut t, "\x1b[?6l");
+        assert!(!t.grid().origin_mode());
+        feed_str(&mut t, "\x1b[1;1H");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (0, 0));
+    }
+
+    #[test]
+    fn irm_and_decawm_toggle() {
+        let mut t = test_terminal(5, 2);
+        assert!(!t.grid().insert_mode());
+        assert!(t.grid().auto_wrap());
+        feed_str(&mut t, "\x1b[?4h");
+        assert!(t.grid().insert_mode());
+        feed_str(&mut t, "\x1b[?4l");
+        assert!(!t.grid().insert_mode());
+        // Non-private SM/RM also drive IRM.
+        feed_str(&mut t, "\x1b[4h");
+        assert!(t.grid().insert_mode());
+        feed_str(&mut t, "\x1b[4l");
+        assert!(!t.grid().insert_mode());
+        feed_str(&mut t, "\x1b[?7l");
+        assert!(!t.grid().auto_wrap());
+        feed_str(&mut t, "abcdeF");
+        // No wrap: last column overwritten, second row untouched.
+        assert_eq!(t.grid().cell(4, 0).unwrap().ch, 'F');
+        assert_eq!(t.grid().cell(0, 1).unwrap().ch, ' ');
+        feed_str(&mut t, "\x1b[?7h");
+        assert!(t.grid().auto_wrap());
+    }
+
+    #[test]
+    fn reverse_index_inside_region_scrolls_down() {
+        let mut t = test_terminal(3, 4);
+        feed_str(&mut t, "a\r\nb\r\nc\r\nd");
+        feed_str(&mut t, "\x1b[2;3r");
+        // Move to region top (screen row 2, 1-based) then reverse-index.
+        feed_str(&mut t, "\x1b[2;1H\x1bM");
+        assert_eq!(t.grid().cell(0, 1).unwrap().ch, ' ');
+        assert_eq!(t.grid().cell(0, 2).unwrap().ch, 'b');
+    }
+
+    #[test]
+    fn full_reset_clears_margins_and_modes() {
+        let mut t = test_terminal(4, 4);
+        feed_str(&mut t, "\x1b[2;3r\x1b[?6h\x1b[?4h\x1b[?7l");
+        feed_str(&mut t, "\x1bc");
+        assert_eq!(t.grid().scroll_region(), (0, 3));
+        assert!(!t.grid().origin_mode());
+        assert!(!t.grid().insert_mode());
+        assert!(t.grid().auto_wrap());
     }
 }

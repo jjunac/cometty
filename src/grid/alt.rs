@@ -8,6 +8,7 @@ impl Grid {
         self.saved_cursor = Some(self.cursor);
         self.saved_pen = Some(self.pen);
         self.saved_style = Some(self.cursor_style);
+        self.saved_origin = Some(self.origin_mode);
     }
 
     pub fn restore_cursor(&mut self) {
@@ -25,6 +26,11 @@ impl Grid {
         {
             self.cursor_style = s;
         }
+        if let Some(o) = self.saved_origin {
+            self.origin_mode = o;
+        }
+        self.snap_cursor_to_lead();
+        self.clamp_cursor_to_margins();
         self.bump();
     }
 
@@ -89,6 +95,51 @@ impl Grid {
         }
     }
 
+    pub fn origin_mode(&self) -> bool {
+        self.origin_mode
+    }
+
+    pub fn set_origin_mode(&mut self, enabled: bool) {
+        if self.origin_mode != enabled {
+            self.origin_mode = enabled;
+            // DECOM homes the cursor (origin-aware).
+            self.home_cursor();
+            self.bump();
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn insert_mode(&self) -> bool {
+        self.insert_mode
+    }
+
+    pub fn set_insert_mode(&mut self, enabled: bool) {
+        if self.insert_mode != enabled {
+            self.insert_mode = enabled;
+            self.bump();
+        }
+    }
+
+    pub fn auto_wrap(&self) -> bool {
+        self.auto_wrap
+    }
+
+    pub fn set_auto_wrap(&mut self, enabled: bool) {
+        if self.auto_wrap != enabled {
+            self.auto_wrap = enabled;
+            self.bump();
+        }
+    }
+
+    /// Full DEC reset for `ESC c`: margins + origin/insert/wrap back to
+    /// defaults (cursor homing is done by the caller).
+    pub fn reset_margins_and_modes(&mut self) {
+        self.reset_scroll_region();
+        self.origin_mode = false;
+        self.insert_mode = false;
+        self.auto_wrap = true;
+    }
+
     pub fn enter_alt(&mut self, clear: bool) {
         if self.in_alt {
             if clear {
@@ -102,11 +153,19 @@ impl Grid {
         self.saved_main_saved_cursor = self.saved_cursor;
         self.saved_main_saved_pen = self.saved_pen;
         self.saved_main_saved_style = self.saved_style;
+        self.saved_main_saved_origin = self.saved_origin;
+        self.saved_main_scroll_top = Some(self.scroll_top);
+        self.saved_main_scroll_bottom = Some(self.scroll_bottom);
+        self.saved_main_origin = Some(self.origin_mode);
+        self.saved_main_insert = Some(self.insert_mode);
+        self.saved_main_wrap = Some(self.auto_wrap);
         self.cells = vec![self.blank_row(); self.rows];
         self.cursor = Cursor { x: 0, y: 0 };
         self.saved_cursor = None;
         self.saved_pen = None;
         self.saved_style = None;
+        self.saved_origin = None;
+        self.reset_margins_and_modes();
         self.in_alt = true;
         self.scroll_offset = 0;
         if !clear {
@@ -133,8 +192,30 @@ impl Grid {
         self.saved_cursor = self.saved_main_saved_cursor.take();
         self.saved_pen = self.saved_main_saved_pen.take();
         self.saved_style = self.saved_main_saved_style.take();
+        self.saved_origin = self.saved_main_saved_origin.take();
+        if let (Some(top), Some(bottom)) = (
+            self.saved_main_scroll_top.take(),
+            self.saved_main_scroll_bottom.take(),
+        ) {
+            let max = self.rows.saturating_sub(1);
+            self.scroll_top = top.min(max);
+            self.scroll_bottom = bottom.min(max);
+            if self.scroll_top >= self.scroll_bottom && self.rows > 1 {
+                self.reset_scroll_region();
+            }
+        }
+        if let Some(o) = self.saved_main_origin.take() {
+            self.origin_mode = o;
+        }
+        if let Some(i) = self.saved_main_insert.take() {
+            self.insert_mode = i;
+        }
+        if let Some(w) = self.saved_main_wrap.take() {
+            self.auto_wrap = w;
+        }
         self.in_alt = false;
         self.scroll_offset = 0;
+        self.clamp_cursor_to_margins();
         self.bump();
     }
 }
