@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod grid;
 mod input;
+mod menu;
 mod pty;
 mod renderer;
 mod scrollbar;
@@ -18,7 +19,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-use app::{App, UserEvent};
+use app::{App, AppStartup, UserEvent};
 use config::Config;
 use renderer::Renderer;
 use theme::Theme;
@@ -58,6 +59,7 @@ fn resolve_cli() -> anyhow::Result<Option<(Option<Theme>, Option<String>)>> {
         } else if arg == "-h" || arg == "--help" {
             println!("cometty [--theme NAME] [--config PATH] [--list-themes]");
             println!("Config file: $HOME/.config/cometty/config.toml");
+            println!("Settings panel: Ctrl+, / Cmd+, (or Cometty > Settings in the menu bar)");
             return Ok(None);
         } else {
             return Err(anyhow::anyhow!("unknown argument {arg:?} (try --help)"));
@@ -70,6 +72,23 @@ impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
+        }
+        // Native menu: installed here (not in `main`) because winit sets up
+        // its own default menu at event-loop startup, which would clobber
+        // anything installed earlier. This override sticks: winit only
+        // installs its default once. Main thread here, as required by muda.
+        // Non-fatal: without the menu the Ctrl+, / Cmd+, shortcut still
+        // opens settings.
+        if self.menu.is_none() {
+            match menu::NativeMenu::new() {
+                Ok(native) => {
+                    native.install();
+                    self.menu = Some(native);
+                }
+                Err(e) => {
+                    log::warn!("native menu unavailable ({e}); settings shortcut still works");
+                }
+            }
         }
         let attrs = Window::default_attributes()
             .with_title(self.config.window.title.clone())
@@ -131,6 +150,23 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::PtyAvailable => {
                 if self.drain_pty() {
                     event_loop.exit();
+                }
+            }
+            // Native menu bar: the Settings item opens the panel (open-only,
+            // not a toggle, matching platform convention; Esc / x still
+            // close). The Cmd+, accelerator is consumed by the OS menu on
+            // macOS, so this doesn't double-fire with the keyboard toggle.
+            UserEvent::MenuEvent(event) => {
+                if self
+                    .menu
+                    .as_ref()
+                    .is_some_and(|m| event.id == *m.settings_id())
+                {
+                    self.settings.open = true;
+                    self.settings.notice = None;
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
                 }
             }
         }
@@ -204,13 +240,15 @@ impl ApplicationHandler<UserEvent> for App {
                 // NB: egui's `consumed` flag claims left-presses across the
                 // whole window, so selection uses an explicit scrollbar
                 // hit-test instead; releases always finalize a drag.
-                let _ = egui_consumed;
-                self.on_mouse_input(button, state);
+                // Exception: with the settings panel open, presses over egui
+                // chrome belong to the panel (see `on_mouse_input`).
+                self.on_mouse_input(button, state, egui_consumed);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // Wheel over the egui scrollbar still scrolls the same view.
-                let _ = egui_consumed;
-                self.on_wheel(delta);
+                // Exception: with the settings panel open, wheel over the
+                // panel scrolls the panel (see `on_wheel`).
+                self.on_wheel(delta, egui_consumed);
             }
             WindowEvent::RedrawRequested => {
                 self.on_redraw();
@@ -255,17 +293,44 @@ fn main() -> anyhow::Result<()> {
     let Some((theme_override, config_path)) = resolve_cli()? else {
         return Ok(());
     };
-    let config = if let Some(path) = config_path {
-        Config::load_from_path(std::path::Path::new(&path)).unwrap_or_default()
-    } else {
-        Config::load()
+    // Missing file = silent defaults (first run); present-but-unreadable =
+    // corrupt flag surfaced as a warning badge in the settings panel.
+    // The GUI keeps session values and wins over later external edits.
+    let config_path_override = config_path.map(std::path::PathBuf::from);
+    let load_candidate: Option<std::path::PathBuf> =
+        config_path_override.clone().or_else(Config::default_path);
+    let (config, config_corrupt) = match load_candidate {
+        Some(p) if p.exists() => match Config::load_from_path(&p) {
+            Ok(c) => (c, false),
+            Err(e) => {
+                log::warn!("unreadable config {} ({e:#}); using defaults", p.display());
+                (Config::default(), true)
+            }
+        },
+        _ => (Config::load(), false),
     };
+    let cli_theme = theme_override.map(|t| t.name.to_string());
     let theme = theme_override
         .or_else(|| Theme::from_name(&config.theme.name))
         .unwrap_or_default();
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    // Forward native-menu activations into the event loop so the menu works
+    // while the loop sleeps waiting for PTY output.
+    let menu_proxy = event_loop.create_proxy();
+    muda::MenuEvent::set_event_handler(Some(move |event| {
+        let _ = menu_proxy.send_event(UserEvent::MenuEvent(event));
+    }));
     let proxy = event_loop.create_proxy();
-    let mut app = App::new(Some(proxy), theme, config);
+    let mut app = App::new(
+        Some(proxy),
+        theme,
+        config,
+        AppStartup {
+            config_path_override,
+            cli_theme,
+            config_corrupt,
+        },
+    );
     event_loop.run_app(&mut app)?;
     Ok(())
 }

@@ -22,6 +22,8 @@ impl Renderer {
             is_alt,
             tab_titles,
             active_tab,
+            settings,
+            config,
         } = scroll;
         let scale = self.scale_factor.max(1.0);
         let screen_w_pts = self.width as f32 / scale;
@@ -382,7 +384,14 @@ impl Renderer {
                     }
                 }
             });
-        let mut full_output = ctx.end_pass();
+        let mut full_output = {
+            // Settings overlay (sidebar window when open; the entry point
+            // lives in the native OS menu bar). Edits mutate `config` in
+            // place; the app diffs + saves after the frame via
+            // `apply_settings_changes`.
+            super::settings_ui::show_settings(&ctx, settings, config);
+            ctx.end_pass()
+        };
         self.egui_state
             .handle_platform_output(window, full_output.platform_output);
         let paint_jobs = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);

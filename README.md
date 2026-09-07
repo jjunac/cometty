@@ -102,5 +102,5 @@ lines_per_tick = 7.0
 - [x] Scroll regions (`CSI r`), origin / insert / auto-wrap modes
 - [x] Exit behavior: last shell exit closes the window, other exits close just that tab
 - [x] User config: TOML file (`$HOME/.config/cometty/config.toml`) for theme/font/window/terminal/shell/cursor/scrollbar/tabbar/selection/input (see `src/config.rs`); CLI `--theme` / `--config` override file
-- [ ] Settings UI (config struct is ready for live editing)
+- [x] Settings UI (`Ctrl+,` / `Cmd+,` or the Settings button: sidebar panel, live-apply, auto-save to `config.toml`, per-field/section/global reset)
 - [ ] Bell (currently ignored)

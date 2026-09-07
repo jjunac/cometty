@@ -12,6 +12,30 @@ impl App {
         event: &winit::event::KeyEvent,
         egui_consumed: bool,
     ) -> bool {
+        // Settings toggle works whether or not the panel is open, and takes
+        // precedence over egui + terminal so the combo never reaches the PTY.
+        if event.state == ElementState::Pressed
+            && crate::app::settings::is_settings_toggle(&event.logical_key, &self.modifiers)
+        {
+            self.settings.toggle();
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+            return true;
+        }
+        // Panel-first: while open, everything except the toggle (above) and
+        // Esc-to-close goes to the egui panel, never the shell. Esc closes.
+        if self.settings.open {
+            if event.state == ElementState::Pressed
+                && event.logical_key == Key::Named(NamedKey::Escape)
+            {
+                self.settings.close();
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            return true;
+        }
         if egui_consumed {
             return true;
         }

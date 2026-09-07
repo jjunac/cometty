@@ -1,5 +1,6 @@
 mod background;
 mod overlay;
+mod settings_ui;
 mod text;
 
 use background::{BG_SHADER, BgVertex};
@@ -45,6 +46,8 @@ pub struct ScrollCtx<'a> {
     pub is_alt: bool,
     pub tab_titles: &'a [String],
     pub active_tab: usize,
+    pub settings: &'a mut crate::app::settings::SettingsPanel,
+    pub config: &'a mut Config,
 }
 
 /// Cursor input for [`Renderer::render`]: position + visibility + shape.
@@ -267,13 +270,26 @@ impl Renderer {
 
     /// Swap the active theme. Forces a text rebuild on the next render so
     /// future theme switching (CLI flag / config / keybind) just calls this.
-    #[allow(dead_code)]
     pub fn set_theme(&mut self, theme: Theme) {
         if self.theme != theme {
             self.theme = theme;
             self.egui_ctx.set_visuals(theme.to_egui_visuals());
             self.last_grid_version = u64::MAX;
         }
+    }
+
+    /// Live-apply settings edits: refresh the cached user config, re-derive
+    /// font metrics from the (possibly new) base size, and force a rebuild.
+    /// Theme itself flows through [`Self::set_theme`].
+    pub fn apply_config(&mut self, config: &Config) {
+        self.user_config = config.clone();
+        self.base_font_size = config.font.size;
+        let (font_size, line_height, cell_width) =
+            scaled_metrics(self.base_font_size, self.scale_factor, &config.font);
+        self.font_size = font_size;
+        self.line_height = line_height;
+        self.cell_width = cell_width;
+        self.last_grid_version = u64::MAX;
     }
 
     /// Forward a winit window event to egui. Call at the top of the

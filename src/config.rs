@@ -151,7 +151,7 @@ fn d_pixel_fallback() -> f32 {
 
 // --- sections ---
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ThemeConfig {
     #[serde(default = "d_theme_name")]
     pub name: String,
@@ -165,7 +165,7 @@ impl Default for ThemeConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FontConfig {
     #[serde(default = "d_font_family")]
     pub family: String,
@@ -191,7 +191,7 @@ impl Default for FontConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowConfig {
     #[serde(default = "d_window_title")]
     pub title: String,
@@ -211,7 +211,7 @@ impl Default for WindowConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TerminalConfig {
     #[serde(default = "d_scrollback")]
     pub scrollback_lines: usize,
@@ -237,7 +237,7 @@ impl Default for TerminalConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ShellConfig {
     /// Empty = auto (`$SHELL` or `/bin/bash`, `COMSPEC` on Windows).
     #[serde(default = "d_shell")]
@@ -259,7 +259,7 @@ impl Default for ShellConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CursorConfig {
     #[serde(default = "d_blink_ms")]
     pub blink_ms: u64,
@@ -286,7 +286,7 @@ impl Default for CursorConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScrollbarConfig {
     #[serde(default = "d_track_width")]
     pub track_width: f32,
@@ -312,7 +312,7 @@ impl Default for ScrollbarConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TabbarConfig {
     #[serde(default = "d_tabbar_height")]
     pub height: f32,
@@ -359,7 +359,7 @@ impl Default for TabbarConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SelectionConfig {
     #[serde(default = "d_double_click_ms")]
     pub double_click_ms: u64,
@@ -377,7 +377,7 @@ impl Default for SelectionConfig {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InputConfig {
     #[serde(default = "d_key_c")]
     pub copy_key: String,
@@ -430,7 +430,7 @@ impl Default for InputConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub theme: ThemeConfig,
@@ -473,6 +473,29 @@ impl Config {
         let text = std::fs::read_to_string(path)?;
         let cfg: Self = toml::from_str(&text)?;
         Ok(cfg.sanitized())
+    }
+
+    /// Atomically persist to `path` (temp file + rename). Creates parent
+    /// directories as needed. Never writes invalid TOML: serialization of
+    /// `Config` always succeeds, and callers sanitize before saving.
+    pub fn save_to_path(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let text = toml::to_string_pretty(self)?;
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Persist to the default location (`$HOME/.config/cometty/config.toml`).
+    pub fn save(&self) -> anyhow::Result<()> {
+        let path = Self::default_path()
+            .ok_or_else(|| anyhow::anyhow!("no HOME set; cannot resolve config path"))?;
+        self.save_to_path(&path)
     }
 
     /// Clamp obviously degenerate values so a bad file can't break layout.
@@ -560,5 +583,54 @@ mod tests {
         let s = c.sanitized();
         assert_eq!(s.font.size, 14.0);
         assert!(s.terminal.min_dim <= s.terminal.max_dim);
+    }
+
+    #[test]
+    fn corrupt_toml_fails_to_load() {
+        assert!(toml::from_str::<Config>("not [valid").is_err());
+        assert!(toml::from_str::<Config>("font = 42").is_err());
+    }
+
+    #[test]
+    fn unknown_theme_name_loads_for_panel_fallback() {
+        let c: Config = toml::from_str("[theme]\nname=\"solarized\"\n").unwrap();
+        assert_eq!(c.theme.name, "solarized");
+        assert_eq!(c.font.size, 14.0);
+    }
+
+    #[test]
+    fn save_roundtrips_all_sections() {
+        let mut c = Config::default();
+        c.theme.name = "vscode".to_string();
+        c.font.size = 16.0;
+        c.window.title = "test".to_string();
+        c.shell.shell = "/bin/zsh".to_string();
+        let dir = std::env::temp_dir().join(format!("cometty-test-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        c.save_to_path(&path).unwrap();
+        assert!(!path.with_extension("toml.tmp").exists());
+        let loaded = Config::load_from_path(&path).unwrap();
+        assert_eq!(loaded.theme.name, "vscode");
+        assert_eq!(loaded.font.size, 16.0);
+        assert_eq!(loaded.window.title, "test");
+        assert_eq!(loaded.shell.shell, "/bin/zsh");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_creates_parent_dirs() {
+        let c = Config::default();
+        let dir = std::env::temp_dir().join(format!(
+            "cometty-test-nested-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        let path = dir.join("a").join("b").join("config.toml");
+        c.save_to_path(&path).unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

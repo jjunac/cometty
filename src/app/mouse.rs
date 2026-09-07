@@ -42,7 +42,19 @@ impl App {
         self.cursor_pos = None;
     }
 
-    pub(crate) fn on_mouse_input(&mut self, button: MouseButton, state: ElementState) {
+    pub(crate) fn on_mouse_input(
+        &mut self,
+        button: MouseButton,
+        state: ElementState,
+        egui_consumed: bool,
+    ) {
+        // While the settings panel is open, presses over egui chrome belong
+        // to the panel (window drag, widget clicks), not to
+        // terminal selection. Releases always flow through so a drag started
+        // before the panel opened can't stick.
+        if self.settings.open && egui_consumed && state == ElementState::Pressed {
+            return;
+        }
         match (button, state) {
             (MouseButton::Left, ElementState::Pressed) => {
                 let now = Instant::now();
@@ -159,7 +171,11 @@ impl App {
         }
     }
 
-    pub(crate) fn on_wheel(&mut self, delta: MouseScrollDelta) {
+    pub(crate) fn on_wheel(&mut self, delta: MouseScrollDelta, egui_consumed: bool) {
+        // Scrolling over the open settings panel scrolls the panel.
+        if self.settings.open && egui_consumed {
+            return;
+        }
         let lines_per_tick = self.config.input.lines_per_tick;
         match delta {
             MouseScrollDelta::LineDelta(_, y) => {

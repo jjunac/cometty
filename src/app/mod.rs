@@ -11,9 +11,11 @@ pub mod mouse;
 pub mod pty_io;
 pub mod redraw;
 pub mod selection_view;
+pub mod settings;
 pub mod tab;
 
 pub use geometry::compute_grid_size;
+pub use settings::{AppStartup, SettingsPanel};
 pub use tab::Tab;
 
 use std::sync::Arc;
@@ -29,6 +31,7 @@ use crate::theme::Theme;
 #[derive(Debug)]
 pub enum UserEvent {
     PtyAvailable,
+    MenuEvent(muda::MenuEvent),
 }
 
 pub struct App {
@@ -49,6 +52,8 @@ pub struct App {
     pub(crate) last_click: Option<(Instant, (usize, usize))>,
     pub(crate) clipboard: Option<arboard::Clipboard>,
     pub(crate) window_title: String,
+    pub(crate) settings: SettingsPanel,
+    pub(crate) menu: Option<crate::menu::NativeMenu>,
 }
 
 impl App {
@@ -56,6 +61,7 @@ impl App {
         proxy: Option<winit::event_loop::EventLoopProxy<UserEvent>>,
         theme: Theme,
         config: Config,
+        startup: AppStartup,
     ) -> Self {
         let window_title = config.window.title.clone();
         Self {
@@ -76,6 +82,72 @@ impl App {
             last_click: None,
             clipboard: None,
             window_title,
+            settings: SettingsPanel::new(startup),
+            menu: None,
+        }
+    }
+
+    /// Persist the live config after a panel edit. Failures stay in the
+    /// session with a panel toast; the next change retries.
+    pub(crate) fn save_config_from_settings(&mut self) {
+        let result = match self.settings.custom_config_path.clone() {
+            Some(path) => self.config.save_to_path(&path),
+            None => self.config.save(),
+        };
+        match result {
+            Ok(()) => self.settings.report_saved(),
+            Err(e) => {
+                let target = self.settings.config_path_label();
+                log::warn!("failed to save config to {target}: {e:#}");
+                self.settings.report_error(format!("save failed: {e:#}"));
+            }
+        }
+    }
+
+    /// Route a settings diff to the live session (theme/font/window/
+    /// terminal/chrome). Shell/cwd/term intentionally only affect new tabs.
+    pub(crate) fn apply_settings_changes(&mut self, old: &Config) {
+        let actions = settings::diff_actions(old, &self.config);
+        if !actions.any {
+            return;
+        }
+        // Theme (skipped live while a CLI --theme owns the session) and
+        // terminal tuning both flow through the per-tab session config.
+        let live_theme = actions.theme && self.settings.cli_theme_override.is_none();
+        if live_theme || actions.terminal {
+            let theme = if live_theme {
+                crate::theme::Theme::from_name(&self.config.theme.name).unwrap_or(self.theme)
+            } else {
+                self.theme
+            };
+            if live_theme {
+                self.theme = theme;
+            }
+            for tab in &mut self.tabs {
+                tab.terminal.apply_config(theme, &self.config);
+            }
+        }
+        if (actions.theme || actions.font || actions.chrome)
+            && let Some(r) = self.renderer.as_mut()
+        {
+            if live_theme {
+                r.set_theme(self.theme);
+            }
+            r.apply_config(&self.config);
+        }
+        if actions.font || actions.terminal {
+            self.sync_tab_sizes();
+        }
+        if actions.window_size {
+            let (w, h) = (self.config.window.width, self.config.window.height);
+            if let Some(window) = self.window.as_ref() {
+                use winit::dpi::LogicalSize;
+                let _ = window.request_inner_size(LogicalSize::new(w, h));
+            }
+        }
+        self.sync_window_title();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
         }
     }
 }

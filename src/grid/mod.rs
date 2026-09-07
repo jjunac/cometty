@@ -146,6 +146,32 @@ impl Grid {
         self.rows
     }
 
+    /// Live-apply a theme change: fresh cells use the new colors while
+    /// existing cells keep their resolved colors (standard terminal
+    /// behavior on theme switch).
+    pub fn set_theme(&mut self, theme: Theme) {
+        if self.theme != theme {
+            self.theme = theme;
+            self.bump();
+        }
+    }
+
+    /// Live-apply terminal tuning without respawning the session.
+    /// Shrinking the scrollback cap drops the oldest rows immediately;
+    /// growing it takes effect as new output scrolls in.
+    pub fn apply_terminal_config(&mut self, config: &crate::config::TerminalConfig) {
+        self.max_scrollback = config.scrollback_lines;
+        while self.scrollback.len() > self.max_scrollback {
+            self.scrollback.pop_front();
+        }
+        self.scroll_offset = self.scroll_offset.min(self.scrollback.len());
+        self.tab_stop = config.tab_stop.max(1);
+        let min_dim = config.min_dim.max(1);
+        self.max_dim = config.max_dim.max(min_dim);
+        self.min_dim = min_dim.min(self.max_dim);
+        self.bump();
+    }
+
     pub fn cursor(&self) -> Cursor {
         self.cursor
     }
@@ -339,6 +365,46 @@ mod tests {
         g.put_char('x');
         g.erase_in_display(2);
         assert_eq!(g.cell(0, 0).unwrap().ch, ' ');
+    }
+
+    #[test]
+    fn set_theme_bumps_version_only_on_change() {
+        let mut g = Grid::new(3, 2, test_theme());
+        let v = g.version;
+        g.set_theme(test_theme());
+        assert_eq!(g.version, v);
+        g.set_theme(Theme::vscode());
+        assert_ne!(g.version, v);
+        assert_eq!(g.theme(), Theme::vscode());
+    }
+
+    #[test]
+    fn apply_terminal_config_truncates_scrollback() {
+        let mut cfg = crate::config::Config::default();
+        cfg.terminal.scrollback_lines = 10;
+        let mut g = Grid::new_with_config(2, 2, test_theme(), &cfg);
+        for _ in 0..5 {
+            g.newline();
+        }
+        // 2-row grid: first newline moves within the viewport, the rest scroll.
+        assert_eq!(g.scrollback_len(), 4);
+        cfg.terminal.scrollback_lines = 2;
+        cfg.terminal.tab_stop = 4;
+        g.apply_terminal_config(&cfg.terminal);
+        assert_eq!(g.scrollback_len(), 2);
+    }
+
+    #[test]
+    fn apply_terminal_config_repairs_dims() {
+        let mut g = Grid::new(4, 2, test_theme());
+        let mut t = crate::config::TerminalConfig::default();
+        t.min_dim = 9999;
+        t.max_dim = 10;
+        t.tab_stop = 0;
+        g.apply_terminal_config(&t);
+        g.resize(100_000, 100_000);
+        assert!(g.cols() <= 9999);
+        assert!(g.cols() >= 10);
     }
 
     #[test]

@@ -123,6 +123,19 @@ impl Terminal {
         self.pending_wrap = false;
     }
 
+    /// Live-apply settings changes to an existing session: theme plus
+    /// terminal tuning. Shell/cwd/term intentionally stay with the
+    /// spawned process (new tabs pick those up).
+    pub fn apply_config(&mut self, theme: Theme, config: &crate::config::Config) {
+        self.grid.set_theme(theme);
+        self.grid.apply_terminal_config(&config.terminal);
+        self.max_title_chars = config.terminal.max_title_chars.max(1);
+        let keep = self.title.chars().count().min(self.max_title_chars);
+        if keep < self.title.chars().count() {
+            self.title = self.title.chars().take(keep).collect();
+        }
+    }
+
     pub fn scroll_offset(&self) -> usize {
         self.grid.scroll_offset()
     }
@@ -491,6 +504,19 @@ mod tests {
         feed_str(&mut t, "hi");
         assert_eq!(t.grid().cell(0, 0).unwrap().ch, 'h');
         assert_eq!(t.grid().cell(1, 0).unwrap().ch, 'i');
+    }
+
+    #[test]
+    fn apply_config_updates_theme_and_truncates_title() {
+        let mut t = test_terminal(10, 5);
+        feed_str(&mut t, "\x1b]0;hello\x07");
+        assert_eq!(t.title(), "hello");
+        let mut cfg = crate::config::Config::default();
+        cfg.theme.name = "vscode".to_string();
+        cfg.terminal.max_title_chars = 3;
+        t.apply_config(Theme::vscode(), &cfg);
+        assert_eq!(t.theme(), Theme::vscode());
+        assert_eq!(t.title(), "hel");
     }
 
     #[test]

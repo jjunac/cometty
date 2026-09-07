@@ -94,6 +94,10 @@ impl App {
             (Some(r), Some(w)) => (r, w),
             _ => return,
         };
+        // Snapshot for settings change detection: the overlay mutates
+        // `self.config` in place during `render`; any diff is live-applied
+        // and auto-saved afterwards (both Ok and surface-error paths).
+        let config_before = self.config.clone();
         let output = {
             let Some(tab) = self.tabs.get_mut(active) else {
                 return;
@@ -116,6 +120,8 @@ impl App {
                     is_alt,
                     tab_titles: &titles,
                     active_tab: active,
+                    settings: &mut self.settings,
+                    config: &mut self.config,
                 },
             ) {
                 Ok(o) => o,
@@ -124,6 +130,10 @@ impl App {
                     log::warn!("render failed: {e:#}");
                     let s = window.inner_size();
                     renderer.resize(s.width.max(1), s.height.max(1));
+                    if self.config != config_before {
+                        self.apply_settings_changes(&config_before);
+                        self.save_config_from_settings();
+                    }
                     return;
                 }
             }
@@ -147,6 +157,12 @@ impl App {
         }
         if self.tabs.is_empty() {
             return;
+        }
+        // Settings overlay edited the live config during this frame:
+        // route to the session and auto-save (GUI wins over external edits).
+        if self.config != config_before {
+            self.apply_settings_changes(&config_before);
+            self.save_config_from_settings();
         }
         // Keep animating the fade without PTY traffic.
         let animating = self.active_tab().is_some_and(|t| {
