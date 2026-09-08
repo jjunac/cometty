@@ -16,6 +16,8 @@ cosmic-text = "0.19"
 portable-pty = "0.9"
 vte = "0.15"
 pollster = "0.4"
+# Window icon: decode embedded PNG rasterized from logo.svg (PNG only).
+image = { version = "0.25", default-features = false, features = ["png"] }
 log = "0.4"
 env_logger = "0.11"
 unicode-width = "0.2"
@@ -25,5 +27,12 @@ bytemuck = { version = "1", features = ["derive"] }
 # gtk/libxdo would need system libs on Linux, and we only attach the global
 # menu on macOS — other platforms keep the Ctrl+, shortcut.
 muda = { version = "0.19", default-features = false }
+[target.'cfg(target_os = "macos")'.dependencies]
+# Runtime Dock icon (`NSApplication::setApplicationIconImage`): winit's
+# `with_window_icon` is ignored on macOS, where icons come from the app
+# bundle. This sets the Dock tile for unbundled runs (`cargo run`).
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
 serde = { version = "1", features = ["derive"] }
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }

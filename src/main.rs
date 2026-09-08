@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod grid;
+mod icon;
 mod input;
 mod menu;
 mod pty;
@@ -90,8 +91,14 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
+        // macOS ignores `with_window_icon`; set the Dock tile directly so
+        // unbundled runs (`cargo run`) still show the logo. Main thread
+        // here (same requirement as the native menu above).
+        #[cfg(target_os = "macos")]
+        icon::set_dock_icon();
         let attrs = Window::default_attributes()
             .with_title(self.config.window.title.clone())
+            .with_window_icon(icon::load_window_icon())
             .with_inner_size(winit::dpi::LogicalSize::new(
                 self.config.window.width as f64,
                 self.config.window.height as f64,
