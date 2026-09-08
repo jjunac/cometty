@@ -3,6 +3,34 @@
 use super::Grid;
 use super::cell::{Cursor, CursorStyle};
 
+/// Effective mouse tracking level (`1000` / `1002` / `1003`).
+/// `1006` (SGR encoding) is orthogonal and stored separately.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MouseMode {
+    #[default]
+    Off,
+    /// `1000`: press + release only.
+    Press,
+    /// `1002`: press/release + drag motion while a button is held.
+    Drag,
+    /// `1003`: press/release + all motion including hover.
+    Any,
+}
+
+impl MouseMode {
+    pub fn enabled(self) -> bool {
+        self != Self::Off
+    }
+
+    pub fn reports_motion(self, button_held: bool) -> bool {
+        match self {
+            Self::Off | Self::Press => false,
+            Self::Drag => button_held,
+            Self::Any => true,
+        }
+    }
+}
+
 impl Grid {
     pub fn save_cursor(&mut self) {
         self.saved_cursor = Some(self.cursor);
@@ -129,6 +157,71 @@ impl Grid {
             self.auto_wrap = enabled;
             self.bump();
         }
+    }
+
+    /// Effective mouse tracking level from the `1000/1002/1003` flags.
+    /// Highest enabled wins (`Any > Drag > Press`).
+    pub fn mouse_mode(&self) -> MouseMode {
+        if self.mouse_any {
+            MouseMode::Any
+        } else if self.mouse_drag {
+            MouseMode::Drag
+        } else if self.mouse_press {
+            MouseMode::Press
+        } else {
+            MouseMode::Off
+        }
+    }
+
+    pub fn set_mouse_press(&mut self, enabled: bool) {
+        self.mouse_press = enabled;
+    }
+
+    pub fn set_mouse_drag(&mut self, enabled: bool) {
+        self.mouse_drag = enabled;
+    }
+
+    pub fn set_mouse_any(&mut self, enabled: bool) {
+        self.mouse_any = enabled;
+    }
+
+    pub fn mouse_sgr(&self) -> bool {
+        self.mouse_sgr
+    }
+
+    pub fn set_mouse_sgr(&mut self, enabled: bool) {
+        self.mouse_sgr = enabled;
+    }
+
+    pub fn focus_report(&self) -> bool {
+        self.focus_report
+    }
+
+    pub fn set_focus_report(&mut self, enabled: bool) {
+        self.focus_report = enabled;
+    }
+
+    /// True while inside `CSI ? 2026 h` synchronized output.
+    pub fn in_sync(&self) -> bool {
+        self.sync_depth > 0
+    }
+
+    pub fn sync_begin(&mut self) {
+        self.sync_depth = self.sync_depth.saturating_add(1);
+    }
+
+    pub fn sync_end(&mut self) {
+        self.sync_depth = self.sync_depth.saturating_sub(1);
+    }
+
+    /// Clear mouse / focus / sync state for `ESC c` full reset.
+    pub fn reset_mouse_and_focus(&mut self) {
+        self.mouse_press = false;
+        self.mouse_drag = false;
+        self.mouse_any = false;
+        self.mouse_sgr = false;
+        self.focus_report = false;
+        self.sync_depth = 0;
     }
 
     /// Full DEC reset for `ESC c`: margins + origin/insert/wrap back to

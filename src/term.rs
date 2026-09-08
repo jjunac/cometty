@@ -1,6 +1,6 @@
 use vte::{Params, Parser};
 
-use crate::grid::{CursorShape, CursorStyle, Grid};
+use crate::grid::{CursorShape, CursorStyle, Grid, MouseMode};
 use crate::theme::Theme;
 
 pub struct Terminal {
@@ -113,6 +113,22 @@ impl Terminal {
         self.grid.keypad_app_mode()
     }
 
+    pub fn mouse_mode(&self) -> MouseMode {
+        self.grid.mouse_mode()
+    }
+
+    pub fn mouse_sgr(&self) -> bool {
+        self.grid.mouse_sgr()
+    }
+
+    pub fn focus_report(&self) -> bool {
+        self.grid.focus_report()
+    }
+
+    pub fn in_sync(&self) -> bool {
+        self.grid.in_sync()
+    }
+
     #[allow(dead_code)]
     pub fn is_alt(&self) -> bool {
         self.grid.is_alt()
@@ -199,7 +215,19 @@ impl Terminal {
             }
             25 => self.grid.set_cursor_enabled(set),
             66 => self.grid.set_keypad_app_mode(set),
+            1000 => self.grid.set_mouse_press(set),
+            1002 => self.grid.set_mouse_drag(set),
+            1003 => self.grid.set_mouse_any(set),
+            1004 => self.grid.set_focus_report(set),
+            1006 => self.grid.set_mouse_sgr(set),
             2004 => self.grid.set_bracketed_paste(set),
+            2026 => {
+                if set {
+                    self.grid.sync_begin();
+                } else {
+                    self.grid.sync_end();
+                }
+            }
             47 | 1047 => {
                 if set {
                     self.grid.enter_alt(false);
@@ -462,6 +490,7 @@ impl vte::Perform for Terminal {
                     self.grid.set_bracketed_paste(false);
                     self.grid.set_cursor_app_mode(false);
                     self.grid.set_keypad_app_mode(false);
+                    self.grid.reset_mouse_and_focus();
                     self.grid.set_cursor_style(CursorStyle::default());
                     self.grid.reset_margins_and_modes();
                     // Reset pen before clearing so BCE erase uses default bg.
@@ -909,5 +938,59 @@ mod tests {
         assert!(!t.grid().origin_mode());
         assert!(!t.grid().insert_mode());
         assert!(t.grid().auto_wrap());
+    }
+
+    #[test]
+    fn mouse_modes_enable_and_highest_wins() {
+        use crate::grid::MouseMode;
+        let mut t = test_terminal(5, 3);
+        assert_eq!(t.mouse_mode(), MouseMode::Off);
+        feed_str(&mut t, "\x1b[?1000h");
+        assert_eq!(t.mouse_mode(), MouseMode::Press);
+        feed_str(&mut t, "\x1b[?1002h");
+        assert_eq!(t.mouse_mode(), MouseMode::Drag);
+        feed_str(&mut t, "\x1b[?1003h");
+        assert_eq!(t.mouse_mode(), MouseMode::Any);
+        // Disabling the top level falls back to the next enabled.
+        feed_str(&mut t, "\x1b[?1003l");
+        assert_eq!(t.mouse_mode(), MouseMode::Drag);
+        feed_str(&mut t, "\x1b[?1002l");
+        assert_eq!(t.mouse_mode(), MouseMode::Press);
+        feed_str(&mut t, "\x1b[?1000l");
+        assert_eq!(t.mouse_mode(), MouseMode::Off);
+    }
+
+    #[test]
+    fn mouse_sgr_focus_and_sync_modes() {
+        let mut t = test_terminal(5, 3);
+        assert!(!t.mouse_sgr());
+        assert!(!t.focus_report());
+        assert!(!t.in_sync());
+        feed_str(&mut t, "\x1b[?1006h\x1b[?1004h\x1b[?2026h");
+        assert!(t.mouse_sgr());
+        assert!(t.focus_report());
+        assert!(t.in_sync());
+        // Sync nests; two ends are needed to leave.
+        feed_str(&mut t, "\x1b[?2026h");
+        feed_str(&mut t, "\x1b[?2026l");
+        assert!(t.in_sync());
+        feed_str(&mut t, "\x1b[?2026l");
+        assert!(!t.in_sync());
+        feed_str(&mut t, "\x1b[?1006l\x1b[?1004l");
+        assert!(!t.mouse_sgr());
+        assert!(!t.focus_report());
+    }
+
+    #[test]
+    fn full_reset_clears_mouse_focus_and_sync() {
+        use crate::grid::MouseMode;
+        let mut t = test_terminal(5, 3);
+        feed_str(&mut t, "\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b[?2026h");
+        assert!(t.in_sync());
+        feed_str(&mut t, "\x1bc");
+        assert_eq!(t.mouse_mode(), MouseMode::Off);
+        assert!(!t.mouse_sgr());
+        assert!(!t.focus_report());
+        assert!(!t.in_sync());
     }
 }

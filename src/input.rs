@@ -1,4 +1,4 @@
-use winit::event::KeyEvent;
+use winit::event::{KeyEvent, MouseButton};
 use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey};
 
 #[cfg(any(
@@ -373,6 +373,130 @@ pub fn wrap_bracketed_paste(text: &str, enabled: bool) -> Vec<u8> {
     } else {
         text.as_bytes().to_vec()
     }
+}
+
+/// Modifier bits for mouse reporting: shift=4, alt=8, ctrl=16.
+/// Super is intentionally ignored (no xterm mouse bit).
+pub fn mouse_modifier_bits(modifiers: &ModifiersState) -> u8 {
+    4 * u8::from(modifiers.shift_key())
+        + 8 * u8::from(modifiers.alt_key())
+        + 16 * u8::from(modifiers.control_key())
+}
+
+/// Base button code for press/drag (`0=left, 1=middle, 2=right`).
+/// Back/Forward/Other have no xterm code and return `None` (drop).
+pub fn mouse_button_base(button: MouseButton) -> Option<u8> {
+    match button {
+        MouseButton::Left => Some(0),
+        MouseButton::Middle => Some(1),
+        MouseButton::Right => Some(2),
+        _ => None,
+    }
+}
+
+/// Core mouse encoder. `cb_base` is the pre-modifier code
+/// (`0/1/2` press, `3` release, `32-35` motion, `64/65` wheel).
+/// `col`/`row` are 0-based view cells; encoded 1-based.
+/// SGR (`1006`) uses `ESC[<cb;x;yM/m`; otherwise legacy X10
+/// `ESC[M Cb Cx Cy`. Legacy returns `None` when out of range.
+pub fn encode_mouse(
+    cb_base: u8,
+    col: usize,
+    row: usize,
+    modifiers: &ModifiersState,
+    sgr: bool,
+    is_release: bool,
+) -> Option<Vec<u8>> {
+    let cb = cb_base.saturating_add(mouse_modifier_bits(modifiers));
+    let x = col.saturating_add(1);
+    let y = row.saturating_add(1);
+    if sgr {
+        let suffix = if is_release { b'm' } else { b'M' };
+        let mut out = Vec::with_capacity(16);
+        out.extend_from_slice(b"\x1b[<");
+        out.extend_from_slice(cb.to_string().as_bytes());
+        out.push(b';');
+        out.extend_from_slice(x.to_string().as_bytes());
+        out.push(b';');
+        out.extend_from_slice(y.to_string().as_bytes());
+        out.push(suffix);
+        Some(out)
+    } else {
+        if x > 223 || y > 223 || cb > 223 {
+            return None;
+        }
+        // `cb + 32` always fits: `cb <= 65+28=93` in practice.
+        Some(vec![
+            0x1b,
+            b'[',
+            b'M',
+            cb.saturating_add(32),
+            (x as u8).saturating_add(32),
+            (y as u8).saturating_add(32),
+        ])
+    }
+}
+
+/// Press event for `1000/1002/1003`.
+pub fn encode_mouse_press(
+    button: MouseButton,
+    col: usize,
+    row: usize,
+    modifiers: &ModifiersState,
+    sgr: bool,
+) -> Option<Vec<u8>> {
+    let base = mouse_button_base(button)?;
+    encode_mouse(base, col, row, modifiers, sgr, false)
+}
+
+/// Release event (always `Cb=3`, SGR suffix `m`).
+pub fn encode_mouse_release(
+    col: usize,
+    row: usize,
+    modifiers: &ModifiersState,
+    sgr: bool,
+) -> Option<Vec<u8>> {
+    encode_mouse(3, col, row, modifiers, sgr, true)
+}
+
+/// Drag motion while a button is held: `Cb = button + 32`.
+/// `held_base` is `0/1/2` for left/middle/right.
+pub fn encode_mouse_drag(
+    held_base: u8,
+    col: usize,
+    row: usize,
+    modifiers: &ModifiersState,
+    sgr: bool,
+) -> Option<Vec<u8>> {
+    encode_mouse(
+        held_base.saturating_add(32),
+        col,
+        row,
+        modifiers,
+        sgr,
+        false,
+    )
+}
+
+/// Hover motion with no button held (`Cb=35`, SGR suffix `M`).
+pub fn encode_mouse_hover(
+    col: usize,
+    row: usize,
+    modifiers: &ModifiersState,
+    sgr: bool,
+) -> Option<Vec<u8>> {
+    encode_mouse(35, col, row, modifiers, sgr, false)
+}
+
+/// Wheel event: `up=true` is `64`, else `65`. Always suffix `M`.
+pub fn encode_mouse_wheel(
+    up: bool,
+    col: usize,
+    row: usize,
+    modifiers: &ModifiersState,
+    sgr: bool,
+) -> Option<Vec<u8>> {
+    encode_mouse(if up { 64 } else { 65 }, col, row, modifiers, sgr, false)
 }
 
 /// Explicit-copy shortcut, gated by [`crate::config::InputConfig`].
@@ -929,6 +1053,90 @@ mod tests {
                 &ModifiersState::SUPER
             ),
             Some(vec![0x15])
+        );
+    }
+
+    #[test]
+    fn mouse_sgr_press_and_release() {
+        let none = ModifiersState::empty();
+        // col 0,row 0 -> 1;1, left press Cb=0, suffix M.
+        assert_eq!(
+            encode_mouse_press(MouseButton::Left, 0, 0, &none, true),
+            Some(b"\x1b[<0;1;1M".to_vec())
+        );
+        // Release uses Cb=3, suffix m.
+        assert_eq!(
+            encode_mouse_release(1, 2, &none, true),
+            Some(b"\x1b[<3;2;3m".to_vec())
+        );
+        // Right press at 10,5 -> 11;6.
+        assert_eq!(
+            encode_mouse_press(MouseButton::Right, 10, 5, &none, true),
+            Some(b"\x1b[<2;11;6M".to_vec())
+        );
+    }
+
+    #[test]
+    fn mouse_legacy_press() {
+        let none = ModifiersState::empty();
+        // Left at 0,0: Cb=0+32=32(' '), Cx=33('!'), Cy=33.
+        assert_eq!(
+            encode_mouse_press(MouseButton::Left, 0, 0, &none, false),
+            Some(vec![0x1b, b'[', b'M', 32, 33, 33])
+        );
+        // Out of range (>223) drops in legacy but still encodes SGR.
+        assert_eq!(
+            encode_mouse_press(MouseButton::Left, 300, 0, &none, false),
+            None
+        );
+        assert!(encode_mouse_press(MouseButton::Left, 300, 0, &none, true).is_some());
+    }
+
+    #[test]
+    fn mouse_modifiers_shift_and_ctrl() {
+        let shift = ModifiersState::SHIFT;
+        let ctrl = ModifiersState::CONTROL;
+        let none = ModifiersState::empty();
+        // Shift adds 4: left press Cb=4.
+        assert_eq!(
+            encode_mouse_press(MouseButton::Left, 0, 0, &shift, true),
+            Some(b"\x1b[<4;1;1M".to_vec())
+        );
+        // Ctrl adds 16.
+        assert_eq!(
+            encode_mouse_press(MouseButton::Left, 0, 0, &ctrl, true),
+            Some(b"\x1b[<16;1;1M".to_vec())
+        );
+        assert_eq!(mouse_modifier_bits(&none), 0);
+        assert_eq!(mouse_modifier_bits(&shift), 4);
+    }
+
+    #[test]
+    fn mouse_drag_hover_and_wheel() {
+        let none = ModifiersState::empty();
+        // Left drag: 0+32=32.
+        assert_eq!(
+            encode_mouse_drag(0, 4, 2, &none, true),
+            Some(b"\x1b[<32;5;3M".to_vec())
+        );
+        // Hover: 35.
+        assert_eq!(
+            encode_mouse_hover(4, 2, &none, true),
+            Some(b"\x1b[<35;5;3M".to_vec())
+        );
+        // Wheel up 64 / down 65.
+        assert_eq!(
+            encode_mouse_wheel(true, 0, 0, &none, true),
+            Some(b"\x1b[<64;1;1M".to_vec())
+        );
+        assert_eq!(
+            encode_mouse_wheel(false, 0, 0, &none, true),
+            Some(b"\x1b[<65;1;1M".to_vec())
+        );
+        // Unsupported buttons drop.
+        assert_eq!(
+            encode_mouse_press(MouseButton::Back, 0, 0, &none, true),
+            None
         );
     }
 }

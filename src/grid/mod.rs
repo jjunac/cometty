@@ -5,6 +5,7 @@ mod scroll;
 mod style;
 pub mod unicode;
 
+pub use alt::MouseMode;
 pub use cell::{Cell, Cursor, CursorShape, CursorStyle, Pen};
 
 use std::collections::VecDeque;
@@ -51,6 +52,12 @@ pub struct Grid {
     saved_main_insert: Option<bool>,
     saved_main_wrap: Option<bool>,
     saved_main_saved_origin: Option<bool>,
+    mouse_press: bool,
+    mouse_drag: bool,
+    mouse_any: bool,
+    mouse_sgr: bool,
+    focus_report: bool,
+    sync_depth: u32,
 }
 
 fn cursor_style_from_config(config: &crate::config::Config) -> CursorStyle {
@@ -135,6 +142,12 @@ impl Grid {
             saved_main_insert: None,
             saved_main_wrap: None,
             saved_main_saved_origin: None,
+            mouse_press: false,
+            mouse_drag: false,
+            mouse_any: false,
+            mouse_sgr: false,
+            focus_report: false,
+            sync_depth: 0,
         }
     }
 
@@ -936,5 +949,37 @@ mod tests {
         assert!(g.set_scroll_region(1, 2));
         g.resize(3, 5);
         assert_eq!(g.scroll_region(), (0, 4));
+    }
+
+    #[test]
+    fn mouse_mode_reports_motion_only_when_expected() {
+        use super::MouseMode;
+        assert!(!MouseMode::Off.reports_motion(false));
+        assert!(!MouseMode::Off.reports_motion(true));
+        assert!(!MouseMode::Press.reports_motion(true));
+        assert!(!MouseMode::Drag.reports_motion(false));
+        assert!(MouseMode::Drag.reports_motion(true));
+        assert!(MouseMode::Any.reports_motion(false));
+        assert!(MouseMode::Any.reports_motion(true));
+
+        let mut g = Grid::new(4, 2, test_theme());
+        assert_eq!(g.mouse_mode(), MouseMode::Off);
+        g.set_mouse_press(true);
+        g.set_mouse_drag(true);
+        assert_eq!(g.mouse_mode(), MouseMode::Drag);
+        g.set_mouse_any(true);
+        assert_eq!(g.mouse_mode(), MouseMode::Any);
+        g.set_mouse_any(false);
+        assert_eq!(g.mouse_mode(), MouseMode::Drag);
+        g.reset_mouse_and_focus();
+        assert_eq!(g.mouse_mode(), MouseMode::Off);
+        assert!(!g.in_sync());
+        g.sync_begin();
+        g.sync_begin();
+        assert!(g.in_sync());
+        g.sync_end();
+        assert!(g.in_sync());
+        g.sync_end();
+        assert!(!g.in_sync());
     }
 }

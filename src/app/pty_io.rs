@@ -70,7 +70,11 @@ impl App {
                 // even when the grid version is unchanged.
                 r.invalidate();
             }
-            if let Some(w) = self.window.as_ref() {
+            // Synchronized output (`CSI ? 2026 h`): batch intermediate
+            // frames; the end marker (`l`) clears `in_sync` so that drain
+            // redraws once with the final state.
+            let in_sync = self.active_tab().is_some_and(|t| t.terminal.in_sync());
+            if !in_sync && let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
         }

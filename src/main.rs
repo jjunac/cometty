@@ -256,10 +256,8 @@ impl ApplicationHandler<UserEvent> for App {
                     event_loop.exit();
                 }
             }
-            WindowEvent::Focused(_) => {
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
+            WindowEvent::Focused(focused) => {
+                self.on_focused(focused);
             }
             _ => {}
         }
