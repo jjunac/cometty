@@ -4,6 +4,27 @@ use crate::theme::{Rgb, Theme};
 
 use super::Grid;
 
+/// SGR underline style (`CSI 4[:style] m`).
+/// `Single` is plain `CSI 4 m`; `Double/Curly/Dotted/Dashed` come from
+/// `CSI 4:2-5 m`. Curly/dotted/dashed render as single for now but are
+/// stored distinctly for future shaping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum UnderlineStyle {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
+impl UnderlineStyle {
+    pub fn is_active(self) -> bool {
+        !matches!(self, UnderlineStyle::None)
+    }
+}
+
 /// A terminal cell holds one grapheme cluster: `ch` is the first char and
 /// `extra` carries the rest (`combining` marks, `ZWJ` sequences, `VS16`,
 /// skin tones, flags). `width` is the display width: `0` = wide
@@ -16,10 +37,27 @@ pub struct Cell {
     pub fg: Rgb,
     pub bg: Rgb,
     pub bold: bool,
-    pub underline: bool,
+    pub dim: bool,
+    pub italic: bool,
+    pub inverse: bool,
+    pub strikethrough: bool,
+    pub overline: bool,
+    pub underline: UnderlineStyle,
+    pub underline_color: Option<Rgb>,
 }
 
 impl Cell {
+    /// Effective foreground after inverse + dim (dim applies to text only).
+    pub fn effective_fg(&self) -> Rgb {
+        let base = if self.inverse { self.bg } else { self.fg };
+        if self.dim { base.dimmed() } else { base }
+    }
+
+    /// Effective background after inverse (selection overrides at paint).
+    pub fn effective_bg(&self) -> Rgb {
+        if self.inverse { self.fg } else { self.bg }
+    }
+
     /// Full cluster text for shaping / copy (`ch` + `extra`).
     /// Continuations return a single space (they are skipped by callers).
     pub fn cluster(&self) -> String {
@@ -59,7 +97,13 @@ impl Default for Cell {
             fg: theme.foreground,
             bg: theme.background,
             bold: false,
-            underline: false,
+            dim: false,
+            italic: false,
+            inverse: false,
+            strikethrough: false,
+            overline: false,
+            underline: UnderlineStyle::None,
+            underline_color: None,
         }
     }
 }
@@ -101,7 +145,13 @@ pub struct Pen {
     pub fg: Rgb,
     pub bg: Rgb,
     pub bold: bool,
-    pub underline: bool,
+    pub dim: bool,
+    pub italic: bool,
+    pub inverse: bool,
+    pub strikethrough: bool,
+    pub overline: bool,
+    pub underline: UnderlineStyle,
+    pub underline_color: Option<Rgb>,
 }
 
 impl Default for Pen {
@@ -111,7 +161,13 @@ impl Default for Pen {
             fg: theme.foreground,
             bg: theme.background,
             bold: false,
-            underline: false,
+            dim: false,
+            italic: false,
+            inverse: false,
+            strikethrough: false,
+            overline: false,
+            underline: UnderlineStyle::None,
+            underline_color: None,
         }
     }
 }
@@ -125,7 +181,13 @@ impl Grid {
             fg: self.theme.foreground,
             bg: self.theme.background,
             bold: false,
-            underline: false,
+            dim: false,
+            italic: false,
+            inverse: false,
+            strikethrough: false,
+            overline: false,
+            underline: UnderlineStyle::None,
+            underline_color: None,
         }
     }
 
@@ -141,7 +203,13 @@ impl Grid {
             fg: self.theme.foreground,
             bg: self.pen.bg,
             bold: false,
-            underline: false,
+            dim: false,
+            italic: false,
+            inverse: false,
+            strikethrough: false,
+            overline: false,
+            underline: UnderlineStyle::None,
+            underline_color: None,
         }
     }
 
@@ -156,7 +224,13 @@ impl Grid {
             fg: self.pen.fg,
             bg: self.pen.bg,
             bold: self.pen.bold,
+            dim: self.pen.dim,
+            italic: self.pen.italic,
+            inverse: self.pen.inverse,
+            strikethrough: self.pen.strikethrough,
+            overline: self.pen.overline,
             underline: self.pen.underline,
+            underline_color: self.pen.underline_color,
         }
     }
 
@@ -173,7 +247,13 @@ impl Grid {
             fg: self.theme.foreground,
             bg: self.theme.background,
             bold: false,
-            underline: false,
+            dim: false,
+            italic: false,
+            inverse: false,
+            strikethrough: false,
+            overline: false,
+            underline: UnderlineStyle::None,
+            underline_color: None,
         }
     }
 }

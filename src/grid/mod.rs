@@ -6,7 +6,7 @@ mod style;
 pub mod unicode;
 
 pub use alt::MouseMode;
-pub use cell::{Cell, Cursor, CursorShape, CursorStyle, Pen};
+pub use cell::{Cell, Cursor, CursorShape, CursorStyle, Pen, UnderlineStyle};
 
 use std::collections::VecDeque;
 
@@ -95,7 +95,13 @@ impl Grid {
             fg: theme.foreground,
             bg: theme.background,
             bold: false,
-            underline: false,
+            dim: false,
+            italic: false,
+            inverse: false,
+            strikethrough: false,
+            overline: false,
+            underline: UnderlineStyle::None,
+            underline_color: None,
         };
         Self {
             cols,
@@ -112,7 +118,13 @@ impl Grid {
                 fg: theme.foreground,
                 bg: theme.background,
                 bold: false,
-                underline: false,
+                dim: false,
+                italic: false,
+                inverse: false,
+                strikethrough: false,
+                overline: false,
+                underline: UnderlineStyle::None,
+                underline_color: None,
             },
             saved_cursor: None,
             saved_pen: None,

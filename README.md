@@ -109,7 +109,7 @@ lines_per_tick = 7.0
 - [x] Settings UI (`Ctrl+,` / `Cmd+,` or the Settings button: sidebar panel, live-apply, auto-save to `config.toml`, per-field/section/global reset)
 - [x] Mouse reporting (`1000/1002/1003/1006-SGR`) + focus (`1004`) + synced output (`2026`); `Shift`-override keeps local selection
 - [x] Char ops + queries: `ICH/DCH/ECH` (`@/P/X`), `REP`, `DA`/`CPR`, `DECRQM` stub
-- [ ] Full SGR: dim / italic / inverse / strike / overline, underline styles + `58/59` colors, colon `38:2:r:g:b` form
+- [x] Full SGR: dim / italic / inverse / strike / overline, underline styles + `58/59` colors, colon `38:2:r:g:b` form
 - [ ] Tab switching: `Ctrl+Tab` / `Ctrl+Shift+Tab` + `Cmd+1-9` wired to tab switch
 - [ ] Search: `Ctrl+F` overlay, match highlight, next/prev, `Esc` close
 - [ ] Bell (visual flash; currently ignored) + font zoom (`Ctrl +/-/0`) + confirm-close on dirty foreground process

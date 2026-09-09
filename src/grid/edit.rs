@@ -237,7 +237,13 @@ impl Grid {
                     fg: self.pen.fg,
                     bg: self.pen.bg,
                     bold: self.pen.bold,
+                    dim: self.pen.dim,
+                    italic: self.pen.italic,
+                    inverse: self.pen.inverse,
+                    strikethrough: self.pen.strikethrough,
+                    overline: self.pen.overline,
                     underline: self.pen.underline,
+                    underline_color: self.pen.underline_color,
                 };
                 if w == 2 && cx + 1 < self.cols {
                     self.cells[cy][cx + 1] = self.placeholder_cell();

@@ -513,8 +513,8 @@ impl vte::Perform for Terminal {
                 self.grid.erase_in_line(mode);
             }
             'm' => {
-                let flat = Self::params_flat(params);
-                self.grid.sgr(&flat);
+                let groups: Vec<Vec<u16>> = params.iter().map(|p| p.to_vec()).collect();
+                self.grid.sgr_groups(&groups);
             }
             's' => self.grid.save_cursor(),
             'u' => self.grid.restore_cursor(),
@@ -833,6 +833,122 @@ mod tests {
     }
 
     #[test]
+    fn full_sgr_attrs_set_and_reset() {
+        use crate::grid::UnderlineStyle;
+        let mut t = test_terminal(5, 2);
+        feed_str(&mut t, "\x1b[1;2;3;7;9;53m");
+        let pen = t.grid().pen();
+        assert!(pen.bold && pen.dim && pen.italic);
+        assert!(pen.inverse && pen.strikethrough && pen.overline);
+        // 21 clears bold only (vte CancelBold); 22 clears bold+dim.
+        feed_str(&mut t, "\x1b[21m");
+        assert!(!t.grid().pen().bold);
+        assert!(t.grid().pen().dim);
+        feed_str(&mut t, "\x1b[1;2m\x1b[22m");
+        assert!(!t.grid().pen().bold);
+        assert!(!t.grid().pen().dim);
+        feed_str(&mut t, "\x1b[23;27;29;55m");
+        let pen = t.grid().pen();
+        assert!(!pen.italic && !pen.inverse && !pen.strikethrough && !pen.overline);
+        // Underline single via `4`, cleared by `24` (color persists).
+        feed_str(&mut t, "\x1b[58;2;1;2;3m\x1b[4m");
+        assert_eq!(t.grid().pen().underline, UnderlineStyle::Single);
+        feed_str(&mut t, "\x1b[24m");
+        assert_eq!(t.grid().pen().underline, UnderlineStyle::None);
+        assert!(t.grid().pen().underline_color.is_some());
+        feed_str(&mut t, "\x1b[59m");
+        assert!(t.grid().pen().underline_color.is_none());
+        // Full reset clears everything.
+        feed_str(&mut t, "\x1b[1;2;3;7;9;53m\x1b[58;5;200m\x1b[0m");
+        assert_eq!(t.grid().pen(), t.grid().pen().clone());
+        let pen = t.grid().pen();
+        assert!(!pen.bold && !pen.dim && !pen.italic);
+        assert!(!pen.inverse && !pen.strikethrough && !pen.overline);
+        assert_eq!(pen.underline, UnderlineStyle::None);
+        assert!(pen.underline_color.is_none());
+    }
+
+    #[test]
+    fn underline_styles_colon_vs_semicolon() {
+        use crate::grid::UnderlineStyle;
+        let mut t = test_terminal(5, 2);
+        for (seq, style) in [
+            ("\x1b[4:0m", UnderlineStyle::None),
+            ("\x1b[4:1m", UnderlineStyle::Single),
+            ("\x1b[4:2m", UnderlineStyle::Double),
+            ("\x1b[4:3m", UnderlineStyle::Curly),
+            ("\x1b[4:4m", UnderlineStyle::Dotted),
+            ("\x1b[4:5m", UnderlineStyle::Dashed),
+            ("\x1b[4m", UnderlineStyle::Single),
+        ] {
+            feed_str(&mut t, "\x1b[0m");
+            feed_str(&mut t, seq);
+            assert_eq!(t.grid().pen().underline, style, "seq={seq:?}");
+        }
+        // `4;3` is two codes (underline + italic), not curly.
+        feed_str(&mut t, "\x1b[0m\x1b[4;3m");
+        assert_eq!(t.grid().pen().underline, UnderlineStyle::Single);
+        assert!(t.grid().pen().italic);
+    }
+
+    #[test]
+    fn extended_colon_colors_and_colorspace() {
+        let mut t = test_terminal(5, 2);
+        feed_str(&mut t, "\x1b[38:5:200m");
+        assert_eq!(t.grid().pen().fg, t.grid().extended_palette(200));
+        feed_str(&mut t, "\x1b[0m\x1b[38:2:10:20:30m");
+        assert_eq!(t.grid().pen().fg, crate::theme::Rgb::new(10, 20, 30));
+        feed_str(&mut t, "\x1b[0m\x1b[48:2:40:50:60m");
+        assert_eq!(t.grid().pen().bg, crate::theme::Rgb::new(40, 50, 60));
+        // Colorspace id skipped: `38:2:<cs>:r:g:b`.
+        feed_str(&mut t, "\x1b[0m\x1b[38:2:0:11:22:33m");
+        assert_eq!(t.grid().pen().fg, crate::theme::Rgb::new(11, 22, 33));
+        // Underline color both forms + reset.
+        feed_str(&mut t, "\x1b[58:2:1:2:3m");
+        assert_eq!(
+            t.grid().pen().underline_color,
+            Some(crate::theme::Rgb::new(1, 2, 3))
+        );
+        feed_str(&mut t, "\x1b[59m");
+        assert!(t.grid().pen().underline_color.is_none());
+        feed_str(&mut t, "\x1b[58;5;124m");
+        assert!(t.grid().pen().underline_color.is_some());
+    }
+
+    #[test]
+    fn inverse_and_dim_affect_effective_colors() {
+        let mut t = test_terminal(5, 2);
+        feed_str(&mut t, "\x1b[31m\x1b[44m");
+        let fg = t.grid().pen().fg;
+        let bg = t.grid().pen().bg;
+        feed_str(&mut t, "A");
+        let plain = t.grid().cell(0, 0).unwrap();
+        assert_eq!(plain.effective_fg(), fg);
+        assert_eq!(plain.effective_bg(), bg);
+        feed_str(&mut t, "\x1b[7mB");
+        let inv = t.grid().cell(1, 0).unwrap();
+        assert!(inv.inverse);
+        assert_eq!(inv.effective_fg(), bg);
+        assert_eq!(inv.effective_bg(), fg);
+        feed_str(&mut t, "\x1b[27m\x1b[2mC");
+        let dim = t.grid().cell(2, 0).unwrap();
+        assert!(dim.dim);
+        assert_eq!(dim.effective_fg(), dim.fg.dimmed());
+    }
+
+    #[test]
+    fn erase_clears_full_sgr_attrs() {
+        let mut t = test_terminal(4, 2);
+        feed_str(&mut t, "\x1b[1;2;3;7;9;53m\x1b[4:3m\x1b[58;5;200m");
+        feed_str(&mut t, "\x1b[2J");
+        let c = t.grid().cell(0, 0).unwrap();
+        assert!(!c.bold && !c.dim && !c.italic);
+        assert!(!c.inverse && !c.strikethrough && !c.overline);
+        assert_eq!(c.underline, crate::grid::UnderlineStyle::None);
+        assert!(c.underline_color.is_none());
+    }
+
+    #[test]
     fn osc_title_is_stored_for_tab_labels() {
         let mut t = test_terminal(10, 2);
         assert_eq!(t.title(), "");
@@ -869,11 +985,14 @@ mod tests {
 
     #[test]
     fn sgr_underline_is_stored_on_cells() {
-        use crate::grid::{CursorShape, CursorStyle};
+        use crate::grid::{CursorShape, CursorStyle, UnderlineStyle};
         let mut t = test_terminal(5, 2);
         feed_str(&mut t, "\x1b[4mU\x1b[24mN");
-        assert!(t.grid().cell(0, 0).unwrap().underline);
-        assert!(!t.grid().cell(1, 0).unwrap().underline);
+        assert_eq!(
+            t.grid().cell(0, 0).unwrap().underline,
+            UnderlineStyle::Single
+        );
+        assert_eq!(t.grid().cell(1, 0).unwrap().underline, UnderlineStyle::None);
         // Default cursor style is blinking block.
         assert_eq!(t.cursor_style(), CursorStyle::default());
         assert_eq!(

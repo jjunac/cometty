@@ -129,8 +129,9 @@ impl super::Renderer {
     }
 
     /// Fill the scratch vertex buffer with background quads for cells that
-    /// differ from the theme background (plus cursor + selection + underline),
-    /// ensure GPU capacity, and upload. Returns the vertex count to draw.
+    /// differ from the theme background (plus cursor + selection + underline/
+    /// strike/overline), ensure GPU capacity, and upload. Returns the vertex
+    /// count to draw.
     pub(crate) fn paint_bg(
         &mut self,
         grid_rows: &[Vec<crate::grid::Cell>],
@@ -170,7 +171,10 @@ impl super::Renderer {
                 let is_cursor = cursor_visible
                     && cursor.1 == y
                     && (cursor.0 == x || (span == 2 && cursor.0 == x + 1));
-                // Base background (selection overrides cell bg).
+                // Base background (selection overrides cell bg; inverse
+                // swaps fg/bg via effective colors).
+                let eff_bg = cell.effective_bg();
+                let eff_fg = cell.effective_fg();
                 if is_selected {
                     self.push_quad(
                         &mut verts,
@@ -180,27 +184,44 @@ impl super::Renderer {
                         self.line_height,
                         self.theme.selection.as_linear_f32_array(),
                     );
-                } else if cell.bg != self.theme.background {
+                } else if eff_bg != self.theme.background {
                     self.push_quad(
                         &mut verts,
                         px,
                         py,
                         w_px,
                         self.line_height,
-                        cell.bg.as_linear_f32_array(),
+                        eff_bg.as_linear_f32_array(),
                     );
                 }
-                // Text underline: thin strip in the cell's fg color.
-                if cell.underline {
-                    let uy = py + self.line_height - underline_h - pad;
-                    self.push_quad(
-                        &mut verts,
-                        px,
-                        uy,
-                        w_px,
-                        underline_h,
-                        cell.fg.as_linear_f32_array(),
-                    );
+                // Text decorations: strips in effective fg unless an
+                // explicit underline color (`SGR 58`) overrides. Curly /
+                // dotted / dashed render as single for now (stored
+                // distinctly in the cell for future shaping).
+                let deco_col = cell.underline_color.unwrap_or(eff_fg).as_linear_f32_array();
+                let fg_col = eff_fg.as_linear_f32_array();
+                match cell.underline {
+                    crate::grid::UnderlineStyle::None => {}
+                    crate::grid::UnderlineStyle::Double => {
+                        let lower = py + self.line_height - underline_h - pad;
+                        let upper = lower - underline_h - pad;
+                        let upper = upper.max(py);
+                        self.push_quad(&mut verts, px, lower, w_px, underline_h, deco_col);
+                        self.push_quad(&mut verts, px, upper, w_px, underline_h, deco_col);
+                    }
+                    _ if cell.underline.is_active() => {
+                        let uy = py + self.line_height - underline_h - pad;
+                        self.push_quad(&mut verts, px, uy, w_px, underline_h, deco_col);
+                    }
+                    _ => {}
+                }
+                if cell.strikethrough {
+                    let sy = py + self.line_height * 0.5 - underline_h * 0.5;
+                    self.push_quad(&mut verts, px, sy, w_px, underline_h, fg_col);
+                }
+                if cell.overline {
+                    let oy = py + pad;
+                    self.push_quad(&mut verts, px, oy, w_px, underline_h, fg_col);
                 }
                 // Cursor: shape-dependent, drawn last so it covers bg/underline.
                 if is_cursor {

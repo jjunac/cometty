@@ -50,6 +50,14 @@ impl Rgb {
     pub fn as_egui_color(&self) -> egui::Color32 {
         egui::Color32::from_rgb(self.r, self.g, self.b)
     }
+
+    /// Dimmed (faint, SGR 2) variant: simple 55% scale of each channel.
+    /// Matches the overlay dim factor style; applied to the effective
+    /// foreground only, never the background.
+    pub fn dimmed(self) -> Self {
+        let scale = |c: u8| ((c as f32 * 0.55).round().clamp(0.0, 255.0)) as u8;
+        Self::new(scale(self.r), scale(self.g), scale(self.b))
+    }
 }
 
 /// A full terminal color scheme.

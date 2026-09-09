@@ -1,7 +1,7 @@
 //! Text buffer shaping (cosmic-text lines from grid cells).
 
 use cosmic_text::{
-    Attrs, AttrsList, BufferLine, Family, LineEnding, Metrics, Shaping, Weight, Wrap,
+    Attrs, AttrsList, BufferLine, Family, LineEnding, Metrics, Shaping, Style, Weight, Wrap,
 };
 
 use crate::grid::Cell;
@@ -23,6 +23,7 @@ pub(crate) fn build_buffer_lines(
     theme: &crate::theme::Theme,
     font: &crate::config::FontConfig,
 ) -> Vec<BufferLine> {
+    let _ = theme;
     let mut lines = Vec::with_capacity(rows.len());
     for row_cells in rows {
         // Build the shaped string from cluster leads only; wide
@@ -52,31 +53,42 @@ pub(crate) fn build_buffer_lines(
             AttrsList::new(&Attrs::new().family(family)),
             Shaping::Advanced,
         );
-        let mut attrs_list = AttrsList::new(
-            &Attrs::new()
-                .family(family)
-                .color(theme.foreground.as_glyphon_color()),
-        );
+        // Default attrs use the theme foreground; per-cell spans below
+        // override with effective (inverse + dim) colors.
+        let mut attrs_list = AttrsList::new(&Attrs::new().family(family));
         // Attr spans keyed by grid column so bold/color follow cells, not
         // characters: a ZWJ cluster is many chars but one cell.
+        // Decorations (underline/strike/overline) paint via bg quads, so
+        // text spans only split on effective fg + bold + italic.
         let mut byte_idx = 0usize;
         let mut i = 0usize;
         while i < visible_clusters.len() {
             let (col, _) = visible_clusters[i];
             let cell = &row_cells[col];
-            let color = cell.fg.as_glyphon_color();
+            let color = cell.effective_fg().as_glyphon_color();
             let weight = if cell.bold {
                 Weight::BOLD
             } else {
                 Weight::NORMAL
             };
-            let attrs = Attrs::new().family(family).color(color).weight(weight);
+            let style = if cell.italic {
+                Style::Italic
+            } else {
+                Style::Normal
+            };
+            let attrs = Attrs::new()
+                .family(family)
+                .color(color)
+                .weight(weight)
+                .style(style);
             let start_byte = byte_idx;
             let mut j = i;
             while j < visible_clusters.len() {
                 let (col2, s2) = &visible_clusters[j];
                 let c2 = &row_cells[*col2];
-                let same = c2.fg == cell.fg && c2.bold == cell.bold;
+                let same = c2.effective_fg() == cell.effective_fg()
+                    && c2.bold == cell.bold
+                    && c2.italic == cell.italic;
                 if !same {
                     break;
                 }
