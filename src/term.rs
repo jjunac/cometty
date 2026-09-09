@@ -12,6 +12,12 @@ pub struct Terminal {
     // Drives tab-bar labels (falls back to `Tab N`).
     title: String,
     max_title_chars: usize,
+    // Last graphic character emitted via `print`, for `REP` (`CSI n b`).
+    // Control sequences never clear it; only a new graphic updates it.
+    last_graphic: Option<char>,
+    // Bytes queued for the PTY (DA / CPR / DSR / DECRQM replies).
+    // Drained by `take_response` in the app's PTY loop.
+    pending_response: Vec<u8>,
 }
 
 /// Extract an `OSC 0/1/2` window-title update from vte's split params.
@@ -67,6 +73,8 @@ impl Terminal {
             pending_wrap: false,
             title: String::new(),
             max_title_chars: config.terminal.max_title_chars.max(1),
+            last_graphic: None,
+            pending_response: Vec::new(),
         }
     }
 
@@ -137,6 +145,32 @@ impl Terminal {
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.grid.resize(cols, rows);
         self.pending_wrap = false;
+        self.last_graphic = None;
+    }
+
+    /// Take queued PTY reply bytes (DA / CPR / DSR / DECRQM).
+    /// The app writes the result back via `PtySession::write`.
+    pub fn take_response(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending_response)
+    }
+
+    fn push_response(&mut self, bytes: &[u8]) {
+        self.pending_response.extend_from_slice(bytes);
+    }
+
+    /// Cursor position report values, 1-based. With origin mode the row is
+    /// relative to the scroll-region top (matching `H` / `d` handling).
+    fn cpr_position(&self) -> (usize, usize) {
+        let cursor = self.grid.cursor();
+        let row = if self.grid.origin_mode() {
+            cursor
+                .y
+                .saturating_sub(self.grid.scroll_region().0)
+                .saturating_add(1)
+        } else {
+            cursor.y.saturating_add(1)
+        };
+        (row, cursor.x.saturating_add(1))
     }
 
     /// Live-apply settings changes to an existing session: theme plus
@@ -315,6 +349,9 @@ impl vte::Perform for Terminal {
             self.grid.append_to_prev(c);
             return;
         }
+        if c != '\0' && !crate::grid::unicode::is_joining_modifier(c) {
+            self.last_graphic = Some(c);
+        }
         if !self.pending_wrap {
             // Pending case already newlined above; otherwise resolve an
             // overfull cursor (e.g. after a direct grid write).
@@ -361,6 +398,33 @@ impl vte::Perform for Terminal {
                 // DECSCUSR: `CSI Ps SP q` cursor shape + blink.
                 self.pending_wrap = false;
                 self.set_cursor_style(Self::param_or(params, 0, 0));
+            } else if intermediates == [b'?'] && action == 'n' {
+                // DECXCPR: `CSI ? 6 n` extended cursor position report.
+                self.pending_wrap = false;
+                let flat = Self::params_flat(params);
+                if flat.first().copied().unwrap_or(0) == 6 {
+                    let (row, col) = self.cpr_position();
+                    let reply = format!("\x1b[?{row};{col}R");
+                    self.push_response(reply.as_bytes());
+                }
+            } else if intermediates == [b'$'] && action == 'p' {
+                // DECRQM (ANSI): `CSI Ps $ p`.
+                self.pending_wrap = false;
+                let mode = Self::params_flat(params).first().copied().unwrap_or(0);
+                let val = self.grid.query_ansi_mode(mode);
+                let reply = format!("\x1b[{mode};{val}$y");
+                self.push_response(reply.as_bytes());
+            } else if intermediates == [b'?', b'$'] && action == 'p' {
+                // DECRQM (private): `CSI ? Ps $ p` stub.
+                self.pending_wrap = false;
+                let mode = Self::params_flat(params).first().copied().unwrap_or(0);
+                let val = self.grid.query_private_mode(mode);
+                let reply = format!("\x1b[?{mode};{val}$y");
+                self.push_response(reply.as_bytes());
+            } else if intermediates == [b'>'] && action == 'c' {
+                // Secondary DA: report a minimal xterm-like identity.
+                self.pending_wrap = false;
+                self.push_response(b"\x1b[>0;95;0c");
             }
             return;
         }
@@ -454,6 +518,52 @@ impl vte::Perform for Terminal {
             }
             's' => self.grid.save_cursor(),
             'u' => self.grid.restore_cursor(),
+            '@' => {
+                // ICH: insert blanks at the cursor, shifting the row right.
+                let n = Self::param_or(params, 0, 1) as usize;
+                self.grid.insert_chars(n);
+            }
+            'P' => {
+                // DCH: delete chars at the cursor, shifting the row left.
+                let n = Self::param_or(params, 0, 1) as usize;
+                self.grid.delete_chars(n);
+            }
+            'X' => {
+                // ECH: erase chars at the cursor without shifting.
+                let n = Self::param_or(params, 0, 1) as usize;
+                self.grid.erase_chars(n);
+            }
+            'b' => {
+                // REP: repeat the last graphic character.
+                let n = Self::param_or(params, 0, 1) as usize;
+                let n = n.clamp(1, 16384);
+                if let Some(c) = self.last_graphic {
+                    // Route through `print` so wrap / wide / insert-mode
+                    // handling matches a normally typed character.
+                    // `last_graphic` stays `c`, so chained REPs repeat it.
+                    for _ in 0..n {
+                        self.print(c);
+                    }
+                    // `print` may leave a pending wrap behind; keep it so
+                    // a following char wraps exactly like typed output.
+                }
+            }
+            'c' => {
+                // Primary DA: VT100 with advanced video (`?1;2`).
+                self.push_response(b"\x1b[?1;2c");
+            }
+            'n' => {
+                let ps = Self::params_flat(params).first().copied().unwrap_or(0);
+                match ps {
+                    5 => self.push_response(b"\x1b[0n"),
+                    6 => {
+                        let (row, col) = self.cpr_position();
+                        let reply = format!("\x1b[{row};{col}R");
+                        self.push_response(reply.as_bytes());
+                    }
+                    _ => {}
+                }
+            }
             'L' => {
                 let n = Self::param_or(params, 0, 1) as usize;
                 self.grid.insert_lines(n);
@@ -498,6 +608,7 @@ impl vte::Perform for Terminal {
                     self.grid.clear_all();
                     self.grid.set_cursor(0, 0);
                     self.title.clear();
+                    self.last_graphic = None;
                 }
                 _ => {}
             }
@@ -992,5 +1103,103 @@ mod tests {
         assert!(!t.mouse_sgr());
         assert!(!t.focus_report());
         assert!(!t.in_sync());
+    }
+
+    #[test]
+    fn ich_inserts_blanks_and_shifts_right() {
+        let mut t = test_terminal(5, 2);
+        feed_str(&mut t, "abcde");
+        feed_str(&mut t, "\x1b[1;2H\x1b[2@");
+        let row: String = (0..5).map(|x| t.grid().cell(x, 0).unwrap().ch).collect();
+        assert_eq!(row, "a  bc");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (1, 0));
+    }
+
+    #[test]
+    fn dch_deletes_and_shifts_left() {
+        let mut t = test_terminal(5, 2);
+        feed_str(&mut t, "abcde");
+        feed_str(&mut t, "\x1b[1;2H\x1b[2P");
+        let row: String = (0..5).map(|x| t.grid().cell(x, 0).unwrap().ch).collect();
+        assert_eq!(row, "ade  ");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (1, 0));
+    }
+
+    #[test]
+    fn ech_erases_without_shifting() {
+        let mut t = test_terminal(5, 2);
+        feed_str(&mut t, "abcde");
+        feed_str(&mut t, "\x1b[1;2H\x1b[2X");
+        let row: String = (0..5).map(|x| t.grid().cell(x, 0).unwrap().ch).collect();
+        assert_eq!(row, "a  de");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (1, 0));
+    }
+
+    #[test]
+    fn char_ops_use_pen_bg() {
+        let mut t = test_terminal(4, 1);
+        let theme = t.theme();
+        feed_str(&mut t, "\x1b[41m");
+        let red = theme.ansi(1);
+        feed_str(&mut t, "abcd");
+        feed_str(&mut t, "\x1b[1;1H\x1b[1@");
+        assert_eq!(t.grid().cell(0, 0).unwrap().bg, red);
+        feed_str(&mut t, "\x1b[1;1H\x1b[1P");
+        assert_eq!(t.grid().cell(3, 0).unwrap().bg, red);
+        feed_str(&mut t, "\x1b[1;1H\x1b[1X");
+        assert_eq!(t.grid().cell(0, 0).unwrap().bg, red);
+        assert_eq!(t.grid().cell(0, 0).unwrap().ch, ' ');
+    }
+
+    #[test]
+    fn rep_repeats_last_graphic() {
+        let mut t = test_terminal(6, 1);
+        feed_str(&mut t, "a\x1b[3b");
+        let row: String = (0..6).map(|x| t.grid().cell(x, 0).unwrap().ch).collect();
+        assert_eq!(&row[..4], "aaaa");
+        // No predecessor: no-op, no panic.
+        let mut t = test_terminal(3, 1);
+        feed_str(&mut t, "\x1b[3b");
+        assert_eq!(t.grid().cell(0, 0).unwrap().ch, ' ');
+        assert!(t.take_response().is_empty());
+    }
+
+    #[test]
+    fn da_dsr_and_cpr_reply() {
+        let mut t = test_terminal(5, 3);
+        feed_str(&mut t, "\x1b[c");
+        assert_eq!(t.take_response(), b"\x1b[?1;2c");
+        feed_str(&mut t, "\x1b[>c");
+        assert_eq!(t.take_response(), b"\x1b[>0;95;0c");
+        feed_str(&mut t, "\x1b[5n");
+        assert_eq!(t.take_response(), b"\x1b[0n");
+        feed_str(&mut t, "\x1b[2;3H\x1b[6n");
+        assert_eq!(t.take_response(), b"\x1b[2;3R");
+        // Extended CPR form.
+        feed_str(&mut t, "\x1b[?6n");
+        assert_eq!(t.take_response(), b"\x1b[?2;3R");
+    }
+
+    #[test]
+    fn cpr_is_origin_relative() {
+        let mut t = test_terminal(4, 5);
+        feed_str(&mut t, "\x1b[2;4r\x1b[?6h\x1b[1;1H\x1b[6n");
+        assert_eq!(t.take_response(), b"\x1b[1;1R");
+    }
+
+    #[test]
+    fn decrqm_reports_set_reset_and_unknown() {
+        let mut t = test_terminal(5, 3);
+        feed_str(&mut t, "\x1b[?25l\x1b[?25$p");
+        assert_eq!(t.take_response(), b"\x1b[?25;2$y");
+        feed_str(&mut t, "\x1b[?25h\x1b[?25$p");
+        assert_eq!(t.take_response(), b"\x1b[?25;1$y");
+        feed_str(&mut t, "\x1b[?9999$p");
+        assert_eq!(t.take_response(), b"\x1b[?9999;0$y");
+        // ANSI (non-private) IRM.
+        feed_str(&mut t, "\x1b[4$p");
+        assert_eq!(t.take_response(), b"\x1b[4;2$y");
+        feed_str(&mut t, "\x1b[4h\x1b[4$p");
+        assert_eq!(t.take_response(), b"\x1b[4;1$y");
     }
 }

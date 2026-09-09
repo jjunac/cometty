@@ -224,6 +224,48 @@ impl Grid {
         self.sync_depth = 0;
     }
 
+    /// `DECRQM` value for a private (`CSI ?`) mode: `1` = set, `2` = reset,
+    /// `0` = not recognized. Covers the modes this terminal tracks; action
+    /// modes such as `1048` (save/restore cursor) report `0`.
+    pub fn query_private_mode(&self, mode: u16) -> u8 {
+        let set = match mode {
+            1 => Some(self.cursor_app),
+            4 => Some(self.insert_mode),
+            6 => Some(self.origin_mode),
+            7 => Some(self.auto_wrap),
+            25 => Some(self.cursor_enabled),
+            66 => Some(self.keypad_app),
+            1000 => Some(self.mouse_press),
+            1002 => Some(self.mouse_drag),
+            1003 => Some(self.mouse_any),
+            1004 => Some(self.focus_report),
+            1006 => Some(self.mouse_sgr),
+            2004 => Some(self.bracketed_paste),
+            2026 => Some(self.sync_depth > 0),
+            47 | 1047 | 1049 => Some(self.in_alt),
+            _ => None,
+        };
+        match set {
+            Some(true) => 1,
+            Some(false) => 2,
+            None => 0,
+        }
+    }
+
+    /// `DECRQM` value for a non-private mode. Only `4` (IRM) is tracked.
+    pub fn query_ansi_mode(&self, mode: u16) -> u8 {
+        match mode {
+            4 => {
+                if self.insert_mode {
+                    1
+                } else {
+                    2
+                }
+            }
+            _ => 0,
+        }
+    }
+
     /// Full DEC reset for `ESC c`: margins + origin/insert/wrap back to
     /// defaults (cursor homing is done by the caller).
     pub fn reset_margins_and_modes(&mut self) {

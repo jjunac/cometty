@@ -28,6 +28,11 @@ impl App {
                 match tab.pty.try_recv() {
                     Some(PtyEvent::Data(bytes)) => {
                         tab.terminal.feed(&bytes);
+                        // Query replies (DA / CPR / DSR / DECRQM) flow back.
+                        let reply = tab.terminal.take_response();
+                        if !reply.is_empty() {
+                            tab.pty.write(reply);
+                        }
                         got_data = true;
                     }
                     Some(PtyEvent::Exit) => {

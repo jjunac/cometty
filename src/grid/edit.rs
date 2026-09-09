@@ -519,4 +519,98 @@ impl Grid {
         }
         self.bump();
     }
+
+    /// Insert `n` blanks at the cursor column (`ICH`, `CSI n @`).
+    /// The tail of the cursor row shifts right; overflow is dropped.
+    /// BCE fill, cursor stays, wide halves repaired.
+    pub fn insert_chars(&mut self, n: usize) {
+        self.stick_to_bottom();
+        if self.rows == 0 || self.cols == 0 {
+            self.bump();
+            return;
+        }
+        let y = self.cursor.y.min(self.rows.saturating_sub(1));
+        if y >= self.cells.len() {
+            self.bump();
+            return;
+        }
+        let x = self.cursor.x.min(self.cols.saturating_sub(1));
+        let n = n.min(self.cols.saturating_sub(x));
+        if n == 0 {
+            self.bump();
+            return;
+        }
+        for i in (x..self.cols - n).rev() {
+            let v = self.cells[y][i].clone();
+            self.cells[y][i + n] = v;
+        }
+        let fill = self.erase_cell();
+        for i in x..(x + n).min(self.cols) {
+            self.cells[y][i] = fill.clone();
+        }
+        let blank = self.erase_cell();
+        Self::fix_row_wide(&mut self.cells[y], &blank);
+        self.bump();
+    }
+
+    /// Delete `n` chars at the cursor column (`DCH`, `CSI n P`).
+    /// The tail shifts left; the freed tail is BCE-filled.
+    /// Cursor stays, wide halves repaired.
+    pub fn delete_chars(&mut self, n: usize) {
+        self.stick_to_bottom();
+        if self.rows == 0 || self.cols == 0 {
+            self.bump();
+            return;
+        }
+        let y = self.cursor.y.min(self.rows.saturating_sub(1));
+        if y >= self.cells.len() {
+            self.bump();
+            return;
+        }
+        let x = self.cursor.x.min(self.cols.saturating_sub(1));
+        let n = n.min(self.cols.saturating_sub(x));
+        if n == 0 {
+            self.bump();
+            return;
+        }
+        for i in x..self.cols - n {
+            let v = self.cells[y][i + n].clone();
+            self.cells[y][i] = v;
+        }
+        let fill = self.erase_cell();
+        for i in (self.cols - n)..self.cols {
+            self.cells[y][i] = fill.clone();
+        }
+        let blank = self.erase_cell();
+        Self::fix_row_wide(&mut self.cells[y], &blank);
+        self.bump();
+    }
+
+    /// Erase `n` chars at the cursor column (`ECH`, `CSI n X`).
+    /// Overwrites with BCE blanks without shifting; cursor stays.
+    pub fn erase_chars(&mut self, n: usize) {
+        self.stick_to_bottom();
+        if self.rows == 0 || self.cols == 0 {
+            self.bump();
+            return;
+        }
+        let y = self.cursor.y.min(self.rows.saturating_sub(1));
+        if y >= self.cells.len() {
+            self.bump();
+            return;
+        }
+        let x = self.cursor.x.min(self.cols.saturating_sub(1));
+        let n = n.min(self.cols.saturating_sub(x));
+        if n == 0 {
+            self.bump();
+            return;
+        }
+        let fill = self.erase_cell();
+        for i in x..(x + n).min(self.cols) {
+            self.cells[y][i] = fill.clone();
+        }
+        let blank = self.erase_cell();
+        Self::fix_row_wide(&mut self.cells[y], &blank);
+        self.bump();
+    }
 }
