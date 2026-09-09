@@ -96,6 +96,16 @@ pub(crate) fn active_after_removals(active: usize, removed: &[usize], new_len: u
     active.saturating_sub(shift).min(new_len.saturating_sub(1))
 }
 
+/// Next active index when cycling by `delta` with wrap-around
+/// (`+1` next, `-1` prev). Returns `active` when there is nothing to
+/// cycle (`len < 2`).
+pub(crate) fn next_tab_index(active: usize, len: usize, delta: isize) -> usize {
+    if len < 2 {
+        return active;
+    }
+    (active as isize + delta).rem_euclid(len as isize) as usize
+}
+
 /// OS window title for the active tab: the shell's OSC title when set,
 /// otherwise the app name from config.
 pub fn window_title_for<'a>(osc_title: &'a str, config: &'a Config) -> &'a str {
@@ -252,9 +262,17 @@ impl App {
         if let Some(r) = self.renderer.as_mut() {
             r.invalidate();
         }
+        self.sync_window_title();
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+    }
+
+    /// Cycle tabs by `delta` with wrap-around (`+1` next, `-1` prev).
+    /// No-op with fewer than 2 tabs.
+    pub(crate) fn switch_relative(&mut self, delta: isize) {
+        let next = next_tab_index(self.active, self.tabs.len(), delta);
+        self.switch_tab(next);
     }
 
     /// Close tab `index`. Returns true when no tabs remain and the
@@ -389,5 +407,17 @@ mod tests {
     #[test]
     fn active_index_empty_tabs_stays_zero() {
         assert_eq!(active_after_removals(0, &[0], 0), 0);
+    }
+
+    #[test]
+    fn cycle_wraps_around_both_directions() {
+        assert_eq!(next_tab_index(0, 3, 1), 1);
+        assert_eq!(next_tab_index(2, 3, 1), 0);
+        assert_eq!(next_tab_index(0, 3, -1), 2);
+        assert_eq!(next_tab_index(1, 3, -1), 0);
+        // Single tab (or none) stays put.
+        assert_eq!(next_tab_index(0, 1, 1), 0);
+        assert_eq!(next_tab_index(0, 1, -1), 0);
+        assert_eq!(next_tab_index(0, 0, 1), 0);
     }
 }

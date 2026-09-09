@@ -103,8 +103,11 @@ fn map_key(
         return None;
     }
 
-    // Reserved for future tab switching; never reaches the PTY.
+    // Tab switching never reaches the PTY (cycle + direct jump).
     if is_tab_switch_shortcut(logical_key, modifiers, input_config) {
+        return None;
+    }
+    if tab_direct_index(logical_key, key_without_modifiers, modifiers, input_config).is_some() {
         return None;
     }
     // Super combos never reach the PTY (OS / app shortcuts),
@@ -573,8 +576,9 @@ pub fn is_new_tab_shortcut(
     ctrl != sup
 }
 
-/// Reserved tab-switch shortcut, gated by [`crate::config::InputConfig`].
-/// Consumed locally so the PTY never sees them; switching itself is a future TODO.
+/// Tab-cycle shortcut, gated by [`crate::config::InputConfig`].
+/// `Ctrl+Tab` cycles forward, `Ctrl+Shift+Tab` cycles back (same for
+/// `Super` when enabled). Consumed locally so the PTY never sees them.
 pub fn is_tab_switch_shortcut(
     logical_key: &Key,
     modifiers: &ModifiersState,
@@ -589,6 +593,41 @@ pub fn is_tab_switch_shortcut(
     let ctrl = config.tab_switch_ctrl && modifiers.control_key() && !modifiers.super_key();
     let sup = config.tab_switch_super && modifiers.super_key() && !modifiers.control_key();
     ctrl != sup
+}
+
+/// Cycle direction for [`is_tab_switch_shortcut`]: back when `Shift` is
+/// held (`Ctrl+Shift+Tab`), forward otherwise.
+pub fn tab_switch_delta(modifiers: &ModifiersState) -> isize {
+    if modifiers.shift_key() { -1 } else { 1 }
+}
+
+/// Direct `Super+1..9` tab jump (0-based index), gated by
+/// `tab_switch_super`. `Shift` is ignored so layouts where digits need
+/// `Shift` still work; `Ctrl`/`Alt` reject. The base key comes from
+/// `key_without_modifiers` first (layout-independent), falling back to
+/// the logical key. Consumed locally, never reaches the PTY.
+pub fn tab_direct_index(
+    logical_key: &Key,
+    key_without_modifiers: &Key,
+    modifiers: &ModifiersState,
+    config: &crate::config::InputConfig,
+) -> Option<usize> {
+    if !config.tab_switch_super {
+        return None;
+    }
+    if !modifiers.super_key() || modifiers.control_key() || modifiers.alt_key() {
+        return None;
+    }
+    fn digit_index(key: &Key) -> Option<usize> {
+        if let Key::Character(s) = key
+            && let Some(ch) = s.chars().next()
+            && ('1'..='9').contains(&ch)
+        {
+            return Some((ch as u8 - b'1') as usize);
+        }
+        None
+    }
+    digit_index(key_without_modifiers).or_else(|| digit_index(logical_key))
 }
 
 /// Map a winit KeyEvent to bytes to send to the PTY.
@@ -877,6 +916,98 @@ mod tests {
         ));
         assert!(!is_tab_switch_shortcut(&tab, &ModifiersState::SHIFT, &cfg));
         assert_eq!(plain(&tab, Some("\t"), &ModifiersState::CONTROL), None);
+    }
+
+    #[test]
+    fn tab_switch_delta_follows_shift() {
+        assert_eq!(tab_switch_delta(&ModifiersState::CONTROL), 1);
+        assert_eq!(
+            tab_switch_delta(&(ModifiersState::CONTROL | ModifiersState::SHIFT)),
+            -1
+        );
+        assert_eq!(tab_switch_delta(&ModifiersState::SUPER), 1);
+        assert_eq!(
+            tab_switch_delta(&(ModifiersState::SUPER | ModifiersState::SHIFT)),
+            -1
+        );
+    }
+
+    #[test]
+    fn tab_direct_index_jumps_on_super_digit() {
+        let cfg = cfg();
+        let one: Key = Key::Character("1".into());
+        let nine: Key = Key::Character("9".into());
+        let zero: Key = Key::Character("0".into());
+        let a: Key = Key::Character("a".into());
+        assert_eq!(
+            tab_direct_index(&one, &one, &ModifiersState::SUPER, &cfg),
+            Some(0)
+        );
+        assert_eq!(
+            tab_direct_index(&nine, &nine, &ModifiersState::SUPER, &cfg),
+            Some(8)
+        );
+        assert_eq!(
+            tab_direct_index(&zero, &zero, &ModifiersState::SUPER, &cfg),
+            None
+        );
+        assert_eq!(tab_direct_index(&a, &a, &ModifiersState::SUPER, &cfg), None);
+        // No Super, Ctrl, or Alt combos never jump.
+        assert_eq!(
+            tab_direct_index(&one, &one, &ModifiersState::empty(), &cfg),
+            None
+        );
+        assert_eq!(
+            tab_direct_index(
+                &one,
+                &one,
+                &(ModifiersState::SUPER | ModifiersState::CONTROL),
+                &cfg
+            ),
+            None
+        );
+        assert_eq!(
+            tab_direct_index(
+                &one,
+                &one,
+                &(ModifiersState::SUPER | ModifiersState::ALT),
+                &cfg
+            ),
+            None
+        );
+        // Shift is ignored so shifted layouts still jump; the
+        // modifierless base recovers `!` -> `1`.
+        let bang: Key = Key::Character("!".into());
+        assert_eq!(
+            tab_direct_index(
+                &bang,
+                &one,
+                &(ModifiersState::SUPER | ModifiersState::SHIFT),
+                &cfg
+            ),
+            Some(0)
+        );
+        // Disabled in config.
+        let mut off = cfg.clone();
+        off.tab_switch_super = false;
+        assert_eq!(
+            tab_direct_index(&one, &one, &ModifiersState::SUPER, &off),
+            None
+        );
+        // Direct jumps never reach the PTY.
+        let out = map_key(
+            &one,
+            &one,
+            Some("1"),
+            Some("1"),
+            KeyLocation::Standard,
+            true,
+            &ModifiersState::SUPER,
+            false,
+            false,
+            &cfg,
+        );
+        assert_eq!(out, None);
     }
 
     #[test]

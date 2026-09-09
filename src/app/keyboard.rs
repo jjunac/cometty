@@ -3,6 +3,17 @@
 use winit::event::ElementState;
 use winit::keyboard::{Key, NamedKey};
 
+#[cfg(any(
+    target_os = "windows",
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+
 use super::App;
 
 impl App {
@@ -66,13 +77,43 @@ impl App {
                 self.spawn_tab_for_window();
                 return true;
             }
-            // Reserved for future tab switching; consume so the PTY never
-            // sees Ctrl+Tab / Ctrl+Shift+Tab (TODO: switch_tab).
+            // Tab switching never reaches the PTY: Ctrl/Super+Tab cycles
+            // (Shift = back), Super+1..9 jumps directly.
+            #[cfg(any(
+                target_os = "windows",
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            ))]
+            let without = event.key_without_modifiers();
+            #[cfg(not(any(
+                target_os = "windows",
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            )))]
+            let without = event.logical_key.clone();
+            if let Some(index) = crate::input::tab_direct_index(
+                &event.logical_key,
+                &without,
+                &self.modifiers,
+                &self.config.input,
+            ) {
+                self.switch_tab(index);
+                return true;
+            }
             if crate::input::is_tab_switch_shortcut(
                 &event.logical_key,
                 &self.modifiers,
                 &self.config.input,
             ) {
+                self.switch_relative(crate::input::tab_switch_delta(&self.modifiers));
                 return true;
             }
         }
