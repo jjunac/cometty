@@ -1,3 +1,4 @@
 /target
 .opencode/reports
 .opencode/audit
+.DS_Store

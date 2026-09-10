@@ -1,12 +1,12 @@
-//! App window icon embedded from `assets/icon-512.png` (rasterized from `logo.svg`).
+//! App window icon embedded from `assets/icon-128.png` (rasterized from `logo.svg`).
 //!
 //! The PNG is baked into the binary via `include_bytes!` so the single-binary
 //! property holds. Decoding failures are non-fatal: callers get `None` and the
 //! window is created without a custom icon.
 
-/// Embedded 512x512 PNG rasterized from `logo.svg` via
-/// `rsvg-convert -w 512 -h 512 logo.svg -o assets/icon-512.png`.
-const ICON_PNG: &[u8] = include_bytes!("../assets/icon-512.png");
+/// Embedded 128x128 PNG rasterized from `logo.svg` via
+/// `rsvg-convert -w 128 -h 128 logo.svg -o assets/icon-128.png`.
+const ICON_PNG: &[u8] = include_bytes!("../assets/icon-128.png");
 
 /// Decode the embedded PNG to raw RGBA bytes plus dimensions.
 /// Returns `None` (and logs) when the asset is corrupt.
@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn decodes_to_square_rgba() {
         let (rgba, w, h) = decode_icon_png().expect("embedded icon must decode");
-        assert_eq!((w, h), (512, 512));
+        assert_eq!((w, h), (128, 128));
         assert_eq!(rgba.len(), w as usize * h as usize * 4);
         // Not fully transparent: the logo paints a dark rounded square.
         assert!(rgba.chunks_exact(4).any(|px| px[3] > 0));
