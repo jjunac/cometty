@@ -6,7 +6,7 @@ Single-binary Rust terminal emulator (`cometty`). Edition 2024. CI runs
 
 ## Commands
 
-- `cargo test` — 221 unit tests in `grid`/`term`/`input`/`app::geometry`/`app::settings`/`app::logs`/`scrollbar`/`selection`/`theme`/`logbuf`/`logging`/`renderer` (incl. `renderer::blocks`/`renderer::log_ui`/`renderer::settings_ui`); runs instantly, no services needed.
+- `cargo test` — 222 unit tests in `grid`/`term`/`input`/`app::geometry`/`app::settings`/`app::logs`/`scrollbar`/`selection`/`theme`/`logbuf`/`logging`/`renderer` (incl. `renderer::blocks`/`renderer::log_ui`/`renderer::settings_ui`); runs instantly, no services needed.
 - `cargo run` — launches GUI window (needs display + GPU surface). Do not run headless; prefer `cargo test` / `cargo check`.
 - `cargo clippy -- -D warnings` and `cargo fmt --check` — no configs committed; keep code warning- and rustfmt-clean.
 
@@ -26,4 +26,5 @@ Single-binary Rust terminal emulator (`cometty`). Edition 2024. CI runs
 - GUI binary: `cargo run`/`cargo build` need windowing/GPU; verification in headless sessions = `cargo test` + `cargo check`.
 - `grid::cell()`, `pen()`, `scrollback_len()` are `#[allow(dead_code)]` test/inspection helpers — do not remove. Same for `Renderer::set_theme` (future runtime switching) and `term` inspectors.
 - Erase uses BCE semantics: `ED/EL/clear` + `IL/DL`/scroll fill use `erase_cell()` (current pen bg, default fg/attrs); `blank_cell()` is only for structural fills (resize growth, fresh alt buffer).
+- macOS fullscreen stripes (Intel Iris Plus/Metal): a drawable sized exactly like the display makes the driver paint the *cleared* background as vertical stripes (`wgpu#3415`); only the terminal bg is affected (painted geometry/egui chrome stay correct). `renderer::shrink_fullscreen_surface` crops the surface 1px when `app::geometry::is_fullscreen_like` (window flag or display-sized window) says the drawable is display-sized. The 1px delta is deliberate — don't "fix" it.
 - Log panel: panel state (`app::logs::LogsPanel`) is display-only; recording is directive-based (`[log] level`/`[log] filter`, target-scoped — a bare level would let `naga`/`cosmic_text` debug spam in) and independent of stderr's `RUST_LOG`. The egui window must not lock the ring while closed, and row content must never exceed the fixed row height (`ScrollArea::show_rows` would drift). The `Ctrl/Cmd+Shift+L` check in `app::keyboard` must stay **before** the `settings.open` early-return, and the panel deliberately does *not* swallow shell keys (only egui's `consumed` flag does, when the filter box has focus).

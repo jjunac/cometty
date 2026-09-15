@@ -131,7 +131,9 @@ impl App {
                     // Surface lost / outdated is recoverable via resize.
                     log::warn!("render failed: {e:#}");
                     let s = window.inner_size();
-                    renderer.resize(s.width.max(1), s.height.max(1));
+                    let fullscreen =
+                        super::is_fullscreen_like(window, s.width.max(1), s.height.max(1));
+                    renderer.resize(s.width.max(1), s.height.max(1), fullscreen);
                     if self.config != config_before {
                         self.apply_settings_changes(&config_before);
                         self.save_config_from_settings();

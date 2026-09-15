@@ -37,6 +37,28 @@ pub(crate) fn clamp_surface_size(width: u32, height: u32, max_dim: u32) -> (u32,
     (width.max(1).min(max_dim), height.max(1).min(max_dim))
 }
 
+/// macOS/Metal fullscreen stripe workaround.
+///
+/// On Intel Iris Plus GPUs (MacBookPro16,x and relatives), a drawable that
+/// is exactly the size of the display — i.e. native fullscreen — makes the
+/// Metal driver paint the *cleared* background as dense vertical stripes
+/// (`wgpu#3415`, `pixels#394`). Everything drawn as geometry (text, our bg
+/// quads, the egui chrome) stays correct, which is why only the terminal
+/// background is corrupted. A drawable one pixel narrower is unaffected;
+/// the cost is a single cropped column at the right edge.
+///
+/// No-op on windowed windows and on every other platform.
+pub(crate) fn shrink_fullscreen_surface(width: u32, height: u32, fullscreen: bool) -> (u32, u32) {
+    // The Metal backend is the only one affected; the parameter is unused
+    // (but still part of the cross-platform signature) elsewhere.
+    let _ = fullscreen;
+    #[cfg(target_os = "macos")]
+    if fullscreen && width > 1 {
+        return (width - 1, height);
+    }
+    (width, height)
+}
+
 /// egui chrome input for [`Renderer::render`]: tab strip + overlay scrollbar.
 /// Grouped so `render` stays under the clippy arg limit.
 pub struct ScrollCtx<'a> {
@@ -97,6 +119,9 @@ pub struct Renderer {
     pub cell_width: f32,
     width: u32,
     height: u32,
+    /// True while the surface is configured for a display-sized (fullscreen)
+    /// drawable: feeding [`shrink_fullscreen_surface`].
+    fullscreen: bool,
     last_grid_version: u64,
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
@@ -259,6 +284,9 @@ impl Renderer {
             cell_width,
             width: clamped_w,
             height: clamped_h,
+            // The startup window is never created fullscreen; a later
+            // fullscreen resize goes through `resize`.
+            fullscreen: false,
             last_grid_version: u64::MAX,
             egui_ctx,
             egui_state,
@@ -354,7 +382,13 @@ impl Renderer {
         self.last_grid_version = u64::MAX;
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
+    /// Resize the surface. `fullscreen` marks a drawable that covers the
+    /// display exactly (native fullscreen / screen-sized window): on macOS
+    /// the surface is then shrunk by one pixel to dodge the Metal stripe
+    /// bug, see [`shrink_fullscreen_surface`]. The flag is part of the
+    /// cache key, so entering/leaving fullscreen without a size change
+    /// still reconfigures.
+    pub fn resize(&mut self, width: u32, height: u32, fullscreen: bool) {
         if width == 0 || height == 0 {
             return;
         }
@@ -365,13 +399,20 @@ impl Renderer {
                 self.max_surface_dim
             );
         }
-        if clamped_w == self.width && clamped_h == self.height {
+        let (surf_w, surf_h) = shrink_fullscreen_surface(clamped_w, clamped_h, fullscreen);
+        if surf_w == self.width && surf_h == self.height && fullscreen == self.fullscreen {
             return;
         }
-        self.config.width = clamped_w;
-        self.config.height = clamped_h;
+        if surf_w != clamped_w || surf_h != clamped_h {
+            log::debug!(
+                "macos fullscreen stripe workaround: surface {surf_w}x{surf_h} (window {width}x{height})"
+            );
+        }
+        self.fullscreen = fullscreen;
+        self.config.width = surf_w;
+        self.config.height = surf_h;
         self.surface.configure(&self.device, &self.config);
-        self.update_viewport(clamped_w, clamped_h);
+        self.update_viewport(surf_w, surf_h);
     }
 
     pub fn cols_for_width(&self, width: u32) -> usize {
@@ -717,5 +758,19 @@ mod tests {
         assert_eq!(clamp_surface_size(2204, 1200, 2048), (2048, 1200));
         assert_eq!(clamp_surface_size(800, 600, 2048), (800, 600));
         assert_eq!(clamp_surface_size(0, 0, 2048), (1, 1));
+    }
+
+    #[test]
+    fn fullscreen_surface_shrinks_one_pixel_on_macos() {
+        // Windowed drawables are never display-sized: untouched everywhere.
+        assert_eq!(shrink_fullscreen_surface(2560, 1600, false), (2560, 1600));
+        // Fullscreen: one column cropped on macOS, untouched elsewhere.
+        let (w, h) = shrink_fullscreen_surface(2560, 1600, true);
+        #[cfg(target_os = "macos")]
+        assert_eq!((w, h), (2559, 1600));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!((w, h), (2560, 1600));
+        // Never shrink below a usable surface.
+        assert_eq!(shrink_fullscreen_surface(1, 1, true), (1, 1));
     }
 }

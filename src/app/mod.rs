@@ -16,6 +16,7 @@ pub mod settings;
 pub mod tab;
 
 pub use geometry::compute_grid_size;
+pub use geometry::is_fullscreen_like;
 pub use logs::LogsPanel;
 pub use settings::{AppStartup, SettingsPanel};
 pub use tab::Tab;

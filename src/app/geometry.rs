@@ -29,6 +29,26 @@ pub fn compute_grid_size(
     (cols.clamp(min_dim, max_dim), rows.clamp(min_dim, max_dim))
 }
 
+/// True when the window is drawn at — or about to be drawn at — the exact
+/// backing size of its display: native fullscreen, or a window sized to
+/// cover the screen.
+///
+/// That exact size is what triggers the macOS/Metal fullscreen stripe bug,
+/// so the renderer shrinks the surface by a pixel there (see
+/// `renderer::shrink_fullscreen_surface`). The window/monitor sizes can
+/// disagree for a frame while AppKit animates a fullscreen transition, so
+/// the fullscreen flag is consulted as well instead of trusting the size
+/// comparison alone.
+pub fn is_fullscreen_like(window: &winit::window::Window, width: u32, height: u32) -> bool {
+    if window.fullscreen().is_some() {
+        return true;
+    }
+    window.current_monitor().is_some_and(|monitor| {
+        let size = monitor.size();
+        size.width == width && size.height == height
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

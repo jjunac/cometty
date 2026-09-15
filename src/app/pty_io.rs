@@ -102,11 +102,17 @@ impl App {
         if width == 0 || height == 0 {
             return;
         }
+        // Display-sized drawables need the macOS fullscreen stripe
+        // workaround; tell the renderer before it configures the surface.
+        let fullscreen = self
+            .window
+            .as_ref()
+            .is_some_and(|w| super::is_fullscreen_like(w, width, height));
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
         renderer.set_scale_factor(scale);
-        renderer.resize(width, height);
+        renderer.resize(width, height, fullscreen);
         let term_h = term_height_px(height, scale, self.tabs.len(), &self.config.tabbar);
         let (cols, rows) = super::compute_grid_size(
             width,
