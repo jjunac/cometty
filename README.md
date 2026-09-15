@@ -81,6 +81,11 @@ paste_super = true
 new_tab_ctrl = true
 new_tab_super = true
 lines_per_tick = 7.0
+
+[log]
+level = "debug"        # in-app buffer: cometty's own logs (off | error | warn | info | debug | trace)
+filter = ""            # RUST_LOG-style override, e.g. "cometty=debug,wgpu=debug,warn"
+buffer_lines = 1000    # ring capacity; stderr output still follows RUST_LOG
 ```
 
 ## Features
@@ -105,8 +110,9 @@ lines_per_tick = 7.0
 - [x] Unicode: double-width / emoji / combining chars (CJK wide, ZWJ sequences, flags, skin tones, VS16, combining marks; cluster cells with continuation placeholders)
 - [x] Scroll regions (`CSI r`), origin / insert / auto-wrap modes
 - [x] Exit behavior: last shell exit closes the window, other exits close just that tab
-- [x] User config: TOML file (`$HOME/.config/cometty/config.toml`) for theme/font/window/terminal/shell/cursor/scrollbar/tabbar/selection/input (see `src/config.rs`); CLI `--theme` / `--config` override file
+- [x] User config: TOML file (`$HOME/.config/cometty/config.toml`) for theme/font/window/terminal/shell/cursor/scrollbar/tabbar/selection/input/log (see `src/config.rs`); CLI `--theme` / `--config` override file
 - [x] Settings UI (`Ctrl+,` / `Cmd+,` or the Settings button: sidebar panel, live-apply, auto-save to `config.toml`, per-field/section/global reset)
+- [x] Log viewer (`Ctrl+Shift+L` / `Cmd+Shift+L` or Cometty > Logs…: in-memory ring, level + text filter, follow, clear/copy; every detected OSC sequence is logged — handled or not — with a compact payload summary; records by target so dependency debug spam stays out while their warnings still show, bounded by `[log] filter`/`level`/`buffer_lines`; stderr keeps following `RUST_LOG`)
 - [x] Mouse reporting (`1000/1002/1003/1006-SGR`) + focus (`1004`) + synced output (`2026`); `Shift`-override keeps local selection
 - [x] Char ops + queries: `ICH/DCH/ECH` (`@/P/X`), `REP`, `DA`/`CPR`, `DECRQM` stub
 - [x] Full SGR: dim / italic / inverse / strike / overline, underline styles + `58/59` colors, colon `38:2:r:g:b` form

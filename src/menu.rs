@@ -1,9 +1,10 @@
-//! Native OS menu bar: app menu with a Settings entry.
+//! Native OS menu bar: app menu with Settings + Logs entries.
 //!
-//! The Settings panel itself is egui (see [`crate::renderer::settings_ui`]);
-//! this module only owns the platform menu that opens it. Only macOS
-//! attaches a global menu today (`init_for_nsapp`); other platforms keep
-//! the `Ctrl+,` / `Cmd+,` shortcut until window-menu integration lands.
+//! The panels themselves are egui (see [`crate::renderer::settings_ui`] and
+//! [`crate::renderer::log_ui`]); this module only owns the platform menu
+//! that opens them. Only macOS attaches a global menu today
+//! (`init_for_nsapp`); other platforms keep the `Ctrl+,` / `Ctrl+Shift+L`
+//! shortcuts until window-menu integration lands.
 //! Construction/install failures are non-fatal: the app stays fully usable
 //! without the menu.
 
@@ -17,6 +18,7 @@ use muda::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
 pub struct NativeMenu {
     menu: Menu,
     settings_item: MenuItem,
+    logs_item: MenuItem,
 }
 
 impl NativeMenu {
@@ -24,11 +26,22 @@ impl NativeMenu {
         let menu = Menu::new();
         let app_submenu = Submenu::new("Cometty", true);
         #[cfg(target_os = "macos")]
-        let accelerator = Accelerator::new(Some(Modifiers::SUPER), Code::Comma);
+        let settings_accelerator = Accelerator::new(Some(Modifiers::SUPER), Code::Comma);
         #[cfg(not(target_os = "macos"))]
-        let accelerator = Accelerator::new(Some(Modifiers::CONTROL), Code::Comma);
-        let settings_item =
-            MenuItem::with_id("cometty-settings", "Settings…", true, Some(accelerator));
+        let settings_accelerator = Accelerator::new(Some(Modifiers::CONTROL), Code::Comma);
+        #[cfg(target_os = "macos")]
+        let logs_accelerator =
+            Accelerator::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyL);
+        #[cfg(not(target_os = "macos"))]
+        let logs_accelerator =
+            Accelerator::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyL);
+        let settings_item = MenuItem::with_id(
+            "cometty-settings",
+            "Settings…",
+            true,
+            Some(settings_accelerator),
+        );
+        let logs_item = MenuItem::with_id("cometty-logs", "Logs…", true, Some(logs_accelerator));
         app_submenu.append_items(&[
             &PredefinedMenuItem::about(
                 None,
@@ -40,6 +53,7 @@ impl NativeMenu {
             ),
             &PredefinedMenuItem::separator(),
             &settings_item,
+            &logs_item,
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::hide(None),
             &PredefinedMenuItem::hide_others(None),
@@ -51,6 +65,7 @@ impl NativeMenu {
         Ok(Self {
             menu,
             settings_item,
+            logs_item,
         })
     }
 
@@ -65,5 +80,9 @@ impl NativeMenu {
 
     pub fn settings_id(&self) -> &muda::MenuId {
         self.settings_item.id()
+    }
+
+    pub fn logs_id(&self) -> &muda::MenuId {
+        self.logs_item.id()
     }
 }

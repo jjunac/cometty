@@ -1,5 +1,6 @@
 mod background;
 mod blocks;
+mod log_ui;
 mod overlay;
 mod settings_ui;
 mod text;
@@ -49,6 +50,9 @@ pub struct ScrollCtx<'a> {
     pub active_tab: usize,
     pub settings: &'a mut crate::app::settings::SettingsPanel,
     pub config: &'a mut Config,
+    pub logs: &'a mut crate::app::logs::LogsPanel,
+    /// Shared with the global logger; only locked while the panel is open.
+    pub log_buffer: &'a std::sync::Arc<std::sync::Mutex<crate::logbuf::LogBuffer>>,
 }
 
 /// Cursor input for [`Renderer::render`]: position + visibility + shape.
@@ -261,6 +265,10 @@ impl Renderer {
             egui_renderer,
         };
         r.update_viewport(clamped_w, clamped_h);
+        log::debug!(
+            "renderer ready: surface {clamped_w}x{clamped_h} @ {scale_factor}x, cell {cell_width:.2}x{line_height:.2}, theme {}",
+            r.theme.name
+        );
         Ok(r)
     }
 
@@ -273,6 +281,7 @@ impl Renderer {
     /// future theme switching (CLI flag / config / keybind) just calls this.
     pub fn set_theme(&mut self, theme: Theme) {
         if self.theme != theme {
+            log::debug!("theme -> {}", theme.name);
             self.theme = theme;
             self.egui_ctx.set_visuals(theme.to_egui_visuals());
             self.last_grid_version = u64::MAX;
@@ -316,6 +325,7 @@ impl Renderer {
         if (scale - self.scale_factor).abs() < f32::EPSILON {
             return false;
         }
+        log::debug!("scale factor -> {scale}x");
         self.scale_factor = scale;
         let (font_size, line_height, cell_width) = scaled_metrics(
             self.base_font_size,

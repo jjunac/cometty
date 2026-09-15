@@ -34,6 +34,17 @@ impl App {
             }
             return true;
         }
+        // Log panel toggle: same precedence as Settings, so the combo
+        // works while the settings panel is open too.
+        if event.state == ElementState::Pressed
+            && crate::app::logs::is_logs_toggle(&event.logical_key, &self.modifiers)
+        {
+            self.logs.toggle();
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+            return true;
+        }
         // Panel-first: while open, everything except the toggle (above) and
         // Esc-to-close goes to the egui panel, never the shell. Esc closes.
         if self.settings.open {

@@ -122,6 +122,8 @@ impl App {
                     active_tab: active,
                     settings: &mut self.settings,
                     config: &mut self.config,
+                    logs: &mut self.logs,
+                    log_buffer: &self.log_buffer,
                 },
             ) {
                 Ok(o) => o,

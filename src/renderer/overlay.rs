@@ -24,6 +24,8 @@ impl Renderer {
             active_tab,
             settings,
             config,
+            logs,
+            log_buffer,
         } = scroll;
         let scale = self.scale_factor.max(1.0);
         let screen_w_pts = self.width as f32 / scale;
@@ -390,6 +392,9 @@ impl Renderer {
             // place; the app diffs + saves after the frame via
             // `apply_settings_changes`.
             super::settings_ui::show_settings(&ctx, settings, config);
+            // Log viewer (floating window when open; toggled from the menu
+            // bar or Ctrl/Cmd+Shift+L). Reads the app-wide ring buffer.
+            super::log_ui::show_logs(&ctx, logs, log_buffer);
             ctx.end_pass()
         };
         self.egui_state

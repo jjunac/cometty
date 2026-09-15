@@ -7,12 +7,12 @@
 //! app live-applies the diff and auto-saves afterwards.
 
 use crate::app::settings::{
-    CURSOR_SHAPES, FONT_FAMILIES, KNOWN_THEMES, SettingsPanel, SettingsSection, is_known_theme,
-    normalize_min_max, repair_finite_f32, repair_min_u32, repair_min_u64, repair_min_usize,
-    repair_positive_f32, repair_positive_f64, reset_all, reset_section, sanitize_cursor_shape,
-    sanitize_key_label,
+    CURSOR_SHAPES, FONT_FAMILIES, KNOWN_THEMES, LOG_LEVELS, SettingsPanel, SettingsSection,
+    is_known_theme, normalize_min_max, repair_finite_f32, repair_min_u32, repair_min_u64,
+    repair_min_usize, repair_positive_f32, repair_positive_f64, reset_all, reset_section,
+    sanitize_cursor_shape, sanitize_key_label,
 };
-use crate::config::Config;
+use crate::config::{Config, MAX_LOG_BUFFER_LINES, MIN_LOG_BUFFER_LINES};
 
 /// Paint the settings window when open (nothing when closed — the native
 /// menu bar owns the entry point).
@@ -960,5 +960,91 @@ fn show_section(
                 d.input.pixel_fallback_line_height,
             );
         }
+        SettingsSection::Logs => {
+            ui.label(
+                "Recorded in memory for the Logs window (Ctrl/Cmd+Shift+L or \
+                 Cometty > Logs…). The level applies to cometty's own logs; \
+                 other crates are held to warnings unless the filter below \
+                 says otherwise. Terminal output on stderr still follows \
+                 RUST_LOG.",
+            );
+            ui.horizontal(|ui| {
+                let slot = begin_reset_slot(ui);
+                ui.label("Record level");
+                egui::ComboBox::from_id_salt("log-level")
+                    .selected_text(config.log.level.as_str())
+                    .show_ui(ui, |ui| {
+                        for name in LOG_LEVELS {
+                            if ui
+                                .selectable_value(&mut config.log.level, name.to_string(), name)
+                                .changed()
+                            {
+                                ed.mark();
+                            }
+                        }
+                    });
+                if end_reset_slot(ui, slot, "log level", config.log.level != d.log.level) {
+                    config.log.level = d.log.level.clone();
+                    ed.mark();
+                }
+            });
+            egui::CollapsingHeader::new("Advanced").show(ui, |ui| {
+                ed.text(ui, "Filter", &mut config.log.filter, &d.log.filter);
+                ui.label(
+                    egui::RichText::new(
+                        "RUST_LOG syntax, e.g. cometty=debug,wgpu=debug,warn \
+                         (empty = cometty=<level>,warn)",
+                    )
+                    .small()
+                    .weak(),
+                );
+                ed.usize(
+                    ui,
+                    "Buffer lines",
+                    &mut config.log.buffer_lines,
+                    MIN_LOG_BUFFER_LINES..=MAX_LOG_BUFFER_LINES,
+                    MIN_LOG_BUFFER_LINES,
+                    d.log.buffer_lines,
+                );
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::settings::AppStartup;
+
+    /// The logs section is the newest widget arm; a headless egui frame
+    /// proves it lays out (and that `SettingsSection::ALL` reaches it).
+    #[test]
+    fn logs_section_lays_out_headless() {
+        let mut settings = SettingsPanel::new(AppStartup {
+            config_path_override: None,
+            cli_theme: None,
+            config_corrupt: false,
+        });
+        settings.open = true;
+        settings.section = SettingsSection::Logs;
+        let mut config = Config::default();
+        let ctx = egui::Context::default();
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1024.0, 768.0),
+            )),
+            ..Default::default()
+        };
+        // First frame sizes the window, second paints it.
+        let mut output = ctx.run_ui(input(), |ui| {
+            let _ = show_settings(ui.ctx(), &mut settings, &mut config);
+        });
+        output.textures_delta.clear();
+        let mut output = ctx.run_ui(input(), |ui| {
+            let _ = show_settings(ui.ctx(), &mut settings, &mut config);
+        });
+        assert!(!output.shapes.is_empty(), "settings panel paints");
+        output.textures_delta.clear();
     }
 }

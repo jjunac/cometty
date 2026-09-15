@@ -20,39 +20,111 @@ pub struct Terminal {
     pending_response: Vec<u8>,
 }
 
-/// Extract an `OSC 0/1/2` window-title update from vte's split params.
+/// OSC numbers cometty interprets today (window/icon title); everything
+/// else is logged and ignored.
+const TITLE_OSC: [&[u8]; 3] = [b"0", b"1", b"2"];
+/// Payload characters shown in an OSC debug line before truncating: OSC 52
+/// base64 blobs and OSC 8 URLs can be kilobytes long.
+const OSC_SUMMARY_CHARS: usize = 120;
+
+/// Split vte's OSC params into `(number, payload)`.
 ///
 /// vte splits OSC content on `;`, so `ESC ] 0 ; foo BEL` arrives as
 /// `[b"0", b"foo"]` and a title containing `;` arrives as extra pieces
 /// (`[b"0", b"a", b"b"]` for `a;b`). A single unsplit param (`[b"0;foo"]`)
-/// is handled too for robustness.
-fn osc_title(params: &[&[u8]], max_chars: usize) -> Option<String> {
-    let (num, rest) = match params {
+/// is handled too for robustness. The payload is `None` when the sequence
+/// carried no `;` at all (`ESC ] 0 BEL`), which callers treat as absent.
+fn osc_parts(params: &[&[u8]]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    let (num, payload): (&[u8], Option<Vec<u8>>) = match params {
         [] => return None,
-        [single] => match single.iter().position(|&b| b == b';') {
-            Some(i) => (&single[..i], vec![&single[i + 1..]]),
-            None => return None,
-        },
-        [first, rest @ ..] => (*first, rest.to_vec()),
+        [single] => {
+            let single: &[u8] = single;
+            match single.iter().position(|&b| b == b';') {
+                Some(i) => (&single[..i], Some(single[i + 1..].to_vec())),
+                None => (single, None),
+            }
+        }
+        [first, rest @ ..] => {
+            let first: &[u8] = first;
+            // Rejoin the pieces the parser split on `;`.
+            let mut bytes = Vec::new();
+            for (i, piece) in rest.iter().enumerate() {
+                if i > 0 {
+                    bytes.push(b';');
+                }
+                bytes.extend_from_slice(piece);
+            }
+            (first, Some(bytes))
+        }
     };
-    if num != b"0" && num != b"1" && num != b"2" {
+    Some((num.to_vec(), payload))
+}
+
+/// Extract an `OSC 0/1/2` window-title update from vte's split params.
+fn osc_title(params: &[&[u8]], max_chars: usize) -> Option<String> {
+    let (num, payload) = osc_parts(params)?;
+    if !TITLE_OSC.contains(&num.as_slice()) {
         return None;
     }
-    if rest.is_empty() {
-        return Some(String::new());
-    }
-    // Rejoin multi-`;` titles split by the parser.
-    let mut bytes = Vec::new();
-    for (i, piece) in rest.iter().enumerate() {
-        if i > 0 {
-            bytes.push(b';');
-        }
-        bytes.extend_from_slice(piece);
-    }
-    let s = String::from_utf8_lossy(&bytes).trim().to_string();
+    // A bare `ESC ] 0 BEL` carries no payload: ignore it instead of
+    // clearing the title.
+    let payload = payload?;
+    let s = String::from_utf8_lossy(&payload).trim().to_string();
     let max_chars = max_chars.max(1);
-    let truncated: String = s.chars().take(max_chars).collect();
-    Some(truncated)
+    Some(s.chars().take(max_chars).collect())
+}
+
+/// Well-known OSC numbers, for readable log lines. Numbers cometty does
+/// not interpret are still named here when the meaning is standard.
+fn osc_name(num: &[u8]) -> Option<&'static str> {
+    Some(match num {
+        b"0" | b"1" | b"2" => "title",
+        b"4" => "palette",
+        b"7" => "cwd",
+        b"8" => "hyperlink",
+        b"9" | b"777" => "notification",
+        b"10" | b"11" | b"12" => "colors",
+        b"52" => "clipboard",
+        b"104" => "reset colors",
+        b"133" => "prompt marks",
+        b"1337" => "iTerm2",
+        _ => return None,
+    })
+}
+
+/// One-line rendering of a detected OSC sequence for the log panel, e.g.
+/// `2 (title): nvim | ~/dev` or `133 (prompt marks, unhandled): A`.
+/// Long payloads are truncated and control bytes escaped so a record stays
+/// a single, readable line.
+fn osc_summary(params: &[&[u8]]) -> String {
+    let Some((num, payload)) = osc_parts(params) else {
+        return "no parameters".to_string();
+    };
+    let mut summary = String::from_utf8_lossy(&num).into_owned();
+    summary.push_str(" (");
+    summary.push_str(osc_name(&num).unwrap_or("unknown"));
+    if !TITLE_OSC.contains(&num.as_slice()) {
+        summary.push_str(", unhandled");
+    }
+    summary.push(')');
+    let Some(payload) = payload else {
+        return summary;
+    };
+    summary.push_str(": ");
+    let text = String::from_utf8_lossy(&payload);
+    for (shown, ch) in text.chars().enumerate() {
+        if shown == OSC_SUMMARY_CHARS {
+            summary.push_str(&format!("… ({} bytes)", payload.len()));
+            break;
+        }
+        // Keep one line: control bytes (BEL, ESC, CR) become escapes.
+        if ch.is_control() {
+            summary.extend(ch.escape_debug());
+        } else {
+            summary.push(ch);
+        }
+    }
+    summary
 }
 
 impl Terminal {
@@ -617,7 +689,15 @@ impl vte::Perform for Terminal {
 
     fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
 
-    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+    fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        // Log every OSC at debug, handled or not: shells emit plenty that
+        // cometty ignores today (hyperlinks, prompt marks, clipboard, …)
+        // and the panel should answer "did the app even see it?".
+        log::debug!(
+            "OSC {} [{}]",
+            osc_summary(params),
+            if bell_terminated { "BEL" } else { "ST" }
+        );
         // Only window/icon titles (0/1/2) are tracked; they feed tab labels.
         if let Some(title) = osc_title(params, self.max_title_chars) {
             self.title = title;
@@ -981,6 +1061,45 @@ mod tests {
             Some("split;title".to_string())
         );
         assert_eq!(osc_title(&[b"0"], 256), None);
+    }
+
+    #[test]
+    fn osc_summary_names_and_payload() {
+        assert_eq!(osc_summary(&[b"2", b"nvim"]), "2 (title): nvim");
+        assert_eq!(osc_summary(&[b"0"]), "0 (title)");
+        assert_eq!(
+            osc_summary(&[b"4", b"1", b"index"]),
+            "4 (palette, unhandled): 1;index"
+        );
+        assert_eq!(
+            osc_summary(&[b"133", b"A"]),
+            "133 (prompt marks, unhandled): A"
+        );
+        assert_eq!(
+            osc_summary(&[b"9999", b"x"]),
+            "9999 (unknown, unhandled): x"
+        );
+        assert_eq!(osc_summary(&[]), "no parameters");
+        // Unsplit single-param form, as seen with some terminators.
+        assert_eq!(
+            osc_summary(&[b"7;file://host/tmp"]),
+            "7 (cwd, unhandled): file://host/tmp"
+        );
+    }
+
+    #[test]
+    fn osc_summary_is_one_line_and_truncated() {
+        let long = vec![b'x'; 4096];
+        let params: [&[u8]; 3] = [b"52", b"c", &long];
+        let summary = osc_summary(&params);
+        assert!(summary.starts_with("52 (clipboard, unhandled): c;"));
+        assert!(summary.contains("bytes)"), "truncation reports length");
+        assert!(summary.len() < 200, "bounded line, got {}", summary.len());
+
+        // Control bytes escape instead of breaking the log row.
+        let escaped = osc_summary(&[b"9", b"a\nb\x07c"]);
+        assert!(!escaped.contains('\n'));
+        assert!(escaped.contains("\\n"));
     }
 
     #[test]

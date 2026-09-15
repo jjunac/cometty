@@ -212,6 +212,7 @@ impl App {
         };
         self.tabs.push(Tab::new(terminal, pty));
         self.active = self.tabs.len() - 1;
+        log::debug!("spawned tab {} ({}x{})", self.tabs.len(), cols, rows);
         if let Some(r) = self.renderer.as_mut() {
             r.invalidate();
         }
@@ -259,6 +260,7 @@ impl App {
             return;
         }
         self.active = index;
+        log::debug!("switched to tab {index}");
         if let Some(r) = self.renderer.as_mut() {
             r.invalidate();
         }
@@ -281,6 +283,7 @@ impl App {
         if index >= self.tabs.len() {
             return self.tabs.is_empty();
         }
+        log::debug!("closed tab {index} ({} left)", self.tabs.len() - 1);
         self.tabs.remove(index);
         if self.tabs.is_empty() {
             return true;

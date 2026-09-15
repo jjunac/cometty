@@ -133,6 +133,15 @@ fn d_double_click_ms() -> u64 {
 fn d_word_extra() -> String {
     "_".to_string()
 }
+fn d_log_level() -> String {
+    "debug".to_string()
+}
+fn d_log_filter() -> String {
+    String::new()
+}
+fn d_log_buffer_lines() -> usize {
+    1000
+}
 fn d_key_c() -> String {
     "c".to_string()
 }
@@ -377,6 +386,54 @@ impl Default for SelectionConfig {
     }
 }
 
+/// Accepted range for `[log] buffer_lines` (also the settings panel's
+/// drag range). The in-app buffer only ever holds this many entries.
+pub const MIN_LOG_BUFFER_LINES: usize = 100;
+pub const MAX_LOG_BUFFER_LINES: usize = 100_000;
+/// Level other crates get in the default in-app filter: their warnings and
+/// errors still reach the panel, their debug/trace noise does not.
+pub const LOG_DEPS_LEVEL: &str = "warn";
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LogConfig {
+    /// Most verbose level recorded for cometty's own logs (`off`..`trace`).
+    /// Stderr output is independent (`RUST_LOG`).
+    #[serde(default = "d_log_level")]
+    pub level: String,
+    /// Raw `RUST_LOG`-style directives for the in-app buffer. Empty =
+    /// `cometty=<level>,<LOG_DEPS_LEVEL>`, i.e. app logs at `level` plus
+    /// dependency warnings. Set e.g. `cometty=debug,wgpu=debug,warn` to
+    /// pull a dependency's detail into the panel.
+    #[serde(default = "d_log_filter")]
+    pub filter: String,
+    /// In-app buffer capacity in entries; oldest entries drop first.
+    #[serde(default = "d_log_buffer_lines")]
+    pub buffer_lines: usize,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            level: d_log_level(),
+            filter: d_log_filter(),
+            buffer_lines: d_log_buffer_lines(),
+        }
+    }
+}
+
+impl LogConfig {
+    /// Directive string for the in-app buffer: [`Self::filter`] when set,
+    /// else our crate at [`Self::level`] plus dependency warnings.
+    pub fn filter_string(&self) -> String {
+        let filter = self.filter.trim();
+        if filter.is_empty() {
+            format!("cometty={},{}", self.level, LOG_DEPS_LEVEL)
+        } else {
+            filter.to_string()
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InputConfig {
     #[serde(default = "d_key_c")]
@@ -452,6 +509,8 @@ pub struct Config {
     pub selection: SelectionConfig,
     #[serde(default)]
     pub input: InputConfig,
+    #[serde(default)]
+    pub log: LogConfig,
 }
 
 impl Config {
@@ -527,6 +586,15 @@ impl Config {
         if self.window.height == 0 {
             self.window.height = d_window_height();
         }
+        // Canonical (lowercase) level name so the picker matches the file.
+        self.log.level = match self.log.level.parse::<log::LevelFilter>() {
+            Ok(level) => level.as_str().to_ascii_lowercase(),
+            Err(_) => d_log_level(),
+        };
+        self.log.buffer_lines = self
+            .log
+            .buffer_lines
+            .clamp(MIN_LOG_BUFFER_LINES, MAX_LOG_BUFFER_LINES);
         self
     }
 }
@@ -559,6 +627,9 @@ mod tests {
         assert_eq!(c.selection.double_click_ms, 400);
         assert_eq!(c.selection.word_extra_chars, "_");
         assert_eq!(c.input.lines_per_tick, 7.0);
+        assert_eq!(c.log.level, "debug");
+        assert_eq!(c.log.filter, "");
+        assert_eq!(c.log.buffer_lines, 1000);
     }
 
     #[test]
@@ -589,6 +660,37 @@ mod tests {
     fn corrupt_toml_fails_to_load() {
         assert!(toml::from_str::<Config>("not [valid").is_err());
         assert!(toml::from_str::<Config>("font = 42").is_err());
+    }
+
+    #[test]
+    fn log_section_sanitizes_level_and_clamps_lines() {
+        let c: Config = toml::from_str("[log]\nlevel=\"LOUD\"\nbuffer_lines=7\n").unwrap();
+        assert_eq!(
+            c.log.level, "LOUD",
+            "unknown names survive parsing for repair"
+        );
+        assert_eq!(c.log.buffer_lines, 7);
+        let s = c.sanitized();
+        assert_eq!(s.log.level, "debug");
+        assert_eq!(s.log.buffer_lines, MIN_LOG_BUFFER_LINES);
+
+        // Known names are canonicalized for the picker, whatever the case.
+        let c: Config = toml::from_str("[log]\nlevel=\"WARN\"\n").unwrap();
+        assert_eq!(c.sanitized().log.level, "warn");
+
+        let mut huge = Config::default();
+        huge.log.buffer_lines = usize::MAX;
+        assert_eq!(huge.sanitized().log.buffer_lines, MAX_LOG_BUFFER_LINES);
+    }
+
+    #[test]
+    fn log_filter_string_derives_from_level_until_overridden() {
+        let mut c = Config::default();
+        assert_eq!(c.log.filter_string(), "cometty=debug,warn");
+        c.log.level = "trace".to_string();
+        assert_eq!(c.log.filter_string(), "cometty=trace,warn");
+        c.log.filter = "  cometty=trace,wgpu=info  ".to_string();
+        assert_eq!(c.log.filter_string(), "cometty=trace,wgpu=info");
     }
 
     #[test]

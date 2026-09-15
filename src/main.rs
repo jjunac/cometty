@@ -3,6 +3,8 @@ mod config;
 mod grid;
 mod icon;
 mod input;
+mod logbuf;
+mod logging;
 mod menu;
 mod pty;
 mod renderer;
@@ -12,7 +14,7 @@ mod tabbar;
 mod term;
 mod theme;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
@@ -22,6 +24,7 @@ use winit::window::{Window, WindowId};
 
 use app::{App, AppStartup, UserEvent};
 use config::Config;
+use logbuf::LogBuffer;
 use renderer::Renderer;
 use theme::Theme;
 
@@ -159,21 +162,37 @@ impl ApplicationHandler<UserEvent> for App {
                     event_loop.exit();
                 }
             }
-            // Native menu bar: the Settings item opens the panel (open-only,
-            // not a toggle, matching platform convention; Esc / x still
-            // close). The Cmd+, accelerator is consumed by the OS menu on
-            // macOS, so this doesn't double-fire with the keyboard toggle.
-            UserEvent::MenuEvent(event) => {
-                if self
-                    .menu
-                    .as_ref()
-                    .is_some_and(|m| event.id == *m.settings_id())
+            // A record landed in the log ring: repaint only if the panel
+            // is on screen (the logger doesn't wake us otherwise).
+            UserEvent::LogAvailable => {
+                if self.logs.open
+                    && let Some(w) = self.window.as_ref()
                 {
+                    w.request_redraw();
+                }
+            }
+            // Native menu bar: Settings and Logs open their panel
+            // (open-only, not a toggle, matching platform convention;
+            // Esc / x still close). Both accelerators are consumed by the
+            // OS menu on macOS, so they don't double-fire with the
+            // keyboard toggles.
+            UserEvent::MenuEvent(event) => {
+                let Some(menu) = self.menu.as_ref() else {
+                    return;
+                };
+                let opens_settings = event.id == *menu.settings_id();
+                let opens_logs = event.id == *menu.logs_id();
+                if !opens_settings && !opens_logs {
+                    return;
+                }
+                if opens_settings {
                     self.settings.open = true;
                     self.settings.notice = None;
-                    if let Some(w) = self.window.as_ref() {
-                        w.request_redraw();
-                    }
+                } else {
+                    self.logs.show();
+                }
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
                 }
             }
         }
@@ -294,10 +313,28 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    // CLI first: `--help` / `--list-themes` return before any GUI setup.
     let Some((theme_override, config_path)) = resolve_cli()? else {
         return Ok(());
     };
+    // Logging is installed before the config is read, so load warnings
+    // land in the in-app panel. Stderr keeps env_logger's behavior
+    // (`RUST_LOG`, default error); the panel records by directives
+    // (`[log] filter` / `level`) instead of by bare level, so dependency
+    // debug/trace spam stays out (see `logging`).
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    let log_proxy = event_loop.create_proxy();
+    let log_defaults = config::LogConfig::default();
+    let log_buffer = Arc::new(Mutex::new(LogBuffer::new(log_defaults.buffer_lines)));
+    // Non-fatal: a logger that can't install (already set) must not stop
+    // the terminal from running.
+    if let Err(e) = logging::install(
+        log_buffer.clone(),
+        Some(log_proxy),
+        &log_defaults.filter_string(),
+    ) {
+        eprintln!("cometty: logging setup incomplete ({e:#}); continuing");
+    }
     // Missing file = silent defaults (first run); present-but-unreadable =
     // corrupt flag surfaced as a warning badge in the settings panel.
     // The GUI keeps session values and wins over later external edits.
@@ -314,11 +351,20 @@ fn main() -> anyhow::Result<()> {
         },
         _ => (Config::load(), false),
     };
+    // The ring's record filter and capacity come from the file. A typo in
+    // `[log] filter` keeps the default filter and says so (in the panel:
+    // the logger is already installed here).
+    if let Err(e) = logging::set_record_filter(&config.log.filter_string()) {
+        log::warn!("{e}");
+    }
+    log_buffer
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .set_capacity(config.log.buffer_lines);
     let cli_theme = theme_override.map(|t| t.name.to_string());
     let theme = theme_override
         .or_else(|| Theme::from_name(&config.theme.name))
         .unwrap_or_default();
-    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     // Forward native-menu activations into the event loop so the menu works
     // while the loop sleeps waiting for PTY output.
     let menu_proxy = event_loop.create_proxy();
@@ -335,6 +381,7 @@ fn main() -> anyhow::Result<()> {
             cli_theme,
             config_corrupt,
         },
+        log_buffer,
     );
     event_loop.run_app(&mut app)?;
     Ok(())

@@ -7,6 +7,7 @@
 pub mod clipboard;
 pub mod geometry;
 pub mod keyboard;
+pub mod logs;
 pub mod mouse;
 pub mod pty_io;
 pub mod redraw;
@@ -15,16 +16,18 @@ pub mod settings;
 pub mod tab;
 
 pub use geometry::compute_grid_size;
+pub use logs::LogsPanel;
 pub use settings::{AppStartup, SettingsPanel};
 pub use tab::Tab;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use winit::keyboard::ModifiersState;
 use winit::window::Window;
 
 use crate::config::Config;
+use crate::logbuf::LogBuffer;
 use crate::renderer::Renderer;
 use crate::theme::Theme;
 
@@ -32,6 +35,9 @@ use crate::theme::Theme;
 pub enum UserEvent {
     PtyAvailable,
     MenuEvent(muda::MenuEvent),
+    /// A record landed in the in-app log ring (only sent while the log
+    /// panel is open, see [`crate::logging::set_wake_enabled`]).
+    LogAvailable,
 }
 
 pub struct App {
@@ -54,6 +60,9 @@ pub struct App {
     pub(crate) clipboard: Option<arboard::Clipboard>,
     pub(crate) window_title: String,
     pub(crate) settings: SettingsPanel,
+    pub(crate) logs: LogsPanel,
+    /// Ring buffer for the log panel; the global logger also holds a clone.
+    pub(crate) log_buffer: Arc<Mutex<LogBuffer>>,
     pub(crate) menu: Option<crate::menu::NativeMenu>,
 }
 
@@ -63,6 +72,7 @@ impl App {
         theme: Theme,
         config: Config,
         startup: AppStartup,
+        log_buffer: Arc<Mutex<LogBuffer>>,
     ) -> Self {
         let window_title = config.window.title.clone();
         Self {
@@ -85,6 +95,8 @@ impl App {
             clipboard: None,
             window_title,
             settings: SettingsPanel::new(startup),
+            logs: LogsPanel::default(),
+            log_buffer,
             menu: None,
         }
     }
@@ -97,7 +109,10 @@ impl App {
             None => self.config.save(),
         };
         match result {
-            Ok(()) => self.settings.report_saved(),
+            Ok(()) => {
+                log::debug!("saved config to {}", self.settings.config_path_label());
+                self.settings.report_saved()
+            }
             Err(e) => {
                 let target = self.settings.config_path_label();
                 log::warn!("failed to save config to {target}: {e:#}");
@@ -146,6 +161,17 @@ impl App {
                 use winit::dpi::LogicalSize;
                 let _ = window.request_inner_size(LogicalSize::new(w, h));
             }
+        }
+        // Log filter + ring size apply to subsequent records immediately;
+        // the redraw at the end of this function repaints an open panel.
+        // Rejected filters (mid-typing) keep the previous one and are
+        // surfaced in the panel header, not logged per keystroke.
+        if actions.log {
+            let _ = crate::logging::set_record_filter(&self.config.log.filter_string());
+            self.log_buffer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .set_capacity(self.config.log.buffer_lines);
         }
         self.sync_window_title();
         if let Some(w) = self.window.as_ref() {

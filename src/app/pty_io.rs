@@ -117,6 +117,9 @@ impl App {
         );
         for tab in &mut self.tabs {
             if cols != tab.terminal.cols() || rows != tab.terminal.rows() {
+                log::debug!(
+                    "grid resized to {cols}x{rows} (window {width}x{height} @ {scale}x, term {term_h}px)"
+                );
                 tab.terminal.resize(cols, rows);
                 tab.pty.resize(cols, rows);
                 tab.selection = None;

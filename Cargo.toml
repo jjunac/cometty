@@ -20,6 +20,10 @@ pollster = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 log = "0.4"
 env_logger = "0.11"
+# Directive filters for the in-app log panel (the crate env_logger uses
+# internally): the ring records by target (`cometty=debug,warn`) instead of
+# recording every dependency's debug/trace spam.
+env_filter = "2"
 unicode-width = "0.2"
 unicode-segmentation = "1"
 bytemuck = { version = "1", features = ["derive"] }

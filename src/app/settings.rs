@@ -24,10 +24,11 @@ pub enum SettingsSection {
     Scrollbar,
     Tabbar,
     Input,
+    Logs,
 }
 
 impl SettingsSection {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Theme,
         Self::Font,
         Self::Window,
@@ -38,6 +39,7 @@ impl SettingsSection {
         Self::Scrollbar,
         Self::Tabbar,
         Self::Input,
+        Self::Logs,
     ];
 
     pub fn title(self) -> &'static str {
@@ -52,6 +54,7 @@ impl SettingsSection {
             Self::Scrollbar => "Scrollbar",
             Self::Tabbar => "Tab bar",
             Self::Input => "Input",
+            Self::Logs => "Logs",
         }
     }
 }
@@ -142,6 +145,7 @@ pub struct ApplyActions {
     pub window_size: bool,
     pub terminal: bool,
     pub chrome: bool,
+    pub log: bool,
     pub any: bool,
 }
 
@@ -157,6 +161,7 @@ pub fn diff_actions(old: &Config, new: &Config) -> ApplyActions {
         || old.cursor != new.cursor
         || old.selection != new.selection
         || old.input != new.input;
+    let log = old.log != new.log;
     let any = old != new;
     ApplyActions {
         theme,
@@ -164,6 +169,7 @@ pub fn diff_actions(old: &Config, new: &Config) -> ApplyActions {
         window_size,
         terminal,
         chrome,
+        log,
         any,
     }
 }
@@ -182,6 +188,7 @@ pub fn reset_section(config: &mut Config, section: SettingsSection) {
         SettingsSection::Scrollbar => config.scrollbar = defaults.scrollbar,
         SettingsSection::Tabbar => config.tabbar = defaults.tabbar,
         SettingsSection::Input => config.input = defaults.input,
+        SettingsSection::Logs => config.log = defaults.log,
     }
 }
 
@@ -193,6 +200,9 @@ pub fn reset_all(config: &mut Config) {
 pub const KNOWN_THEMES: [&str; 3] = ["tokyo-night", "vscode", "tomorrow-night"];
 pub const FONT_FAMILIES: [&str; 5] = ["monospace", "sans", "serif", "cursive", "fantasy"];
 pub const CURSOR_SHAPES: [&str; 3] = ["block", "underline", "bar"];
+/// Values offered for `[log] level` (least to most verbose). Parsing is
+/// `log`'s own, so these names are just the picker's list.
+pub const LOG_LEVELS: [&str; 6] = ["off", "error", "warn", "info", "debug", "trace"];
 
 pub fn is_known_theme(name: &str) -> bool {
     KNOWN_THEMES.contains(&name)
@@ -406,6 +416,11 @@ mod tests {
         new = old.clone();
         new.tabbar.height = 48.0;
         assert!(diff_actions(&old, &new).chrome);
+        new = old.clone();
+        new.log.level = "trace".to_string();
+        let a = diff_actions(&old, &new);
+        assert!(a.log && a.any);
+        assert!(!a.chrome && !a.font && !a.theme);
     }
 
     #[test]

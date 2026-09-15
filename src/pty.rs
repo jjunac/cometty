@@ -44,13 +44,18 @@ impl PtySession {
         } else {
             config.shell.term.clone()
         };
-        cmd.env("TERM", term);
+        cmd.env("TERM", &term);
         cmd.cwd(configured_cwd(&config.shell));
 
         let child = pair
             .slave
             .spawn_command(cmd)
             .map_err(|e| anyhow::anyhow!("failed to spawn {:?}: {:#}", shell, e))?;
+        log::debug!(
+            "pty spawned: {shell} at {}x{} (term={term})",
+            size.cols,
+            size.rows
+        );
 
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
