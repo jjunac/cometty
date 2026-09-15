@@ -65,6 +65,41 @@ pub(crate) fn bar_cursor_width(cell_width: f32, cursor: &crate::config::CursorCo
     (cell_width * cursor.bar_width_factor).max(1.0)
 }
 
+/// Snap a column span to device pixels: both edges are rounded from the
+/// grid origin so adjacent cells share the exact same edge value.
+/// Returns `(x0, x1)` with `x1 > x0` (at least 1px).
+pub(crate) fn snap_col_edges(col: usize, span: usize, cell_width: f32) -> (f32, f32) {
+    let cw = if cell_width.is_finite() && cell_width > 0.0 {
+        cell_width
+    } else {
+        1.0
+    };
+    let x0 = (col as f32 * cw).round();
+    let mut x1 = ((col + span.max(1)) as f32 * cw).round();
+    if x1 <= x0 {
+        x1 = x0 + 1.0;
+    }
+    (x0, x1)
+}
+
+/// Snap a row to device pixels, including the (possibly fractional)
+/// tab-bar offset. Adjacent rows share the exact same edge value.
+/// Returns `(y0, y1)` with `y1 > y0` (at least 1px).
+pub(crate) fn snap_row_edges(row: usize, y_off: f32, line_height: f32) -> (f32, f32) {
+    let lh = if line_height.is_finite() && line_height > 0.0 {
+        line_height
+    } else {
+        1.0
+    };
+    let off = if y_off.is_finite() { y_off } else { 0.0 };
+    let y0 = (off + row as f32 * lh).round();
+    let mut y1 = (off + (row + 1) as f32 * lh).round();
+    if y1 <= y0 {
+        y1 = y0 + 1.0;
+    }
+    (y0, y1)
+}
+
 /// Hit-test a normalized view-space selection `((x0, y0), (x1, y1))`.
 pub(crate) fn in_view_selection(
     sel: Option<((usize, usize), (usize, usize))>,
@@ -129,9 +164,12 @@ impl super::Renderer {
     }
 
     /// Fill the scratch vertex buffer with background quads for cells that
-    /// differ from the theme background (plus cursor + selection + underline/
-    /// strike/overline), ensure GPU capacity, and upload. Returns the vertex
-    /// count to draw.
+    /// differ from the theme background (plus block elements, cursor,
+    /// selection, underline/strike/overline), ensure GPU capacity, and
+    /// upload. Returns the vertex count to draw.
+    ///
+    /// Every rect is snapped to whole device pixels with shared edges, so
+    /// neighbouring cells tile without hairline seams.
     pub(crate) fn paint_bg(
         &mut self,
         grid_rows: &[Vec<crate::grid::Cell>],
@@ -152,7 +190,10 @@ impl super::Renderer {
         let bar_w = bar_cursor_width(self.cell_width, &self.user_config.cursor);
         let pad = self.scale_factor.max(1.0);
         for (y, row) in grid_rows.iter().enumerate() {
-            let py = y_off + y as f32 * self.line_height;
+            // Cell rects snap to whole device pixels; adjacent cells share
+            // exact edges, so row/column backgrounds tile without seams.
+            let (py, row_bottom) = snap_row_edges(y, y_off, self.line_height);
+            let row_h = row_bottom - py;
             let mut x = 0usize;
             while x < row.len() {
                 let cell = &row[x];
@@ -162,8 +203,8 @@ impl super::Renderer {
                     continue;
                 }
                 let span = if cell.width == 2 { 2 } else { 1 };
-                let w_px = self.cell_width * span as f32;
-                let px = x as f32 * self.cell_width;
+                let (px, cell_right) = snap_col_edges(x, span, self.cell_width);
+                let w_px = cell_right - px;
                 // A wide cluster is selected when either half is selected.
                 let is_selected = (0..span).any(|d| in_view_selection(selection, x + d, y));
                 // Cursor on either half of a wide cluster highlights the
@@ -181,7 +222,7 @@ impl super::Renderer {
                         px,
                         py,
                         w_px,
-                        self.line_height,
+                        row_h,
                         self.theme.selection.as_linear_f32_array(),
                     );
                 } else if eff_bg != self.theme.background {
@@ -190,33 +231,47 @@ impl super::Renderer {
                         px,
                         py,
                         w_px,
-                        self.line_height,
+                        row_h,
                         eff_bg.as_linear_f32_array(),
                     );
+                }
+                // Block elements are rects, not font glyphs: fonts fill only
+                // their line box, which is shorter than the cell, so stacked
+                // blocks (`btop`, `chafa`, …) would leave gaps between rows.
+                // The matching glyph is skipped in `text` (shaped as a space).
+                let fg_col = eff_fg.as_linear_f32_array();
+                if cell.width == 1
+                    && cell.extra.is_none()
+                    && let Some(rects) = super::blocks::block_rects(cell.ch)
+                {
+                    let cell_rect = (px, py, cell_right, row_bottom);
+                    for rect in rects {
+                        let (rx0, ry0, rx1, ry1) = super::blocks::snap_rect(cell_rect, *rect);
+                        self.push_quad(&mut verts, rx0, ry0, rx1 - rx0, ry1 - ry0, fg_col);
+                    }
                 }
                 // Text decorations: strips in effective fg unless an
                 // explicit underline color (`SGR 58`) overrides. Curly /
                 // dotted / dashed render as single for now (stored
                 // distinctly in the cell for future shaping).
                 let deco_col = cell.underline_color.unwrap_or(eff_fg).as_linear_f32_array();
-                let fg_col = eff_fg.as_linear_f32_array();
                 match cell.underline {
                     crate::grid::UnderlineStyle::None => {}
                     crate::grid::UnderlineStyle::Double => {
-                        let lower = py + self.line_height - underline_h - pad;
+                        let lower = row_bottom - underline_h - pad;
                         let upper = lower - underline_h - pad;
                         let upper = upper.max(py);
                         self.push_quad(&mut verts, px, lower, w_px, underline_h, deco_col);
                         self.push_quad(&mut verts, px, upper, w_px, underline_h, deco_col);
                     }
                     _ if cell.underline.is_active() => {
-                        let uy = py + self.line_height - underline_h - pad;
+                        let uy = row_bottom - underline_h - pad;
                         self.push_quad(&mut verts, px, uy, w_px, underline_h, deco_col);
                     }
                     _ => {}
                 }
                 if cell.strikethrough {
-                    let sy = py + self.line_height * 0.5 - underline_h * 0.5;
+                    let sy = py + row_h * 0.5 - underline_h * 0.5;
                     self.push_quad(&mut verts, px, sy, w_px, underline_h, fg_col);
                 }
                 if cell.overline {
@@ -228,10 +283,10 @@ impl super::Renderer {
                     let cursor_col = self.theme.foreground.as_linear_f32_array();
                     match cursor_shape {
                         crate::grid::CursorShape::Block => {
-                            self.push_quad(&mut verts, px, py, w_px, self.line_height, cursor_col);
+                            self.push_quad(&mut verts, px, py, w_px, row_h, cursor_col);
                         }
                         crate::grid::CursorShape::Underline => {
-                            let uy = py + self.line_height - cursor_underline_h - pad;
+                            let uy = row_bottom - cursor_underline_h - pad;
                             self.push_quad(
                                 &mut verts,
                                 px,
@@ -242,7 +297,7 @@ impl super::Renderer {
                             );
                         }
                         crate::grid::CursorShape::Bar => {
-                            self.push_quad(&mut verts, px, py, bar_w, self.line_height, cursor_col);
+                            self.push_quad(&mut verts, px, py, bar_w, row_h, cursor_col);
                         }
                     }
                 }

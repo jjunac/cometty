@@ -33,7 +33,19 @@ pub(crate) fn build_buffer_lines(
             if cell.width == 0 {
                 continue;
             }
-            clusters.push((col, cell.cluster()));
+            // Block elements are painted by the renderer as cell-sized rects
+            // (see `renderer::blocks`); shape a space in their place so the
+            // font's shorter line box can't leave gaps between rows.
+            let drawn =
+                cell.width == 1 && cell.extra.is_none() && super::blocks::is_drawable(cell.ch);
+            clusters.push((
+                col,
+                if drawn {
+                    " ".to_string()
+                } else {
+                    cell.cluster()
+                },
+            ));
         }
         // Trim trailing blank cells (single-space narrow cells only; wide
         // clusters and ZWJ sequences are never whitespace-trimmed).

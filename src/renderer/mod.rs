@@ -1,4 +1,5 @@
 mod background;
+mod blocks;
 mod overlay;
 mod settings_ui;
 mod text;
@@ -633,6 +634,35 @@ mod tests {
         let lines = super::text::build_buffer_lines(&rows, &theme, &font);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text(), "中a");
+    }
+
+    #[test]
+    fn buffer_lines_shape_block_elements_as_spaces() {
+        // Block elements are painted by the renderer as cell-sized rects, so
+        // their glyphs must not be shaped (font glyphs leave row gaps).
+        let theme = Theme::default();
+        let font = crate::config::FontConfig::default();
+        let block = Cell {
+            ch: '█',
+            ..Default::default()
+        };
+        let half = Cell {
+            ch: '▀',
+            ..Default::default()
+        };
+        let a = Cell {
+            ch: 'a',
+            ..Default::default()
+        };
+        let shade = Cell {
+            ch: '░',
+            ..Default::default()
+        };
+        let rows = vec![vec![block, half, a, shade]];
+        let lines = super::text::build_buffer_lines(&rows, &theme, &font);
+        // `█` and `▀` become spaces (drawn as rects); the shade keeps its
+        // glyph (a dither pattern, nothing solid to draw).
+        assert_eq!(lines[0].text(), "  a░");
     }
 
     #[test]
