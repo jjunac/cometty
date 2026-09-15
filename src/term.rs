@@ -11,6 +11,9 @@ pub struct Terminal {
     // Last OSC 0/1/2 title set by the shell; empty when none seen.
     // Drives tab-bar labels (falls back to `Tab N`).
     title: String,
+    // Last OSC 7 working directory set by the shell, when it reports one.
+    // Fallback source for the `$cwd` label variable.
+    cwd: Option<String>,
     max_title_chars: usize,
     // Last graphic character emitted via `print`, for `REP` (`CSI n b`).
     // Control sequences never clear it; only a new graphic updates it.
@@ -20,9 +23,11 @@ pub struct Terminal {
     pending_response: Vec<u8>,
 }
 
-/// OSC numbers cometty interprets today (window/icon title); everything
-/// else is logged and ignored.
+/// OSC numbers cometty interprets today (window/icon title + cwd);
+/// everything else is logged and ignored.
 const TITLE_OSC: [&[u8]; 3] = [b"0", b"1", b"2"];
+/// Every OSC number cometty acts on; the rest are marked unhandled in logs.
+const HANDLED_OSC: [&[u8]; 4] = [b"0", b"1", b"2", b"7"];
 /// Payload characters shown in an OSC debug line before truncating: OSC 52
 /// base64 blobs and OSC 8 URLs can be kilobytes long.
 const OSC_SUMMARY_CHARS: usize = 120;
@@ -74,6 +79,50 @@ fn osc_title(params: &[&[u8]], max_chars: usize) -> Option<String> {
     Some(s.chars().take(max_chars).collect())
 }
 
+/// Extract an `OSC 7` working-directory update (`file://host/path`).
+///
+/// The authority is ignored (empty, `localhost`, or a remote host name —
+/// cometty only ever shows a local shell's directory). Non-`file` schemes
+/// and relative paths are rejected.
+fn osc_cwd(params: &[&[u8]], max_chars: usize) -> Option<String> {
+    let (num, payload) = osc_parts(params)?;
+    if num.as_slice() != b"7" {
+        return None;
+    }
+    let payload = payload?;
+    let uri = String::from_utf8_lossy(&payload);
+    let rest = uri.strip_prefix("file://")?;
+    let path = &rest[rest.find('/')?..];
+    let decoded = percent_decode(path);
+    if !decoded.starts_with('/') {
+        return None;
+    }
+    let max_chars = max_chars.max(1);
+    Some(decoded.chars().take(max_chars).collect())
+}
+
+/// Decode `%XX` escapes (paths with spaces, non-UTF-8 bytes, …). Invalid
+/// escapes are kept literally.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Well-known OSC numbers, for readable log lines. Numbers cometty does
 /// not interpret are still named here when the meaning is standard.
 fn osc_name(num: &[u8]) -> Option<&'static str> {
@@ -103,7 +152,7 @@ fn osc_summary(params: &[&[u8]]) -> String {
     let mut summary = String::from_utf8_lossy(&num).into_owned();
     summary.push_str(" (");
     summary.push_str(osc_name(&num).unwrap_or("unknown"));
-    if !TITLE_OSC.contains(&num.as_slice()) {
+    if !HANDLED_OSC.contains(&num.as_slice()) {
         summary.push_str(", unhandled");
     }
     summary.push(')');
@@ -144,6 +193,7 @@ impl Terminal {
             parser: Parser::new(),
             pending_wrap: false,
             title: String::new(),
+            cwd: None,
             max_title_chars: config.terminal.max_title_chars.max(1),
             last_graphic: None,
             pending_response: Vec::new(),
@@ -153,6 +203,13 @@ impl Terminal {
     /// Last `OSC 0/1/2` title reported by the shell, or empty.
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// Last `OSC 7` working directory reported by the shell, when any.
+    /// Fallback source for the tab label's `$cwd` (the kernel-reported
+    /// foreground-process cwd wins when available).
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
     }
 
     #[allow(dead_code)]
@@ -255,6 +312,11 @@ impl Terminal {
         let keep = self.title.chars().count().min(self.max_title_chars);
         if keep < self.title.chars().count() {
             self.title = self.title.chars().take(keep).collect();
+        }
+        if let Some(cwd) = self.cwd.as_ref()
+            && cwd.chars().count() > self.max_title_chars
+        {
+            self.cwd = Some(cwd.chars().take(self.max_title_chars).collect());
         }
     }
 
@@ -680,6 +742,7 @@ impl vte::Perform for Terminal {
                     self.grid.clear_all();
                     self.grid.set_cursor(0, 0);
                     self.title.clear();
+                    self.cwd = None;
                     self.last_graphic = None;
                 }
                 _ => {}
@@ -698,9 +761,13 @@ impl vte::Perform for Terminal {
             osc_summary(params),
             if bell_terminated { "BEL" } else { "ST" }
         );
-        // Only window/icon titles (0/1/2) are tracked; they feed tab labels.
+        // Only window/icon titles (0/1/2) and cwd (7) are tracked; the
+        // former feeds tab labels, the latter the `$cwd` fallback.
         if let Some(title) = osc_title(params, self.max_title_chars) {
             self.title = title;
+        }
+        if let Some(cwd) = osc_cwd(params, self.max_title_chars) {
+            self.cwd = Some(cwd);
         }
     }
 }
@@ -1064,6 +1131,48 @@ mod tests {
     }
 
     #[test]
+    fn osc_cwd_parser_shapes() {
+        assert_eq!(
+            osc_cwd(&[b"7", b"file://localhost/Users/x/dev"], 256),
+            Some("/Users/x/dev".to_string())
+        );
+        assert_eq!(
+            osc_cwd(&[b"7", b"file:///tmp"], 256),
+            Some("/tmp".to_string())
+        );
+        // Percent escapes decode; spaces survive.
+        assert_eq!(
+            osc_cwd(&[b"7", b"file://host/tmp/a%20b%2Fc"], 256),
+            Some("/tmp/a b/c".to_string())
+        );
+        // Non-file schemes, relative paths, and other OSC numbers are ignored.
+        assert_eq!(osc_cwd(&[b"7", b"http://host/tmp"], 256), None);
+        assert_eq!(osc_cwd(&[b"7", b"file://host"], 256), None);
+        assert_eq!(osc_cwd(&[b"0", b"hi"], 256), None);
+        assert_eq!(osc_cwd(&[b"7"], 256), None);
+        // Truncation mirrors titles.
+        assert_eq!(
+            osc_cwd(&[b"7", b"file://host/abcde"], 3),
+            Some("/ab".to_string())
+        );
+    }
+
+    #[test]
+    fn osc_cwd_is_stored_for_labels() {
+        let mut t = test_terminal(10, 2);
+        assert_eq!(t.cwd(), None);
+        feed_str(&mut t, "\x1b]7;file://localhost/Users/x/dev\x07");
+        assert_eq!(t.cwd(), Some("/Users/x/dev"));
+        // A bare OSC 7 keeps the last directory instead of clearing it.
+        feed_str(&mut t, "\x1b]7\x07");
+        assert_eq!(t.cwd(), Some("/Users/x/dev"));
+        // Full reset (ESC c) drops it along with the title.
+        feed_str(&mut t, "\x1bc");
+        assert_eq!(t.cwd(), None);
+        assert_eq!(t.title(), "");
+    }
+
+    #[test]
     fn osc_summary_names_and_payload() {
         assert_eq!(osc_summary(&[b"2", b"nvim"]), "2 (title): nvim");
         assert_eq!(osc_summary(&[b"0"]), "0 (title)");
@@ -1083,7 +1192,7 @@ mod tests {
         // Unsplit single-param form, as seen with some terminators.
         assert_eq!(
             osc_summary(&[b"7;file://host/tmp"]),
-            "7 (cwd, unhandled): file://host/tmp"
+            "7 (cwd): file://host/tmp"
         );
     }
 

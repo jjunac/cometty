@@ -437,6 +437,7 @@ dependencies = [
  "env_logger",
  "glyphon",
  "image",
+ "libc",
  "log",
  "muda",
  "objc2 0.6.4",

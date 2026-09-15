@@ -8,12 +8,23 @@
 use std::time::Instant;
 
 use crate::config::{Config, TabbarConfig};
+use crate::procinfo;
 use crate::pty::PtySession;
 use crate::scrollbar::ScrollbarUi;
 use crate::selection::Selection;
 use crate::term::Terminal;
 
 use super::{App, UserEvent};
+
+/// Kernel facts for the `$command` / `$cwd` label variables, refreshed
+/// only while the tab's PTY is producing output (see
+/// [`Tab::refresh_title`]). Kept here so label rendering stays syscall-free.
+#[derive(Default)]
+pub(crate) struct Foreground {
+    pgid: Option<i32>,
+    command: Option<String>,
+    cwd: Option<String>,
+}
 
 /// A single terminal tab.
 pub struct Tab {
@@ -23,6 +34,7 @@ pub struct Tab {
     pub(crate) selecting: bool,
     pub(crate) scrollbar: ScrollbarUi,
     pub(crate) is_alt: bool,
+    pub(crate) foreground: Foreground,
 }
 
 impl Tab {
@@ -34,6 +46,29 @@ impl Tab {
             selecting: false,
             scrollbar: ScrollbarUi::new(Instant::now()),
             is_alt: false,
+            foreground: Foreground::default(),
+        }
+    }
+
+    /// Re-query the foreground process group behind `$command` / `$cwd`.
+    ///
+    /// Called after this tab's PTY produced output: a job taking or
+    /// releasing the terminal and a shell `cd` both echo through the tty,
+    /// so the foreground pid and cwd are re-read exactly when they can
+    /// change. `command` is only resolved when the pid changed; `cwd` is
+    /// re-read every time (same pid, different directory). Failed queries
+    /// keep the last known value: a job that exited between `tcgetpgrp`
+    /// and the lookup must not blank the label for a frame.
+    pub(crate) fn refresh_title(&mut self) {
+        let pgid = self.pty.foreground_pgid();
+        if pgid != self.foreground.pgid {
+            self.foreground.pgid = pgid;
+            if let Some(command) = pgid.and_then(procinfo::command) {
+                self.foreground.command = Some(command);
+            }
+        }
+        if let Some(cwd) = pgid.and_then(procinfo::cwd) {
+            self.foreground.cwd = Some(cwd);
         }
     }
 }
@@ -67,18 +102,144 @@ pub fn term_height_px(window_h: u32, scale: f32, tab_count: usize, config: &Tabb
     (window_h as f32 - tab_bar_px(scale, tab_count, config)).max(1.0) as u32
 }
 
-/// Label for tab `index` (0-based): the shell's OSC title when set,
-/// otherwise `Tab N`. Long titles are truncated with an ellipsis.
-pub fn display_title(index: usize, osc_title: &str, config: &TabbarConfig) -> String {
-    if osc_title.is_empty() {
-        return format!("Tab {}", index + 1);
+/// Label inputs for one tab, resolved from the terminal and the kernel.
+pub struct TitleVars<'a> {
+    /// Shell-reported `OSC 0/1/2` title (empty when the shell sets none).
+    pub title: &'a str,
+    /// Foreground process basename, when the kernel could report one.
+    pub command: Option<&'a str>,
+    /// Working directory (kernel-reported, else `OSC 7`), `~`-shortened.
+    pub cwd: Option<&'a str>,
+    /// 0-based tab index; the `$tab` variable is 1-based.
+    pub tab: usize,
+}
+
+/// Render `[tabbar] title_format` for one tab.
+///
+/// Literal text (separators, brackets, spacing) is preserved verbatim;
+/// `$title` / `$command` / `$cwd` / `$tab` are interpolated and missing
+/// sources expand to nothing. When the template references variables but
+/// none has a value (a fresh tab before its shell reports anything, or a
+/// platform without process introspection), the label falls back to
+/// `Tab N`; `max_label_chars` truncation is applied last.
+pub fn format_title(vars: &TitleVars, config: &TabbarConfig) -> String {
+    let tab = (vars.tab + 1).to_string();
+    let rendered = interpolate(
+        &config.title_format,
+        &[
+            ("title", vars.title),
+            ("command", vars.command.unwrap_or("")),
+            ("cwd", vars.cwd.unwrap_or("")),
+            ("tab", tab.as_str()),
+        ],
+    );
+    let text = rendered.text.trim();
+    if text.is_empty() || (rendered.referenced > 0 && rendered.filled == 0) {
+        return format!("Tab {}", vars.tab + 1);
     }
-    let max_chars = config.max_label_chars.max(1);
-    let count = osc_title.chars().count();
-    if count <= max_chars {
-        return osc_title.to_string();
+    truncate_label(text, config.max_label_chars)
+}
+
+/// [`interpolate`] result: rendered text plus how many known variables the
+/// template referenced and how many of those had a non-empty value.
+struct Rendered {
+    text: String,
+    referenced: usize,
+    filled: usize,
+}
+
+/// Substitute `$name` and `${name}` tokens from `vars`.
+///
+/// `${name}` delimits a variable when more text follows (`${tab}st`);
+/// `$$` is a literal `$`. Unknown names and lone `$`s stay literal, so a
+/// typo shows up in the label instead of vanishing. Substitution is a
+/// single pass: a `$` inside a value is never re-scanned.
+fn interpolate(template: &str, vars: &[(&str, &str)]) -> Rendered {
+    let lookup = |name: &str| {
+        vars.iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| *value)
+    };
+    let chars: Vec<char> = template.chars().collect();
+    let mut out = Rendered {
+        text: String::with_capacity(template.len()),
+        referenced: 0,
+        filled: 0,
+    };
+    let push_var = |out: &mut Rendered, value: &str| {
+        out.referenced += 1;
+        if !value.is_empty() {
+            out.filled += 1;
+        }
+        out.text.push_str(value);
+    };
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '$' {
+            out.text.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        match chars.get(i + 1) {
+            Some('$') => {
+                out.text.push('$');
+                i += 2;
+            }
+            Some('{') => match chars[i + 2..].iter().position(|&c| c == '}') {
+                Some(offset) => {
+                    let name: String = chars[i + 2..i + 2 + offset].iter().collect();
+                    match lookup(&name) {
+                        Some(value) => push_var(&mut out, value),
+                        None => out.text.extend(&chars[i..=i + 2 + offset]),
+                    }
+                    i += offset + 3;
+                }
+                // Unterminated `${`: keep the `$` literal, scan on.
+                None => {
+                    out.text.push('$');
+                    i += 1;
+                }
+            },
+            Some(_) => {
+                let start = i + 1;
+                let mut end = start;
+                while let Some(&c) = chars.get(end) {
+                    if c == '_' || c.is_ascii_alphanumeric() {
+                        end += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let ident: String = chars[start..end].iter().collect();
+                let ident_starts = ident.starts_with(|c: char| c == '_' || c.is_ascii_alphabetic());
+                if ident_starts {
+                    match lookup(&ident) {
+                        Some(value) => push_var(&mut out, value),
+                        None => out.text.extend(&chars[i..end]),
+                    }
+                    i = end;
+                } else {
+                    // `$5`, `$-`, … stay literal.
+                    out.text.push('$');
+                    i += 1;
+                }
+            }
+            None => {
+                out.text.push('$');
+                i += 1;
+            }
+        }
     }
-    let kept: String = osc_title.chars().take(max_chars - 1).collect();
+    out
+}
+
+/// Ellipsis-truncate to `max_chars` characters (at least one).
+fn truncate_label(label: &str, max_chars: usize) -> String {
+    let max_chars = max_chars.max(1);
+    if label.chars().count() <= max_chars {
+        return label.to_string();
+    }
+    let kept: String = label.chars().take(max_chars - 1).collect();
     format!("{kept}…")
 }
 
@@ -130,7 +291,25 @@ impl App {
         self.tabs
             .iter()
             .enumerate()
-            .map(|(i, t)| display_title(i, t.terminal.title(), &self.config.tabbar))
+            .map(|(i, t)| {
+                // Kernel-reported cwd, else the shell's OSC 7 (shortened
+                // at the last moment so the cache keeps raw paths).
+                let cwd = t
+                    .foreground
+                    .cwd
+                    .as_deref()
+                    .or_else(|| t.terminal.cwd())
+                    .map(procinfo::shorten_home);
+                format_title(
+                    &TitleVars {
+                        title: t.terminal.title(),
+                        command: t.foreground.command.as_deref(),
+                        cwd: cwd.as_deref(),
+                        tab: i,
+                    },
+                    &self.config.tabbar,
+                )
+            })
             .collect()
     }
 
@@ -210,6 +389,9 @@ impl App {
                 return false;
             }
         };
+        // The label stays `Tab N` until the first prompt output triggers
+        // `refresh_title`: a spawn-time query would race the child's exec
+        // and may report cometty's own image as `$command`.
         self.tabs.push(Tab::new(terminal, pty));
         self.active = self.tabs.len() - 1;
         log::debug!("spawned tab {} ({}x{})", self.tabs.len(), cols, rows);
@@ -310,26 +492,179 @@ mod tests {
         TabbarConfig::default()
     }
 
+    fn vars<'a>(
+        title: &'a str,
+        command: Option<&'a str>,
+        cwd: Option<&'a str>,
+        tab: usize,
+    ) -> TitleVars<'a> {
+        TitleVars {
+            title,
+            command,
+            cwd,
+            tab,
+        }
+    }
+
+    #[test]
+    fn default_format_uses_command_and_cwd() {
+        let cfg = cfg();
+        assert_eq!(
+            format_title(&vars("", Some("zsh"), Some("~/dev"), 0), &cfg),
+            "zsh | ~/dev"
+        );
+        assert_eq!(
+            format_title(&vars("", Some("cargo"), Some("~/dev/cometty"), 1), &cfg),
+            "cargo | ~/dev/cometty"
+        );
+    }
+
     #[test]
     fn title_falls_back_to_tab_number() {
-        let cfg = cfg();
-        assert_eq!(display_title(0, "", &cfg), "Tab 1");
-        assert_eq!(display_title(2, "", &cfg), "Tab 3");
+        // Templates that render to nothing fall back: `$title` alone on a
+        // shell that never sets one, or a blank template.
+        let cfg = TabbarConfig {
+            title_format: "$title".to_string(),
+            ..TabbarConfig::default()
+        };
+        assert_eq!(format_title(&vars("", None, None, 0), &cfg), "Tab 1");
+        assert_eq!(format_title(&vars("", None, None, 2), &cfg), "Tab 3");
     }
 
     #[test]
-    fn short_osc_title_passes_through() {
+    fn osc_title_is_opt_in() {
+        // The default template doesn't mention `$title`, so it's ignored.
         let cfg = cfg();
-        assert_eq!(display_title(0, "nvim | ~/dev", &cfg), "nvim | ~/dev");
+        assert_eq!(
+            format_title(&vars("nvim | ~/dev", Some("nvim"), Some("~/dev"), 0), &cfg),
+            "nvim | ~/dev"
+        );
+        // ...but it can be composed explicitly.
+        let cfg = TabbarConfig {
+            title_format: "$title | $command | $cwd".to_string(),
+            ..TabbarConfig::default()
+        };
+        assert_eq!(
+            format_title(&vars("nvim | ~/dev", Some("nvim"), Some("~/dev"), 0), &cfg),
+            "nvim | ~/dev | nvim | ~/dev"
+        );
     }
 
     #[test]
-    fn long_osc_title_truncates_with_ellipsis() {
+    fn literal_text_is_preserved() {
+        let brackets = TabbarConfig {
+            title_format: "$command [$cwd] ($tab)".to_string(),
+            ..TabbarConfig::default()
+        };
+        assert_eq!(
+            format_title(&vars("", Some("zsh"), Some("~/dev"), 1), &brackets),
+            "zsh [~/dev] (2)"
+        );
+        // A template without variables is its own label, verbatim.
+        let literal = TabbarConfig {
+            title_format: "my terminal".to_string(),
+            ..TabbarConfig::default()
+        };
+        assert_eq!(
+            format_title(&vars("", None, None, 0), &literal),
+            "my terminal"
+        );
+    }
+
+    #[test]
+    fn all_empty_variables_fall_back_to_tab_number() {
+        // Nothing resolved yet (fresh tab, unsupported platform): the
+        // stock `$command | $cwd` shows the tab number rather than a bare
+        // separator, and surrounding literals don't keep an empty label.
+        let stock = cfg();
+        assert_eq!(format_title(&vars("", None, None, 0), &stock), "Tab 1");
+        assert_eq!(format_title(&vars("", None, None, 2), &stock), "Tab 3");
+        let wrapped = TabbarConfig {
+            title_format: "a[$command]b".to_string(),
+            ..TabbarConfig::default()
+        };
+        assert_eq!(format_title(&vars("", None, None, 0), &wrapped), "Tab 1");
+        // Any one non-empty variable is enough to render the template.
+        assert_eq!(
+            format_title(&vars("", None, Some("~/dev"), 0), &stock),
+            "| ~/dev"
+        );
+    }
+
+    #[test]
+    fn braced_variables_delimit_names() {
+        let cfg = TabbarConfig {
+            title_format: "${command}s ${tab}!".to_string(),
+            ..TabbarConfig::default()
+        };
+        assert_eq!(
+            format_title(&vars("", Some("zsh"), None, 1), &cfg),
+            "zshs 2!"
+        );
+        // Unterminated brace stays literal.
+        let cfg = TabbarConfig {
+            title_format: "${command".to_string(),
+            ..TabbarConfig::default()
+        };
+        assert_eq!(
+            format_title(&vars("", Some("zsh"), None, 0), &cfg),
+            "${command"
+        );
+    }
+
+    #[test]
+    fn dollar_literals_and_unknown_names_stay_visible() {
+        let cfg = TabbarConfig {
+            title_format: "$$5 $5 $nope $ $cwd".to_string(),
+            ..TabbarConfig::default()
+        };
+        assert_eq!(
+            format_title(&vars("", None, Some("/tmp"), 0), &cfg),
+            "$5 $5 $nope $ /tmp"
+        );
+    }
+
+    #[test]
+    fn values_are_not_rescanned() {
+        let cfg = TabbarConfig {
+            title_format: "[$cwd]".to_string(),
+            ..TabbarConfig::default()
+        };
+        assert_eq!(
+            format_title(&vars("", None, Some("/tmp/$weird/$cwd"), 0), &cfg),
+            "[/tmp/$weird/$cwd]"
+        );
+    }
+
+    #[test]
+    fn blank_template_falls_back_to_tab_number() {
+        for template in ["", "   ", "$command", "$command $cwd"] {
+            let cfg = TabbarConfig {
+                title_format: template.to_string(),
+                ..TabbarConfig::default()
+            };
+            assert_eq!(
+                format_title(&vars("", None, None, 1), &cfg),
+                "Tab 2",
+                "template {template:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_composed_label_truncates_with_ellipsis() {
         let cfg = cfg();
         let long = "a".repeat(100);
-        let label = display_title(0, &long, &cfg);
+        let label = format_title(&vars("", Some(&long), None, 0), &cfg);
         assert_eq!(label.chars().count(), cfg.max_label_chars);
         assert!(label.ends_with('…'));
+        // Truncation happens after interpolation, at the final char count.
+        let cfg = TabbarConfig {
+            max_label_chars: 3,
+            title_format: "x $tab y".to_string(),
+            ..TabbarConfig::default()
+        };
+        assert_eq!(format_title(&vars("", None, None, 0), &cfg), "x …");
     }
 
     #[test]

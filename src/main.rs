@@ -6,6 +6,7 @@ mod input;
 mod logbuf;
 mod logging;
 mod menu;
+mod procinfo;
 mod pty;
 mod renderer;
 mod scrollbar;

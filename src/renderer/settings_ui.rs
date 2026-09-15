@@ -865,6 +865,16 @@ fn show_section(
                 1,
                 d.tabbar.max_label_chars,
             );
+            ed.text(
+                ui,
+                "Title format",
+                &mut config.tabbar.title_format,
+                &d.tabbar.title_format,
+            );
+            ui.weak(
+                "Variables: $title (shell OSC), $command (foreground process), \
+                 $cwd (working dir), $tab (index). All empty -> Tab N.",
+            );
         }
         SettingsSection::Input => {
             for (label, value, fallback) in [

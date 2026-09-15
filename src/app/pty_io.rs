@@ -24,6 +24,7 @@ impl App {
         let mut got_data = false;
         let mut exited: Vec<usize> = Vec::new();
         for (i, tab) in self.tabs.iter_mut().enumerate() {
+            let mut got_bytes = false;
             loop {
                 match tab.pty.try_recv() {
                     Some(PtyEvent::Data(bytes)) => {
@@ -34,6 +35,7 @@ impl App {
                             tab.pty.write(reply);
                         }
                         got_data = true;
+                        got_bytes = true;
                     }
                     Some(PtyEvent::Exit) => {
                         log::info!("shell exited (tab {i})");
@@ -43,6 +45,12 @@ impl App {
                     }
                     None => break,
                 }
+            }
+            // Output is the only reliable signal that the foreground job
+            // or the shell's cwd changed; refresh `$command`/`$cwd` once
+            // per burst rather than per 8KB chunk.
+            if got_bytes {
+                tab.refresh_title();
             }
         }
         // Remove exited tabs from the back so indices stay valid, then

@@ -117,6 +117,20 @@ impl PtySession {
         self.rx_from_pty.try_recv().ok()
     }
 
+    /// Kernel-reported foreground process group of the PTY (`tcgetpgrp`
+    /// on the master), used to resolve `$command` / `$cwd` tab labels.
+    /// `None` off unix or before a job takes control.
+    pub fn foreground_pgid(&self) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            self.master.process_group_leader()
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+
     pub fn resize(&self, cols: usize, rows: usize) {
         let _ = self.master.resize(portable_pty::PtySize {
             rows: rows.clamp(self.min_dim, self.max_dim) as u16,

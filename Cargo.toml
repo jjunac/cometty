@@ -31,6 +31,14 @@ bytemuck = { version = "1", features = ["derive"] }
 # gtk/libxdo would need system libs on Linux, and we only attach the global
 # menu on macOS — other platforms keep the Ctrl+, shortcut.
 muda = { version = "0.19", default-features = false }
+# Config file (TOML) + serde derives; used on every platform (these were
+# nested under the macOS-only section, which broke non-macOS builds).
+serde = { version = "1", features = ["derive"] }
+toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+[target.'cfg(unix)'.dependencies]
+# Foreground-process `$command`/`$cwd` tab-label sources (`tcgetpgrp` +
+# `proc_pidpath`/`proc_pidinfo` on macOS; `/proc` on Linux).
+libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 # Runtime Dock icon (`NSApplication::setApplicationIconImage`): winit's
 # `with_window_icon` is ignored on macOS, where icons come from the app
@@ -38,5 +46,3 @@ muda = { version = "0.19", default-features = false }
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
-serde = { version = "1", features = ["derive"] }
-toml = { version = "0.8", default-features = false, features = ["parse", "display"] }

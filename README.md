@@ -64,6 +64,7 @@ fade_speed = 5.0
 height = 38.0
 min_tab_width = 100.0
 max_label_chars = 32
+title_format = "$command | $cwd"  # $title (OSC), $command, $cwd, $tab; all empty -> "Tab N"
 # + insets, corner radii, reserves, plus-button sizes (see src/config.rs)
 
 [selection]

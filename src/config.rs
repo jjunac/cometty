@@ -127,6 +127,9 @@ fn d_plus_gap() -> f32 {
 fn d_max_label_chars() -> usize {
     32
 }
+fn d_title_format() -> String {
+    "$command | $cwd".to_string()
+}
 fn d_double_click_ms() -> u64 {
     400
 }
@@ -347,6 +350,14 @@ pub struct TabbarConfig {
     pub plus_gap: f32,
     #[serde(default = "d_max_label_chars")]
     pub max_label_chars: usize,
+    /// Template for tab labels, interpolated per tab. Variables:
+    /// `$title` (OSC 0/1/2), `$command` (foreground process), `$cwd`
+    /// (`~`-shortened working directory), `$tab` (1-based index).
+    /// `${name}` delimits a variable before more text; `$$` is a literal
+    /// `$`; unknown `$name` stays literal. When every referenced variable
+    /// is empty the label falls back to `Tab N`.
+    #[serde(default = "d_title_format")]
+    pub title_format: String,
 }
 
 impl Default for TabbarConfig {
@@ -364,6 +375,7 @@ impl Default for TabbarConfig {
             plus_diameter: d_plus_d(),
             plus_gap: d_plus_gap(),
             max_label_chars: d_max_label_chars(),
+            title_format: d_title_format(),
         }
     }
 }
@@ -591,6 +603,7 @@ impl Config {
             Ok(level) => level.as_str().to_ascii_lowercase(),
             Err(_) => d_log_level(),
         };
+        self.tabbar.title_format = self.tabbar.title_format.trim().to_string();
         self.log.buffer_lines = self
             .log
             .buffer_lines
@@ -624,6 +637,7 @@ mod tests {
         assert_eq!(c.scrollbar.fade_speed, 5.0);
         assert_eq!(c.tabbar.height, 38.0);
         assert_eq!(c.tabbar.min_tab_width, 100.0);
+        assert_eq!(c.tabbar.title_format, "$command | $cwd");
         assert_eq!(c.selection.double_click_ms, 400);
         assert_eq!(c.selection.word_extra_chars, "_");
         assert_eq!(c.input.lines_per_tick, 7.0);
@@ -643,6 +657,18 @@ mod tests {
         assert_eq!(c.font.line_height_factor, 1.25);
         assert_eq!(c.window.title, "cometty");
         assert!(c.input.copy_ctrl_shift);
+    }
+
+    #[test]
+    fn tabbar_title_format_parses_and_trims() {
+        let c: Config = toml::from_str("[tabbar]\ntitle_format=\"  $command [$cwd]  \"\n").unwrap();
+        assert_eq!(c.tabbar.max_label_chars, d_max_label_chars());
+        assert_eq!(c.sanitized().tabbar.title_format, "$command [$cwd]");
+        // Missing key keeps the default; an empty template is a valid
+        // (if degenerate) choice that falls back to `Tab N`.
+        assert_eq!(Config::default().tabbar.title_format, "$command | $cwd");
+        let c: Config = toml::from_str("[tabbar]\ntitle_format=\"\"\n").unwrap();
+        assert_eq!(c.sanitized().tabbar.title_format, "");
     }
 
     #[test]
