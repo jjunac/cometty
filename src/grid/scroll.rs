@@ -50,11 +50,17 @@ impl Grid {
 
     /// Full cells of a global line for Unicode-aware selection copy.
     pub fn global_line_cells(&self, global: usize) -> Option<Vec<Cell>> {
+        self.global_line(global).map(|row| row.to_vec())
+    }
+
+    /// Borrowed cells of a global line, for hot read-only paths (search)
+    /// that must not clone a whole scrollback row per line.
+    pub fn global_line(&self, global: usize) -> Option<&[Cell]> {
         let sb = self.scrollback.len();
         if global < sb {
-            Some(self.scrollback[global].clone())
+            self.scrollback.get(global).map(|row| row.as_slice())
         } else {
-            self.cells.get(global - sb).cloned()
+            self.cells.get(global - sb).map(|row| row.as_slice())
         }
     }
 
@@ -75,7 +81,7 @@ impl Grid {
             return false;
         }
         self.scroll_offset = next;
-        self.bump();
+        self.bump_view();
         true
     }
 
@@ -91,7 +97,7 @@ impl Grid {
             return false;
         }
         self.scroll_offset = 0;
-        self.bump();
+        self.bump_view();
         true
     }
 
@@ -106,7 +112,7 @@ impl Grid {
             return false;
         }
         self.scroll_offset = next;
-        self.bump();
+        self.bump_view();
         true
     }
 

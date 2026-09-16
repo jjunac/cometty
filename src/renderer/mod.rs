@@ -2,6 +2,7 @@ mod background;
 mod blocks;
 mod log_ui;
 mod overlay;
+mod search_ui;
 mod settings_ui;
 mod text;
 
@@ -75,6 +76,15 @@ pub struct ScrollCtx<'a> {
     pub logs: &'a mut crate::app::logs::LogsPanel,
     /// Shared with the global logger; only locked while the panel is open.
     pub log_buffer: &'a std::sync::Arc<std::sync::Mutex<crate::logbuf::LogBuffer>>,
+    /// Per-tab find bar (query/matches state; drawn by `search_ui`).
+    pub search: &'a mut crate::app::search::SearchPanel,
+}
+
+/// Highlight inputs for [`Renderer::render`]: text selection + find
+/// matches. Grouped so `render` stays under the clippy arg limit.
+pub struct HighlightCtx<'a> {
+    pub selection: Option<((usize, usize), (usize, usize))>,
+    pub search: Option<&'a crate::search::SearchView>,
 }
 
 /// Cursor input for [`Renderer::render`]: position + visibility + shape.
@@ -92,6 +102,8 @@ pub struct RenderOutput {
     pub selected_tab: Option<usize>,
     pub close_tab: Option<usize>,
     pub new_tab: bool,
+    /// Find-bar buttons clicked this frame (next/prev/close).
+    pub search: search_ui::SearchUiOutput,
 }
 
 pub struct Renderer {
@@ -122,6 +134,8 @@ pub struct Renderer {
     /// True while the surface is configured for a display-sized (fullscreen)
     /// drawable: feeding [`shrink_fullscreen_surface`].
     fullscreen: bool,
+    /// Painted find-bar rect (logical points), for press hit-testing.
+    search_bar_rect: Option<egui::Rect>,
     last_grid_version: u64,
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
@@ -287,6 +301,7 @@ impl Renderer {
             // The startup window is never created fullscreen; a later
             // fullscreen resize goes through `resize`.
             fullscreen: false,
+            search_bar_rect: None,
             last_grid_version: u64::MAX,
             egui_ctx,
             egui_state,
@@ -481,6 +496,16 @@ impl Renderer {
         crate::scrollbar::hit_test(x_phys / scale, screen_w_pts, &self.user_config.scrollbar)
     }
 
+    /// True when physical `(x, y)` falls on the painted find bar (only
+    /// meaningful while it is open; the app gates on its own state).
+    pub fn over_search_bar(&self, x_phys: f32, y_phys: f32) -> bool {
+        let Some(rect) = self.search_bar_rect else {
+            return false;
+        };
+        let scale = self.scale_factor.max(1.0);
+        rect.contains(egui::pos2(x_phys / scale, y_phys / scale))
+    }
+
     /// Thin orchestrator: rebuild text on version change, paint bg +
     /// overlay, then submit the frame. Heavy lifting lives in
     /// `text` / `background` / `overlay`.
@@ -489,7 +514,7 @@ impl Renderer {
         grid_rows: &[Vec<Cell>],
         cursor: CursorCtx,
         grid_version: u64,
-        selection: Option<((usize, usize), (usize, usize))>,
+        highlights: HighlightCtx<'_>,
         scroll: ScrollCtx<'_>,
     ) -> anyhow::Result<RenderOutput> {
         if grid_version != self.last_grid_version {
@@ -498,19 +523,13 @@ impl Renderer {
         }
 
         let tab_count = scroll.tab_titles.len();
-        let vert_count = self.paint_bg(
-            grid_rows,
-            cursor.pos,
-            cursor.visible,
-            cursor.shape,
-            selection,
-            tab_count,
-        );
+        let vert_count = self.paint_bg(grid_rows, &cursor, &highlights, tab_count);
         let overlay::OverlayOutput {
             scroll_to,
             selected_tab,
             close_tab,
             new_tab,
+            search,
             paint_jobs,
             screen_descriptor,
         } = self.paint_overlay(scroll);
@@ -520,6 +539,7 @@ impl Renderer {
             selected_tab,
             close_tab,
             new_tab,
+            search,
         };
 
         let frame = match self.surface.get_current_texture() {

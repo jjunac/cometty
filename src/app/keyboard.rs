@@ -58,6 +58,43 @@ impl App {
             }
             return true;
         }
+        // Find bar: Ctrl/Cmd+F opens it (or re-focuses an open bar). Placed
+        // after the settings early-return so the dialog keeps the combo.
+        if event.state == ElementState::Pressed
+            && crate::app::search::is_search_toggle(
+                &event.logical_key,
+                &self.modifiers,
+                &self.config.input,
+            )
+        {
+            self.focus_search();
+            return true;
+        }
+        // While the bar is open: Esc closes; Enter / Shift+Enter and
+        // F3 / Shift+F3 walk the matches. All other keys go to the focused
+        // egui field (egui's `consumed` flag below) — or to the shell if the
+        // pointer moved back to the grid, matching the log panel. Text
+        // typed before the field has focus (same frame as the open) is
+        // swallowed, not sent to the shell.
+        if self.search_open() && event.state == ElementState::Pressed {
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.close_search();
+                    return true;
+                }
+                Key::Named(NamedKey::Enter) | Key::Named(NamedKey::F3) => {
+                    self.step_search(!self.modifiers.shift_key());
+                    return true;
+                }
+                Key::Character(_)
+                | Key::Named(NamedKey::Backspace | NamedKey::Delete | NamedKey::Space)
+                    if self.search_focus_pending() =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
         if egui_consumed {
             return true;
         }

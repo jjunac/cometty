@@ -10,6 +10,7 @@ mod procinfo;
 mod pty;
 mod renderer;
 mod scrollbar;
+mod search;
 mod selection;
 mod tabbar;
 mod term;

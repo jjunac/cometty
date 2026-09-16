@@ -302,6 +302,13 @@ impl App {
         if self.settings.open && egui_consumed {
             return;
         }
+        // Wheel over the find bar belongs to the bar (nothing scrollable
+        // there), not to the terminal underneath it.
+        if let Some((x, y)) = self.cursor_pos
+            && self.press_on_search_bar(x, y)
+        {
+            return;
+        }
         // Mouse reporting: forward wheel instead of scrolling locally.
         // `Shift` forces local scroll via `mouse_report_state`.
         if let Some((_, sgr)) = self.mouse_report_state() {

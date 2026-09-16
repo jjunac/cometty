@@ -76,6 +76,11 @@ pub struct Theme {
     pub scrollbar_hover: Rgb,
     pub tab_active_bg: Rgb,
     pub tab_border: Rgb,
+    /// Find-bar highlight for every match (`Ctrl+F`), dim so the current
+    /// one stands out.
+    pub search_match: Rgb,
+    /// Find-bar highlight for the current match.
+    pub search_active: Rgb,
 }
 
 impl Theme {
@@ -93,6 +98,9 @@ impl Theme {
             scrollbar_hover: Rgb::new(0xCC, 0xCC, 0xCC),
             tab_active_bg: Rgb::new(0x3E, 0x3E, 0x42),
             tab_border: Rgb::new(0x5A, 0x5A, 0x5A),
+            // VS Code's find-match hues over the Dark+ background.
+            search_match: Rgb::new(0x61, 0x32, 0x14),
+            search_active: Rgb::new(0x9E, 0x6A, 0x03),
             palette: [
                 Rgb::new(0x00, 0x00, 0x00), // black
                 Rgb::new(0xCD, 0x31, 0x31), // red
@@ -127,6 +135,10 @@ impl Theme {
             scrollbar_hover: Rgb::new(0xC0, 0xCA, 0xF5),
             tab_active_bg: Rgb::new(0x29, 0x2E, 0x42),
             tab_border: Rgb::new(0x41, 0x48, 0x68),
+            // Warm blends of the palette yellow that stay readable under
+            // the light foreground.
+            search_match: Rgb::new(0x4E, 0x3F, 0x28),
+            search_active: Rgb::new(0x8F, 0x6F, 0x3D),
             palette: [
                 Rgb::new(0x15, 0x16, 0x1E), // black
                 Rgb::new(0xF7, 0x76, 0x8E), // red
@@ -161,6 +173,8 @@ impl Theme {
             scrollbar_hover: Rgb::new(0xC5, 0xC8, 0xC6),
             tab_active_bg: Rgb::new(0x37, 0x3B, 0x41),
             tab_border: Rgb::new(0x5A, 0x5E, 0x5E),
+            search_match: Rgb::new(0x4A, 0x42, 0x32),
+            search_active: Rgb::new(0x8F, 0x74, 0x40),
             palette: [
                 Rgb::new(0x1D, 0x1F, 0x21),
                 Rgb::new(0xCC, 0x66, 0x66),
@@ -265,6 +279,15 @@ mod tests {
         assert_eq!(theme.palette[1], Rgb::new(0xCD, 0x31, 0x31));
         assert_eq!(theme.palette[2], Rgb::new(0x0D, 0xBC, 0x79));
         assert_eq!(theme.palette[9], Rgb::new(0xF1, 0x4C, 0x4C));
+    }
+
+    #[test]
+    fn search_highlights_stand_out_from_background() {
+        for theme in Theme::all() {
+            assert_ne!(theme.search_match, theme.background, "{}", theme.name);
+            assert_ne!(theme.search_active, theme.background, "{}", theme.name);
+            assert_ne!(theme.search_match, theme.search_active, "{}", theme.name);
+        }
     }
 
     #[test]

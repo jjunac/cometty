@@ -165,18 +165,16 @@ impl super::Renderer {
 
     /// Fill the scratch vertex buffer with background quads for cells that
     /// differ from the theme background (plus block elements, cursor,
-    /// selection, underline/strike/overline), ensure GPU capacity, and
-    /// upload. Returns the vertex count to draw.
+    /// selection, search matches, underline/strike/overline), ensure GPU
+    /// capacity, and upload. Returns the vertex count to draw.
     ///
     /// Every rect is snapped to whole device pixels with shared edges, so
     /// neighbouring cells tile without hairline seams.
     pub(crate) fn paint_bg(
         &mut self,
         grid_rows: &[Vec<crate::grid::Cell>],
-        cursor: (usize, usize),
-        cursor_visible: bool,
-        cursor_shape: crate::grid::CursorShape,
-        selection: Option<((usize, usize), (usize, usize))>,
+        cursor: &super::CursorCtx,
+        highlights: &super::HighlightCtx<'_>,
         tab_count: usize,
     ) -> usize {
         // Take the scratch buffer so `push_quad(&self, …)` and the vertex
@@ -189,6 +187,8 @@ impl super::Renderer {
             cursor_underline_thickness(self.line_height, &self.user_config.cursor);
         let bar_w = bar_cursor_width(self.cell_width, &self.user_config.cursor);
         let pad = self.scale_factor.max(1.0);
+        let search_match_col = self.theme.search_match.as_linear_f32_array();
+        let search_active_col = self.theme.search_active.as_linear_f32_array();
         for (y, row) in grid_rows.iter().enumerate() {
             // Cell rects snap to whole device pixels; adjacent cells share
             // exact edges, so row/column backgrounds tile without seams.
@@ -206,17 +206,24 @@ impl super::Renderer {
                 let (px, cell_right) = snap_col_edges(x, span, self.cell_width);
                 let w_px = cell_right - px;
                 // A wide cluster is selected when either half is selected.
-                let is_selected = (0..span).any(|d| in_view_selection(selection, x + d, y));
+                let is_selected =
+                    (0..span).any(|d| in_view_selection(highlights.selection, x + d, y));
+                let search_hit = highlights
+                    .search
+                    .map_or(crate::search::Hit::None, |view| view.hit(y, x, span));
                 // Cursor on either half of a wide cluster highlights the
                 // whole cluster for block cursors.
-                let is_cursor = cursor_visible
-                    && cursor.1 == y
-                    && (cursor.0 == x || (span == 2 && cursor.0 == x + 1));
-                // Base background (selection overrides cell bg; inverse
-                // swaps fg/bg via effective colors).
+                let is_cursor = cursor.visible
+                    && cursor.pos.1 == y
+                    && (cursor.pos.0 == x || (span == 2 && cursor.pos.0 == x + 1));
+                // Base background. The current search match wins over the
+                // selection so `Enter` navigation always shows where it
+                // landed; other matches sit underneath a selection.
                 let eff_bg = cell.effective_bg();
                 let eff_fg = cell.effective_fg();
-                if is_selected {
+                if matches!(search_hit, crate::search::Hit::Active) {
+                    self.push_quad(&mut verts, px, py, w_px, row_h, search_active_col);
+                } else if is_selected {
                     self.push_quad(
                         &mut verts,
                         px,
@@ -225,6 +232,8 @@ impl super::Renderer {
                         row_h,
                         self.theme.selection.as_linear_f32_array(),
                     );
+                } else if matches!(search_hit, crate::search::Hit::Match) {
+                    self.push_quad(&mut verts, px, py, w_px, row_h, search_match_col);
                 } else if eff_bg != self.theme.background {
                     self.push_quad(
                         &mut verts,
@@ -281,7 +290,7 @@ impl super::Renderer {
                 // Cursor: shape-dependent, drawn last so it covers bg/underline.
                 if is_cursor {
                     let cursor_col = self.theme.foreground.as_linear_f32_array();
-                    match cursor_shape {
+                    match cursor.shape {
                         crate::grid::CursorShape::Block => {
                             self.push_quad(&mut verts, px, py, w_px, row_h, cursor_col);
                         }

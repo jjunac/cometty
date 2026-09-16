@@ -14,6 +14,7 @@ use crate::scrollbar::ScrollbarUi;
 use crate::selection::Selection;
 use crate::term::Terminal;
 
+use super::search::SearchPanel;
 use super::{App, UserEvent};
 
 /// Kernel facts for the `$command` / `$cwd` label variables, refreshed
@@ -35,6 +36,8 @@ pub struct Tab {
     pub(crate) scrollbar: ScrollbarUi,
     pub(crate) is_alt: bool,
     pub(crate) foreground: Foreground,
+    /// Per-tab find bar (query + matches + current).
+    pub(crate) search: SearchPanel,
 }
 
 impl Tab {
@@ -47,6 +50,7 @@ impl Tab {
             scrollbar: ScrollbarUi::new(Instant::now()),
             is_alt: false,
             foreground: Foreground::default(),
+            search: SearchPanel::default(),
         }
     }
 
@@ -443,6 +447,11 @@ impl App {
         }
         self.active = index;
         log::debug!("switched to tab {index}");
+        // Two tabs can share a grid version while holding different
+        // content: the new tab's cached matches must be recomputed.
+        if let Some(tab) = self.tabs.get_mut(index) {
+            tab.search.invalidate();
+        }
         if let Some(r) = self.renderer.as_mut() {
             r.invalidate();
         }

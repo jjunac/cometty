@@ -154,6 +154,9 @@ fn d_key_v() -> String {
 fn d_key_t() -> String {
     "t".to_string()
 }
+fn d_key_f() -> String {
+    "f".to_string()
+}
 fn d_lines_per_tick() -> f64 {
     7.0
 }
@@ -454,6 +457,8 @@ pub struct InputConfig {
     pub paste_key: String,
     #[serde(default = "d_key_t")]
     pub new_tab_key: String,
+    #[serde(default = "d_key_f")]
+    pub search_key: String,
     #[serde(default = "d_true")]
     pub copy_ctrl_shift: bool,
     #[serde(default = "d_true")]
@@ -466,6 +471,10 @@ pub struct InputConfig {
     pub new_tab_ctrl: bool,
     #[serde(default = "d_true")]
     pub new_tab_super: bool,
+    #[serde(default = "d_true")]
+    pub search_ctrl: bool,
+    #[serde(default = "d_true")]
+    pub search_super: bool,
     #[serde(default = "d_true")]
     pub tab_switch_ctrl: bool,
     #[serde(default = "d_true")]
@@ -484,12 +493,15 @@ impl Default for InputConfig {
             copy_key: d_key_c(),
             paste_key: d_key_v(),
             new_tab_key: d_key_t(),
+            search_key: d_key_f(),
             copy_ctrl_shift: true,
             copy_super: true,
             paste_ctrl_shift: true,
             paste_super: true,
             new_tab_ctrl: true,
             new_tab_super: true,
+            search_ctrl: true,
+            search_super: true,
             tab_switch_ctrl: true,
             tab_switch_super: true,
             shift_page_scroll: true,
@@ -641,6 +653,8 @@ mod tests {
         assert_eq!(c.selection.double_click_ms, 400);
         assert_eq!(c.selection.word_extra_chars, "_");
         assert_eq!(c.input.lines_per_tick, 7.0);
+        assert_eq!(c.input.search_key, "f");
+        assert!(c.input.search_ctrl && c.input.search_super);
         assert_eq!(c.log.level, "debug");
         assert_eq!(c.log.filter, "");
         assert_eq!(c.log.buffer_lines, 1000);

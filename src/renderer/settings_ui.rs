@@ -893,6 +893,11 @@ fn show_section(
                     &mut config.input.new_tab_key,
                     d.input.new_tab_key.as_str(),
                 ),
+                (
+                    "Search key",
+                    &mut config.input.search_key,
+                    d.input.search_key.as_str(),
+                ),
             ] {
                 ui.horizontal(|ui| {
                     let slot = begin_reset_slot(ui);
@@ -935,6 +940,13 @@ fn show_section(
                 ui,
                 "New tab on Cmd/Super",
                 &mut config.input.new_tab_super,
+                true,
+            );
+            ed.flag(ui, "Search on Ctrl", &mut config.input.search_ctrl, true);
+            ed.flag(
+                ui,
+                "Search on Cmd/Super",
+                &mut config.input.search_super,
                 true,
             );
             ed.flag(

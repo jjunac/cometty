@@ -27,6 +27,9 @@ pub struct Grid {
     saved_cursor: Option<Cursor>,
     saved_pen: Option<Pen>,
     pub version: u64,
+    /// Bumped only when cell content changes, not on view-only scrolling:
+    /// the find bar caches its matches against this.
+    pub content_version: u64,
     in_alt: bool,
     saved_main_cells: Option<Vec<Vec<Cell>>>,
     saved_main_cursor: Option<Cursor>,
@@ -129,6 +132,7 @@ impl Grid {
             saved_cursor: None,
             saved_pen: None,
             version: 0,
+            content_version: 0,
             in_alt: false,
             saved_main_cells: None,
             saved_main_cursor: None,
@@ -214,6 +218,14 @@ impl Grid {
     }
 
     pub(crate) fn bump(&mut self) {
+        self.version = self.version.wrapping_add(1);
+        self.content_version = self.content_version.wrapping_add(1);
+    }
+
+    /// Bump the render version for a view-only change (scroll offset):
+    /// the frame must repaint, but caches keyed to cell content (find-bar
+    /// matches) stay valid.
+    pub(crate) fn bump_view(&mut self) {
         self.version = self.version.wrapping_add(1);
     }
 
@@ -516,6 +528,27 @@ mod tests {
         assert!(g.scroll_by(1));
         g.put_char('z');
         assert_eq!(g.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn view_scroll_keeps_content_version() {
+        let mut g = Grid::new(2, 2, test_theme());
+        g.put_char('a');
+        g.newline();
+        g.put_char('b');
+        g.newline();
+        assert_eq!(g.scrollback_len(), 1);
+        let content = g.content_version;
+        let version = g.version;
+        assert!(g.scroll_by(1));
+        assert_ne!(g.version, version, "render version tracks the view");
+        assert_eq!(g.content_version, content, "view-only scroll keeps content");
+        assert!(g.scroll_to_bottom());
+        assert_ne!(g.version, version);
+        assert_eq!(g.content_version, content);
+        // Real content changes still invalidate both.
+        g.put_char('z');
+        assert_ne!(g.content_version, content);
     }
 
     #[test]

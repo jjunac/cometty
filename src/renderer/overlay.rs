@@ -1,5 +1,6 @@
 //! egui overlay: tab strip + scrollbar chrome (terminal cells stay glyphon).
 
+use super::search_ui::{self, SearchUiOutput};
 use super::{Renderer, ScrollCtx};
 
 pub(crate) struct OverlayOutput {
@@ -7,6 +8,7 @@ pub(crate) struct OverlayOutput {
     pub(crate) selected_tab: Option<usize>,
     pub(crate) close_tab: Option<usize>,
     pub(crate) new_tab: bool,
+    pub(crate) search: SearchUiOutput,
     pub(crate) paint_jobs: Vec<egui::ClippedPrimitive>,
     pub(crate) screen_descriptor: egui_wgpu::ScreenDescriptor,
 }
@@ -26,6 +28,7 @@ impl Renderer {
             config,
             logs,
             log_buffer,
+            search,
         } = scroll;
         let scale = self.scale_factor.max(1.0);
         let screen_w_pts = self.width as f32 / scale;
@@ -386,6 +389,10 @@ impl Renderer {
                     }
                 }
             });
+        // Find bar (floating overlay; Ctrl/Cmd+F). Drawn before the panels
+        // so their windows stack above it where they overlap.
+        let search_actions = search_ui::show_search(&ctx, search, tab_h);
+        self.search_bar_rect = search_actions.rect;
         let mut full_output = {
             // Settings overlay (sidebar window when open; the entry point
             // lives in the native OS menu bar). Edits mutate `config` in
@@ -426,6 +433,7 @@ impl Renderer {
             selected_tab,
             close_tab,
             new_tab,
+            search: search_actions,
             paint_jobs,
             screen_descriptor,
         }

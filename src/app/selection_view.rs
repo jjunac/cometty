@@ -41,6 +41,11 @@ impl App {
         {
             return true;
         }
+        // The find bar floats over the grid: a press on it must not start
+        // a selection underneath.
+        if self.press_on_search_bar(x_phys, y_phys) {
+            return true;
+        }
         self.scrollbar_visible()
             && self
                 .renderer

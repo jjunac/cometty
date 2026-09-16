@@ -11,6 +11,7 @@ pub mod logs;
 pub mod mouse;
 pub mod pty_io;
 pub mod redraw;
+pub mod search;
 pub mod selection_view;
 pub mod settings;
 pub mod tab;

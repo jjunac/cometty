@@ -75,12 +75,15 @@ word_extra_chars = "_"
 copy_key = "c"
 paste_key = "v"
 new_tab_key = "t"
+search_key = "f"
 copy_ctrl_shift = true
 copy_super = true
 paste_ctrl_shift = true
 paste_super = true
 new_tab_ctrl = true
 new_tab_super = true
+search_ctrl = true
+search_super = true
 lines_per_tick = 7.0
 
 [log]
@@ -118,6 +121,6 @@ buffer_lines = 1000    # ring capacity; stderr output still follows RUST_LOG
 - [x] Char ops + queries: `ICH/DCH/ECH` (`@/P/X`), `REP`, `DA`/`CPR`, `DECRQM` stub
 - [x] Full SGR: dim / italic / inverse / strike / overline, underline styles + `58/59` colors, colon `38:2:r:g:b` form
 - [x] Tab switching: `Ctrl+Tab` / `Ctrl+Shift+Tab` + `Cmd+1-9` wired to tab switch
-- [ ] Search: `Ctrl+F` overlay, match highlight, next/prev, `Esc` close
+- [x] Search: `Ctrl+F` / `Cmd+F` overlay (top-right find bar), smart-case match highlight over scrollback + screen (current match brighter), `Enter`/`Shift+Enter` (or `F3`/`Shift+F3`) next/prev with wrap-around, `Esc` close; `[input] search_key`/`search_ctrl`/`search_super`
 - [ ] Bell (visual flash; currently ignored) + font zoom (`Ctrl +/-/0`) + confirm-close on dirty foreground process
 - [ ] Hyperlinks (`OSC 8` + `Cmd+click`) + clipboard (`OSC 52`) + URL hint + open

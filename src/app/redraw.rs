@@ -30,6 +30,11 @@ impl App {
             }
         }
 
+        // Find-bar matches follow the grid: recompute when stale (new
+        // output, resize, tab switch) and reveal a freshly picked match.
+        // A background refresh never scrolls on its own.
+        self.refresh_search();
+
         // Owned snapshot so the tabs borrow ends before `render`
         // mutably borrows the renderer and the active scrollbar.
         let snapshot = match self.active_tab() {
@@ -83,6 +88,9 @@ impl App {
         else {
             return;
         };
+        // Highlight snapshot for the find bar (owned, so the tab can be
+        // borrowed mutably for the overlay below).
+        let search_view = self.search_view();
         // Keep the OS chrome in sync with the active tab's OSC title.
         self.sync_window_title();
         // Owned: the overlay borrows titles while also taking
@@ -98,6 +106,13 @@ impl App {
         // `self.config` in place during `render`; any diff is live-applied
         // and auto-saved afterwards (both Ok and surface-error paths).
         let config_before = self.config.clone();
+        // Same idea for the find bar: the query field mutates `tab.search`
+        // in place during the frame; a change re-matches on the next redraw.
+        let search_query_before = self
+            .tabs
+            .get(active)
+            .map(|t| t.search.query.clone())
+            .unwrap_or_default();
         let output = {
             let Some(tab) = self.tabs.get_mut(active) else {
                 return;
@@ -110,7 +125,10 @@ impl App {
                     shape: cursor_shape,
                 },
                 version,
-                selection_view,
+                renderer::HighlightCtx {
+                    selection: selection_view,
+                    search: search_view.as_ref(),
+                },
                 renderer::ScrollCtx {
                     window,
                     ui: &mut tab.scrollbar,
@@ -124,6 +142,7 @@ impl App {
                     config: &mut self.config,
                     logs: &mut self.logs,
                     log_buffer: &self.log_buffer,
+                    search: &mut tab.search,
                 },
             ) {
                 Ok(o) => o,
@@ -142,6 +161,33 @@ impl App {
                 }
             }
         };
+
+        // Find bar: buttons clicked this frame act on the tab that was
+        // rendered; apply them before any tab switch so they can't land on
+        // the wrong tab.
+        if output.search.close {
+            self.close_search();
+        }
+        if output.search.prev {
+            self.step_search(false);
+        }
+        if output.search.next {
+            self.step_search(true);
+        }
+        // The bar edited the query during this frame: re-match + reveal on
+        // the next redraw (this frame's highlight was already shaped).
+        if self
+            .tabs
+            .get(active)
+            .is_some_and(|t| t.search.query != search_query_before)
+        {
+            if let Some(tab) = self.tabs.get_mut(active) {
+                tab.search.query_changed();
+            }
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
 
         if let Some(target) = output.scroll_to
             && let Some(tab) = self.active_tab_mut()
