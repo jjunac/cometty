@@ -104,6 +104,9 @@ pub struct RenderOutput {
     pub new_tab: bool,
     /// Find-bar buttons clicked this frame (next/prev/close).
     pub search: search_ui::SearchUiOutput,
+    /// Earliest delay egui wants the next frame after (`Duration::MAX` =
+    /// idle); see [`OverlayOutput::egui_repaint_delay`].
+    pub egui_repaint_delay: std::time::Duration,
 }
 
 pub struct Renderer {
@@ -532,6 +535,7 @@ impl Renderer {
             search,
             paint_jobs,
             screen_descriptor,
+            egui_repaint_delay,
         } = self.paint_overlay(scroll);
 
         let out = RenderOutput {
@@ -540,6 +544,7 @@ impl Renderer {
             close_tab,
             new_tab,
             search,
+            egui_repaint_delay,
         };
 
         let frame = match self.surface.get_current_texture() {

@@ -53,6 +53,9 @@ pub struct App {
     pub(crate) modifiers: ModifiersState,
     pub(crate) cursor_visible: bool,
     pub(crate) last_blink: Instant,
+    /// Next frame egui asked for (hover fade / animation / tooltip), if
+    /// any; `about_to_wait` wakes for it instead of waiting for a blink.
+    pub(crate) egui_repaint_at: Option<Instant>,
     pub(crate) pending_resize: Option<(u32, u32)>,
     pub(crate) pending_scale: Option<f32>,
     pub(crate) wheel_accum: f64,
@@ -88,6 +91,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             cursor_visible: true,
             last_blink: Instant::now(),
+            egui_repaint_at: None,
             pending_resize: None,
             pending_scale: None,
             wheel_accum: 0.0,

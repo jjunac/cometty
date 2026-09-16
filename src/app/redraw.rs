@@ -1,8 +1,21 @@
 //! Redraw path: resize apply, PTY drain, render-param gathering.
 
+use std::time::{Duration, Instant};
+
 use super::App;
 use crate::grid;
 use crate::renderer;
+
+/// Resolve egui's requested next-frame delay into an absolute deadline.
+/// `Duration::MAX` means "no frame pending" (the UI is idle); a zero delay
+/// is applied by the caller as an immediate repaint, never stored.
+fn egui_deadline(now: Instant, delay: Duration) -> Option<Instant> {
+    if delay == Duration::MAX {
+        None
+    } else {
+        now.checked_add(delay)
+    }
+}
 
 impl App {
     pub(crate) fn on_redraw(&mut self) {
@@ -162,6 +175,21 @@ impl App {
             }
         };
 
+        // egui's own next-frame request (hover fades, panel animations,
+        // smooth scrolling, tooltips): zero means "right now" — every input
+        // event repaints directly, so this only adds egui's settle pass. A
+        // finite delay is scheduled for `about_to_wait`; `MAX` means the UI
+        // is idle and the loop stays reactive (PTY output / cursor blink).
+        let delay = output.egui_repaint_delay;
+        if delay.is_zero() {
+            self.egui_repaint_at = None;
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        } else {
+            self.egui_repaint_at = egui_deadline(Instant::now(), delay);
+        }
+
         // Find bar: buttons clicked this frame act on the tab that was
         // rendered; apply them before any tab switch so they can't land on
         // the wrong tab.
@@ -214,12 +242,26 @@ impl App {
             self.apply_settings_changes(&config_before);
             self.save_config_from_settings();
         }
-        // Keep animating the fade without PTY traffic.
-        let animating = self.active_tab().is_some_and(|t| {
-            (t.scrollbar.opacity > 0.0 && t.scrollbar.opacity < 1.0) || t.scrollbar.is_dragging()
-        });
-        if animating && let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::egui_deadline;
+    use std::time::{Duration, Instant};
+
+    /// egui's `repaint_delay`: `MAX` must not schedule anything (idle stays
+    /// reactive) and finite delays become absolute deadlines.
+    #[test]
+    fn egui_deadline_maps_delays_to_deadlines() {
+        let now = Instant::now();
+        assert_eq!(egui_deadline(now, Duration::MAX), None);
+        assert_eq!(
+            egui_deadline(now, Duration::from_millis(50)),
+            Some(now + Duration::from_millis(50))
+        );
+        // Zero is normally handled as an immediate repaint by the caller,
+        // but the mapping itself still degenerates to "now".
+        assert_eq!(egui_deadline(now, Duration::ZERO), Some(now));
     }
 }

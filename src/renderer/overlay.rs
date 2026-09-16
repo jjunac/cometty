@@ -11,6 +11,9 @@ pub(crate) struct OverlayOutput {
     pub(crate) search: SearchUiOutput,
     pub(crate) paint_jobs: Vec<egui::ClippedPrimitive>,
     pub(crate) screen_descriptor: egui_wgpu::ScreenDescriptor,
+    /// Earliest delay egui wants the next frame after (animations, hover
+    /// fades, smooth scrolling, tooltips); `Duration::MAX` = none pending.
+    pub(crate) egui_repaint_delay: std::time::Duration,
 }
 
 impl Renderer {
@@ -393,6 +396,13 @@ impl Renderer {
         // so their windows stack above it where they overlap.
         let search_actions = search_ui::show_search(&ctx, search, tab_h);
         self.search_bar_rect = search_actions.rect;
+        // Scrollbar fade/drag advances inside the pass, so its repaint
+        // request (while still animating) is part of the frame's
+        // `repaint_delay` below instead of being dropped after `end_pass`.
+        let now = std::time::Instant::now();
+        if scrollbar.update(now, total, visible, offset, is_alt, hovered, &scrollbar_cfg) {
+            ctx.request_repaint();
+        }
         let mut full_output = {
             // Settings overlay (sidebar window when open; the entry point
             // lives in the native OS menu bar). Edits mutate `config` in
@@ -404,13 +414,16 @@ impl Renderer {
             super::log_ui::show_logs(&ctx, logs, log_buffer);
             ctx.end_pass()
         };
+        // Earliest frame egui wants next: animations, hover fades, smooth
+        // scrolling and tooltip delays all land here. `MAX` = nothing
+        // pending; the app schedules its event-loop wake off this.
+        let egui_repaint_delay = full_output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map_or(std::time::Duration::MAX, |out| out.repaint_delay);
         self.egui_state
             .handle_platform_output(window, full_output.platform_output);
         let paint_jobs = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
-        let now = std::time::Instant::now();
-        if scrollbar.update(now, total, visible, offset, is_alt, hovered, &scrollbar_cfg) {
-            ctx.request_repaint();
-        }
 
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [self.width, self.height],
@@ -436,6 +449,7 @@ impl Renderer {
             search: search_actions,
             paint_jobs,
             screen_descriptor,
+            egui_repaint_delay,
         }
     }
 }

@@ -211,18 +211,18 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         // egui chrome first: scrollbar hover/drag consumes pointer events.
-        let egui_consumed = match (self.renderer.as_mut(), self.window.as_ref()) {
-            (Some(r), Some(w)) => r.on_window_event(w, &event).consumed,
-            _ => false,
+        let response = match (self.renderer.as_mut(), self.window.as_ref()) {
+            (Some(r), Some(w)) => r.on_window_event(w, &event),
+            _ => egui_winit::EventResponse::default(),
         };
-        // While fading/dragging, keep frames coming without waiting for PTY.
-        if egui_consumed
-            && matches!(
-                event,
-                WindowEvent::CursorMoved { .. }
-                    | WindowEvent::MouseInput { .. }
-                    | WindowEvent::CursorLeft { .. }
-            )
+        let egui_consumed = response.consumed;
+        // egui's own repaint request for this event (hover, wheel, typing,
+        // IME, …): the loop is otherwise reactive (PTY output / blink), so
+        // without it egui only stepped forward on the next blink tick.
+        // `RedrawRequested` always asks for a repaint — honoring it here
+        // would loop forever.
+        if response.repaint
+            && !matches!(event, WindowEvent::RedrawRequested)
             && let Some(w) = self.window.as_ref()
         {
             w.request_redraw();
@@ -308,8 +308,20 @@ impl ApplicationHandler<UserEvent> for App {
                 w.request_redraw();
             }
         }
-        // Wake up for next blink toggle.
-        let next = self.last_blink + Duration::from_millis(blink_ms);
+        // Wake for the next blink toggle, or earlier when egui asked for a
+        // frame (hover fades, panel animations, tooltips). A due deadline
+        // repaints now and lets that frame schedule the next one.
+        let mut next = self.last_blink + Duration::from_millis(blink_ms);
+        if let Some(deadline) = self.egui_repaint_at {
+            if deadline <= now {
+                self.egui_repaint_at = None;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            } else {
+                next = next.min(deadline);
+            }
+        }
         event_loop.set_control_flow(ControlFlow::WaitUntil(next));
     }
 }
