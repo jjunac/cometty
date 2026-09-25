@@ -10,7 +10,9 @@
 //! right of the traffic lights (see [`leading_inset_points`]). The active
 //! tab is a nested pill. The close `×` is reserved on the **left** of each
 //! tab (painted on hover only, layout-stable); the `⌘N` shortcut hint sits
-//! on the right for the first 9 tabs.
+//! on the right for the first 9 tabs. A lone tab renders as a plain title
+//! (no pill, close box or shortcut), so the bar reads as the window
+//! titlebar.
 
 use crate::config::TabbarConfig;
 
@@ -127,6 +129,13 @@ pub fn title_max_width(tab_w: f32, has_shortcut: bool, config: &TabbarConfig) ->
     (tab_w - reserved).max(0.0)
 }
 
+/// Max title width for the lone tab, which spans the whole container and
+/// renders without a close box or shortcut hint: only a side gap is kept
+/// so the text never touches the container edge. Never negative.
+pub fn single_tab_title_max_width(tab_w: f32, config: &TabbarConfig) -> f32 {
+    (tab_w - config.gap * 2.0).max(0.0)
+}
+
 /// Truncate `title` with an ellipsis so `measure(fitted) <= max_width`.
 ///
 /// `measure` maps text to logical width (the overlay passes a font-based
@@ -173,6 +182,14 @@ mod tests {
         // 180 - 24 - 2*4 = 148 without shortcut.
         assert_eq!(title_max_width(180.0, false, &cfg), 148.0);
         assert_eq!(title_max_width(10.0, true, &cfg), 0.0);
+    }
+
+    #[test]
+    fn single_tab_title_max_width_keeps_only_side_gaps() {
+        let cfg = cfg();
+        // No close box or shortcut reserve: 180 - 2*4 = 172.
+        assert_eq!(single_tab_title_max_width(180.0, &cfg), 172.0);
+        assert_eq!(single_tab_title_max_width(0.0, &cfg), 0.0);
     }
 
     #[test]

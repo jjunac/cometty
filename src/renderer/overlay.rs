@@ -52,7 +52,8 @@ impl Renderer {
         let ctx = self.egui_ctx.clone();
         ctx.begin_pass(egui_input);
         // Tab strip along the top. Hidden for a single tab (except on
-        // macOS, where it lives in the OS titlebar and is always shown).
+        // macOS, where it lives in the OS titlebar and is always shown);
+        // a lone tab renders as a plain title next to the `+` button.
         // Ghostty style: an inset pill container holds equal-width tabs.
         // On macOS the container starts right of the traffic lights. The
         // active tab is a nested pill with a 1px border; inactive tabs are
@@ -92,6 +93,7 @@ impl Renderer {
                         theme.background.as_egui_color(),
                     );
                     let tab_count = tab_titles.len();
+                    let single_tab = tab_count == 1;
                     let tab_w = crate::tabbar::tab_width(container_w, tab_count, &tabbar_cfg);
                     let font_id = egui::TextStyle::Body.resolve(ui.style());
                     let fg = theme.foreground.as_egui_color();
@@ -140,7 +142,7 @@ impl Renderer {
                                                 let pill_radius = egui::CornerRadius::same(
                                                     tabbar_cfg.corner_radius_tab,
                                                 );
-                                                if is_active {
+                                                if is_active && !single_tab {
                                                     painter.rect_filled(
                                                         pill,
                                                         pill_radius,
@@ -152,7 +154,7 @@ impl Renderer {
                                                         egui::Stroke::new(1.0, border),
                                                         egui::StrokeKind::Inside,
                                                     );
-                                                } else {
+                                                } else if !single_tab {
                                                     if tab_hovered {
                                                         painter.rect_filled(
                                                             pill,
@@ -183,15 +185,28 @@ impl Renderer {
                                                         );
                                                     }
                                                 }
-                                                // Title: centered, fitted between
-                                                // the left close reserve and the
-                                                // right shortcut reserve.
-                                                let shortcut = crate::tabbar::shortcut_label(i);
-                                                let max_title = crate::tabbar::title_max_width(
-                                                    tab_w,
-                                                    shortcut.is_some(),
-                                                    &tabbar_cfg,
-                                                );
+                                                // Title: centered. A multi-tab
+                                                // bar fits it between the left
+                                                // close reserve and the right
+                                                // shortcut reserve; a lone tab
+                                                // has neither.
+                                                let shortcut = if single_tab {
+                                                    None
+                                                } else {
+                                                    crate::tabbar::shortcut_label(i)
+                                                };
+                                                let max_title = if single_tab {
+                                                    crate::tabbar::single_tab_title_max_width(
+                                                        tab_w,
+                                                        &tabbar_cfg,
+                                                    )
+                                                } else {
+                                                    crate::tabbar::title_max_width(
+                                                        tab_w,
+                                                        shortcut.is_some(),
+                                                        &tabbar_cfg,
+                                                    )
+                                                };
                                                 let fitted = crate::tabbar::fit_title(
                                                     title, max_title, &measure,
                                                 );
@@ -216,43 +231,52 @@ impl Renderer {
                                                 }
                                                 // Close box on the left: always
                                                 // allocated (stable hit area),
-                                                // only painted on tab hover.
-                                                let ch = crate::tabbar::close_hit(
-                                                    tab_rect.min.x,
-                                                    container_h,
-                                                    &tabbar_cfg,
-                                                );
-                                                let ch_rect = egui::Rect::from_min_size(
-                                                    egui::pos2(ch[0], tab_rect.min.y),
-                                                    egui::vec2(ch[2], ch[3]),
-                                                );
-                                                let close_resp =
-                                                    ui.allocate_rect(ch_rect, egui::Sense::click());
-                                                let close_hovered = close_resp.hovered();
-                                                // `close_hovered` included: the close rect
-                                                // overlaps the tab and steals its hover
-                                                // once the pointer moves onto the ×.
-                                                if tab_hovered || close_hovered {
-                                                    if close_hovered {
-                                                        painter.circle_filled(
+                                                // only painted on tab hover. A
+                                                // lone tab draws none: closing it
+                                                // would exit the app and the
+                                                // strip is just its title.
+                                                if !single_tab {
+                                                    let ch = crate::tabbar::close_hit(
+                                                        tab_rect.min.x,
+                                                        container_h,
+                                                        &tabbar_cfg,
+                                                    );
+                                                    let ch_rect = egui::Rect::from_min_size(
+                                                        egui::pos2(ch[0], tab_rect.min.y),
+                                                        egui::vec2(ch[2], ch[3]),
+                                                    );
+                                                    let close_resp = ui.allocate_rect(
+                                                        ch_rect,
+                                                        egui::Sense::click(),
+                                                    );
+                                                    let close_hovered = close_resp.hovered();
+                                                    // `close_hovered` included: the close rect
+                                                    // overlaps the tab and steals its hover
+                                                    // once the pointer moves onto the ×.
+                                                    if tab_hovered || close_hovered {
+                                                        if close_hovered {
+                                                            painter.circle_filled(
+                                                                ch_rect.center(),
+                                                                8.0,
+                                                                border.gamma_multiply(0.6),
+                                                            );
+                                                        }
+                                                        painter.text(
                                                             ch_rect.center(),
-                                                            8.0,
-                                                            border.gamma_multiply(0.6),
+                                                            egui::Align2::CENTER_CENTER,
+                                                            "×",
+                                                            font_id.clone(),
+                                                            if close_hovered { fg } else { dim },
                                                         );
                                                     }
-                                                    painter.text(
-                                                        ch_rect.center(),
-                                                        egui::Align2::CENTER_CENTER,
-                                                        "×",
-                                                        font_id.clone(),
-                                                        if close_hovered { fg } else { dim },
-                                                    );
-                                                }
-                                                if close_resp.clicked() {
-                                                    // Per-tab close; the last
-                                                    // tab's close exits the app
-                                                    // (App::close_tab).
-                                                    close_tab = Some(i);
+                                                    if close_resp.clicked() {
+                                                        // Per-tab close; the last
+                                                        // tab's close exits the app
+                                                        // (App::close_tab).
+                                                        close_tab = Some(i);
+                                                    } else if tab_resp.clicked() {
+                                                        selected_tab = Some(i);
+                                                    }
                                                 } else if tab_resp.clicked() {
                                                     selected_tab = Some(i);
                                                 }
