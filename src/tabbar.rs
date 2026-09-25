@@ -141,7 +141,7 @@ pub fn single_tab_title_max_width(tab_w: f32, config: &TabbarConfig) -> f32 {
 /// `measure` maps text to logical width (the overlay passes a font-based
 /// measurer; tests pass a stub). Always terminates: worst case returns an
 /// empty string when even `…` doesn't fit.
-pub fn fit_title(title: &str, max_width: f32, measure: &dyn Fn(&str) -> f32) -> String {
+pub fn fit_title(title: &str, max_width: f32, measure: &mut dyn FnMut(&str) -> f32) -> String {
     if max_width <= 0.0 {
         return String::new();
     }
@@ -215,30 +215,30 @@ mod tests {
 
     #[test]
     fn fit_title_passes_through_when_narrow() {
-        let m = |s: &str| s.chars().count() as f32 * 8.0;
-        assert_eq!(fit_title("hi", 144.0, &m), "hi");
+        let mut m = |s: &str| s.chars().count() as f32 * 8.0;
+        assert_eq!(fit_title("hi", 144.0, &mut m), "hi");
     }
 
     #[test]
     fn fit_title_truncates_with_ellipsis() {
-        let m = |s: &str| s.chars().count() as f32 * 8.0;
+        let mut m = |s: &str| s.chars().count() as f32 * 8.0;
         // 144pt / 8 = 18 chars max; 17 chars + ellipsis.
-        let out = fit_title("abcdefghijklmnopqrstuvwxyz", 144.0, &m);
+        let out = fit_title("abcdefghijklmnopqrstuvwxyz", 144.0, &mut m);
         assert_eq!(out, "abcdefghijklmnopq…");
         assert!(m(&out) <= 144.0);
     }
 
     #[test]
     fn fit_title_empty_when_nothing_fits() {
-        let m = |s: &str| s.chars().count() as f32 * 8.0;
-        assert_eq!(fit_title("hi", 0.0, &m), "");
-        assert_eq!(fit_title("hi", 4.0, &m), "");
+        let mut m = |s: &str| s.chars().count() as f32 * 8.0;
+        assert_eq!(fit_title("hi", 0.0, &mut m), "");
+        assert_eq!(fit_title("hi", 4.0, &mut m), "");
     }
 
     #[test]
     fn fit_title_handles_multibyte_boundaries() {
-        let m = |s: &str| s.chars().count() as f32 * 8.0;
-        let out = fit_title("héllo wörld", 40.0, &m);
+        let mut m = |s: &str| s.chars().count() as f32 * 8.0;
+        let out = fit_title("héllo wörld", 40.0, &mut m);
         // 5 chars max: 4 chars + ellipsis, split on char boundary.
         assert_eq!(out, "héll…");
         assert!(out.is_char_boundary(out.len()));

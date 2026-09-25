@@ -825,6 +825,27 @@ mod tests {
     }
 
     #[test]
+    fn erase_scopes_wide_repair_to_cursor_row() {
+        // EL must repair the cursor row but leave other rows untouched.
+        let mut g = Grid::new(4, 3, test_theme());
+        for y in 0..3 {
+            g.set_cursor(0, y);
+            g.put_char('中');
+        }
+        g.set_cursor(0, 0);
+        g.erase_in_line(0);
+        assert_eq!(g.cell(0, 0).unwrap().width, 1);
+        // Row 1 keeps its wide pair intact after an EL on row 0.
+        assert_eq!(g.cell(0, 1).unwrap().width, 2);
+        assert_eq!(g.cell(1, 1).unwrap().width, 0);
+        // ED 0 repairs only the cursor row; rows below are blanked clean.
+        g.set_cursor(0, 1);
+        g.erase_in_display(0);
+        assert_eq!(g.cell(0, 1).unwrap().ch, ' ');
+        assert_eq!(g.cell(0, 2).unwrap().ch, ' ');
+    }
+
+    #[test]
     fn resize_repairs_stranded_wide() {
         let mut g = Grid::new(4, 1, test_theme());
         g.put_char('a');
@@ -1011,6 +1032,27 @@ mod tests {
         assert!(g.set_scroll_region(1, 2));
         g.resize(3, 5);
         assert_eq!(g.scroll_region(), (0, 4));
+    }
+
+    #[test]
+    fn scrollback_worst_case_stays_within_byte_budget() {
+        // Line-count cap is the design (predictable UX, no byte budget):
+        // this test pins the worst case so a `Cell` growth shows up here
+        // instead of as silent RSS. At defaults (10k lines, max 1024
+        // cols) the estimate must stay under 1GB per tab; `Cell` itself
+        // must stay small (inline fields, boxed extras only).
+        let cell = std::mem::size_of::<Cell>();
+        assert!(cell <= 64, "Cell grew to {cell} bytes");
+        let cfg = crate::config::Config::default();
+        let worst =
+            (cfg.terminal.scrollback_lines + cfg.terminal.max_dim) * cfg.terminal.max_dim * cell;
+        assert!(worst < 1024 * 1024 * 1024, "worst={worst} bytes");
+        // And the cap is actually enforced: overfill drops the oldest.
+        let mut g = Grid::new_with_config(4, 2, test_theme(), &cfg);
+        for _ in 0..(cfg.terminal.scrollback_lines + 10) {
+            g.newline();
+        }
+        assert!(g.scrollback_len() <= cfg.terminal.scrollback_lines);
     }
 
     #[test]

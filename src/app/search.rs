@@ -6,11 +6,30 @@
 
 use winit::keyboard::{Key, ModifiersState};
 
+use std::time::{Duration, Instant};
+
 use super::App;
 use super::tab::Tab;
 use crate::config::InputConfig;
 use crate::grid::Grid;
 use crate::search::{self, Match, SearchView};
+
+/// Throttle background rescans while output streams: a full 10k-line scan
+/// per burst is `O(scrollback)` per frame; query edits still re-pick
+/// immediately.
+pub(crate) const RESCAN_DEBOUNCE: Duration = Duration::from_millis(150);
+
+pub(crate) fn should_skip_rescan(
+    needs_pick: bool,
+    query_empty: bool,
+    searched_at: Option<Instant>,
+    now: Instant,
+) -> bool {
+    if needs_pick || query_empty {
+        return false;
+    }
+    searched_at.is_some_and(|t| now.duration_since(t) < RESCAN_DEBOUNCE)
+}
 
 /// Find-bar state for one tab.
 pub struct SearchPanel {
@@ -25,6 +44,8 @@ pub struct SearchPanel {
     pub focus_requested: bool,
     /// The next recompute must re-pick `current` (query/open changed).
     needs_pick: bool,
+    /// Last full scan time, for [`RESCAN_DEBOUNCE`] throttling.
+    searched_at: Option<Instant>,
 }
 
 impl Default for SearchPanel {
@@ -37,6 +58,7 @@ impl Default for SearchPanel {
             searched_version: u64::MAX,
             focus_requested: false,
             needs_pick: false,
+            searched_at: None,
         }
     }
 }
@@ -61,11 +83,13 @@ impl SearchPanel {
         self.matches.clear();
         self.current = None;
         self.needs_pick = false;
+        self.searched_at = None;
     }
 
     /// Drop the cached matches (grid content or tab changed).
     pub fn invalidate(&mut self) {
         self.searched_version = u64::MAX;
+        self.searched_at = None;
     }
 
     /// Query was edited in the bar: re-match and re-anchor `current`.
@@ -80,6 +104,17 @@ impl SearchPanel {
     pub fn refresh(&mut self, grid: &Grid) -> bool {
         let version = grid.content_version;
         if self.searched_version == version {
+            return false;
+        }
+        // Streaming output while the bar is open: throttle full rescans,
+        // but never delay a query/open re-pick or an empty query (cheap).
+        let now = Instant::now();
+        if should_skip_rescan(
+            self.needs_pick,
+            self.query.is_empty(),
+            self.searched_at,
+            now,
+        ) {
             return false;
         }
         self.matches = search::find_matches(grid, &self.query);
@@ -98,6 +133,7 @@ impl SearchPanel {
             false
         };
         self.searched_version = version;
+        self.searched_at = Some(now);
         picked
     }
 
@@ -356,7 +392,10 @@ mod tests {
         // Same grid version: no recompute, no re-pick.
         assert!(!panel.refresh(&g));
         // New output (version bump) keeps the index but clamps to range.
+        // Background rescans are debounced: force the window open so the
+        // test is deterministic regardless of wall-clock timing.
         g.newline();
+        panel.searched_at = None;
         assert!(!panel.refresh(&g));
         assert_eq!(panel.current, Some(1));
         // An empty result drops the current match.
@@ -367,5 +406,20 @@ mod tests {
         assert_eq!(panel.counter(), (0, 0));
         assert!(panel.view(&g).is_none());
         assert!(!panel.step(true));
+    }
+
+    #[test]
+    fn rescan_debounce_skips_background_but_not_query() {
+        use std::time::Instant;
+        let now = Instant::now();
+        // Query edits and empty queries never throttle (cheap / interactive).
+        assert!(!should_skip_rescan(true, false, Some(now), now));
+        assert!(!should_skip_rescan(false, true, Some(now), now));
+        assert!(!should_skip_rescan(false, false, None, now));
+        // Background rescan within the window skips.
+        assert!(should_skip_rescan(false, false, Some(now), now));
+        // Outside the window it rescans.
+        let old = now - RESCAN_DEBOUNCE - std::time::Duration::from_millis(1);
+        assert!(!should_skip_rescan(false, false, Some(old), now));
     }
 }

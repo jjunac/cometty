@@ -1,8 +1,19 @@
 //! PTY drain + resize plumbing.
 
+use std::time::{Duration, Instant};
+
 use super::App;
 use crate::app::tab::{active_after_removals, term_height_px};
 use crate::pty::PtyEvent;
+
+/// Per-frame drain budget: a burst (`cat` a huge file, paste flood) must
+/// not block the UI thread. Excess stays queued and continues next frame.
+pub(crate) const MAX_DRAIN_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_DRAIN_TIME: Duration = Duration::from_millis(4);
+
+pub(crate) fn drain_budget_exceeded(bytes: usize, elapsed: Duration) -> bool {
+    bytes >= MAX_DRAIN_BYTES || elapsed >= MAX_DRAIN_TIME
+}
 
 impl App {
     pub(crate) fn scroll_terminal(&mut self, delta: isize) {
@@ -27,11 +38,15 @@ impl App {
         // the app-wide arboard handle is borrowed mutably: collect first,
         // apply after the tab loop.
         let mut clipboard_ops: Vec<(usize, crate::term::ClipboardOp)> = Vec::new();
+        let start = Instant::now();
+        let mut drained_bytes: usize = 0;
+        let mut budget_hit = false;
         for (i, tab) in self.tabs.iter_mut().enumerate() {
             let mut got_bytes = false;
             loop {
                 match tab.pty.try_recv() {
                     Some(PtyEvent::Data(bytes)) => {
+                        drained_bytes = drained_bytes.saturating_add(bytes.len());
                         tab.terminal.feed(&bytes);
                         // Query replies (DA / CPR / DSR / DECRQM) flow back.
                         let reply = tab.terminal.take_response();
@@ -42,6 +57,10 @@ impl App {
                             .extend(tab.terminal.take_clipboard().into_iter().map(|op| (i, op)));
                         got_data = true;
                         got_bytes = true;
+                        if drain_budget_exceeded(drained_bytes, start.elapsed()) {
+                            budget_hit = true;
+                            break;
+                        }
                     }
                     Some(PtyEvent::Exit) => {
                         log::info!("shell exited (tab {i})");
@@ -57,6 +76,9 @@ impl App {
             // per burst rather than per 8KB chunk.
             if got_bytes {
                 tab.refresh_title();
+            }
+            if budget_hit {
+                break;
             }
         }
         // Apply OSC 52 requests while tab indices still match (a tab
@@ -80,8 +102,9 @@ impl App {
             // Dropping to 1 tab hides the bar and hands space back.
             self.sync_tab_sizes();
         }
-        if got_data {
+        if got_data && self.should_clear_selection() {
             // New output invalidates the selected text; alt switches too.
+            // Skipped mid-drag (see `should_clear_selection`).
             self.clear_selection();
             if let Some(tab) = self.active_tab_mut() {
                 tab.is_alt = tab.terminal.grid().is_alt();
@@ -93,9 +116,12 @@ impl App {
             }
             // Synchronized output (`CSI ? 2026 h`): batch intermediate
             // frames; the end marker (`l`) clears `in_sync` so that drain
-            // redraws once with the final state.
+            // redraws once with the final state. A budget hit always
+            // re-requests: queued bytes remain and need another drain.
             let in_sync = self.active_tab().is_some_and(|t| t.terminal.in_sync());
-            if !in_sync && let Some(w) = self.window.as_ref() {
+            if (budget_hit || !in_sync)
+                && let Some(w) = self.window.as_ref()
+            {
                 w.request_redraw();
             }
         }
@@ -148,5 +174,35 @@ impl App {
                 tab.selecting = false;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drain_budget_trips_on_bytes_or_time() {
+        assert!(!drain_budget_exceeded(0, Duration::ZERO));
+        assert!(!drain_budget_exceeded(MAX_DRAIN_BYTES - 1, Duration::ZERO));
+        assert!(drain_budget_exceeded(MAX_DRAIN_BYTES, Duration::ZERO));
+        assert!(drain_budget_exceeded(MAX_DRAIN_BYTES + 1, Duration::ZERO));
+        assert!(drain_budget_exceeded(0, MAX_DRAIN_TIME));
+        assert!(drain_budget_exceeded(
+            0,
+            MAX_DRAIN_TIME + Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn output_clears_selection_only_outside_drag() {
+        // The `drain_pty` guard: a completed (or absent) selection clears
+        // on output, a mid-drag one survives.
+        assert!(super::super::selection_view::should_clear_selection_for(
+            false
+        ));
+        assert!(!super::super::selection_view::should_clear_selection_for(
+            true
+        ));
     }
 }

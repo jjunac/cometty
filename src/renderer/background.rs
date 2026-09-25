@@ -46,6 +46,19 @@ fn fs_main(@location(0) color: vec3<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Grow/shrink policy for the bg vertex buffer: grow on overflow, shrink
+/// only when usage drops below a quarter (hysteresis avoids thrash on
+/// resize flicker). Returns the new capacity when a reallocation is due.
+pub(crate) fn next_bg_capacity(capacity: usize, vert_count: usize) -> Option<usize> {
+    if vert_count > capacity {
+        return Some(vert_count.next_power_of_two().max(1024));
+    }
+    if capacity > 1024 && vert_count * 4 < capacity {
+        return Some(vert_count.next_power_of_two().max(1024));
+    }
+    None
+}
+
 /// Thickness of the text-underline strip, derived from the (already
 /// DPI-scaled) line height so it stays ~1px at 1x and scales on HiDPI.
 pub(crate) fn underline_thickness(line_height: f32, font: &crate::config::FontConfig) -> f32 {
@@ -326,8 +339,8 @@ impl super::Renderer {
         let vert_count = verts.len();
         self.bg_scratch = verts;
 
-        if vert_count > self.bg_vertex_capacity {
-            self.bg_vertex_capacity = vert_count.next_power_of_two().max(1024);
+        if let Some(cap) = next_bg_capacity(self.bg_vertex_capacity, vert_count) {
+            self.bg_vertex_capacity = cap;
             self.bg_vertex_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("bg verts"),
                 size: (self.bg_vertex_capacity * std::mem::size_of::<BgVertex>()) as u64,
@@ -367,5 +380,19 @@ mod tests {
         let b2 = bar_cursor_width(16.8, &cursor);
         assert!((h2 - h1 * 2.0).abs() < 0.01, "h2={h2}");
         assert!((b2 - b1 * 2.0).abs() < 0.01, "b2={b2}");
+    }
+
+    #[test]
+    fn bg_capacity_grows_and_shrinks_with_hysteresis() {
+        // Grow on overflow.
+        assert_eq!(next_bg_capacity(1024, 1025), Some(2048));
+        // No churn inside the hysteresis band.
+        assert_eq!(next_bg_capacity(4096, 2000), None);
+        assert_eq!(next_bg_capacity(4096, 1024), None);
+        // Shrink only below a quarter, floored at 1024.
+        assert_eq!(next_bg_capacity(4096, 500), Some(1024));
+        assert_eq!(next_bg_capacity(8192, 0), Some(1024));
+        // Small buffers never shrink below the floor.
+        assert_eq!(next_bg_capacity(1024, 0), None);
     }
 }

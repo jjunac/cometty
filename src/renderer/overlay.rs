@@ -16,6 +16,26 @@ pub(crate) struct OverlayOutput {
     pub(crate) egui_repaint_delay: std::time::Duration,
 }
 
+/// Skip the egui pass when no chrome is visible: hidden tab bar, closed
+/// find/settings/log panels, and a hidden (or alt-screen) scrollbar.
+/// Pure for headless testing; the caller still drains egui input and
+/// advances the scrollbar fade so animations wake the loop.
+pub(crate) fn should_skip_overlay(
+    tab_h: f32,
+    search_open: bool,
+    settings_open: bool,
+    logs_open: bool,
+    is_alt: bool,
+    scrollbar_opacity: f32,
+    scrollbar_dragging: bool,
+) -> bool {
+    tab_h <= 0.0
+        && !search_open
+        && !settings_open
+        && !logs_open
+        && (is_alt || (scrollbar_opacity <= 0.01 && !scrollbar_dragging))
+}
+
 impl Renderer {
     pub(crate) fn paint_overlay(&mut self, scroll: ScrollCtx<'_>) -> OverlayOutput {
         let ScrollCtx {
@@ -47,6 +67,44 @@ impl Renderer {
         let mut close_tab: Option<usize> = None;
         let mut new_tab = false;
         let mut hovered = false;
+
+        // No chrome visible: skip the egui pass entirely (tessellation +
+        // buffer uploads on every blink/output frame). Scrollbar fade still
+        // advances via `update` below so it can wake the loop while animating.
+        if should_skip_overlay(
+            tab_h,
+            search.open,
+            settings.open,
+            logs.open,
+            is_alt,
+            opacity,
+            scrollbar.is_dragging(),
+        ) {
+            let _ = self.egui_state.take_egui_input(window);
+            self.search_bar_rect = None;
+            let now = std::time::Instant::now();
+            let animating =
+                scrollbar.update(now, total, visible, offset, is_alt, false, &scrollbar_cfg);
+            let egui_repaint_delay = if animating {
+                std::time::Duration::ZERO
+            } else {
+                std::time::Duration::MAX
+            };
+            let screen_descriptor = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [self.width, self.height],
+                pixels_per_point: scale,
+            };
+            return OverlayOutput {
+                scroll_to: None,
+                selected_tab: None,
+                close_tab: None,
+                new_tab: false,
+                search: super::search_ui::SearchUiOutput::default(),
+                paint_jobs: Vec::new(),
+                screen_descriptor,
+                egui_repaint_delay,
+            };
+        }
 
         let egui_input = self.egui_state.take_egui_input(window);
         let ctx = self.egui_ctx.clone();
@@ -117,15 +175,30 @@ impl Renderer {
                                         // with the scroll offset, unlike the
                                         // fixed container rect above.
                                         let painter = ui.painter().clone();
-                                        let measure = |s: &str| {
-                                            painter
+                                        // Cached widths: titles rarely change
+                                        // but shaping ran per title per frame.
+                                        if self.title_width_font.as_ref() != Some(&font_id) {
+                                            self.title_width_cache.clear();
+                                            self.title_width_font = Some(font_id.clone());
+                                        }
+                                        if self.title_width_cache.len() > 512 {
+                                            self.title_width_cache.clear();
+                                        }
+                                        let cache = &mut self.title_width_cache;
+                                        let mut measure = |s: &str| {
+                                            if let Some(w) = cache.get(s) {
+                                                return *w;
+                                            }
+                                            let w = painter
                                                 .layout_no_wrap(
                                                     s.to_owned(),
                                                     font_id.clone(),
                                                     egui::Color32::WHITE,
                                                 )
                                                 .size()
-                                                .x
+                                                .x;
+                                            cache.insert(s.to_owned(), w);
+                                            w
                                         };
                                         for (i, title) in tab_titles.iter().enumerate() {
                                             ui.push_id(i, |ui| {
@@ -208,7 +281,9 @@ impl Renderer {
                                                     )
                                                 };
                                                 let fitted = crate::tabbar::fit_title(
-                                                    title, max_title, &measure,
+                                                    title,
+                                                    max_title,
+                                                    &mut measure,
                                                 );
                                                 painter.text(
                                                     tab_rect.center(),
@@ -475,5 +550,41 @@ impl Renderer {
             screen_descriptor,
             egui_repaint_delay,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_skip_overlay;
+
+    #[test]
+    fn overlay_skips_only_when_no_chrome_visible() {
+        // Idle single-tab, panels closed, scrollbar hidden: skip.
+        assert!(should_skip_overlay(
+            0.0, false, false, false, false, 0.0, false
+        ));
+        // Alt screen hides the scrollbar: skip even with opacity set.
+        assert!(should_skip_overlay(
+            0.0, false, false, false, true, 1.0, false
+        ));
+        // Any visible chrome keeps the pass.
+        assert!(!should_skip_overlay(
+            38.0, false, false, false, false, 0.0, false
+        ));
+        assert!(!should_skip_overlay(
+            0.0, true, false, false, false, 0.0, false
+        ));
+        assert!(!should_skip_overlay(
+            0.0, false, true, false, false, 0.0, false
+        ));
+        assert!(!should_skip_overlay(
+            0.0, false, false, true, false, 0.0, false
+        ));
+        assert!(!should_skip_overlay(
+            0.0, false, false, false, false, 1.0, false
+        ));
+        assert!(!should_skip_overlay(
+            0.0, false, false, false, false, 0.0, true
+        ));
     }
 }

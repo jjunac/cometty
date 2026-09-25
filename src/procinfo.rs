@@ -2,8 +2,10 @@
 //!
 //! Best-effort only: every function returns `None` when the platform or the
 //! process state makes the answer unavailable (other-user processes, a pid
-//! that just exited, Windows), and callers then fall back to terminal-
-//! reported data (OSC 7) or to an empty format variable.
+//! that just exited, Windows), and callers then fall back to shell-reported
+//! data (OSC 7) or to an empty format variable. `$cwd` queries target the
+//! shell's pid (see [`crate::pty::PtySession::shell_pid`]), not the
+//! foreground job, so a job's transient `chdir`s never move the label.
 //!
 //! Query cost is a couple of syscalls per call; the app caches results per
 //! tab and only refreshes after that tab produced output (see

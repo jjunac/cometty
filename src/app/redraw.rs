@@ -52,14 +52,42 @@ impl App {
         // the hint modifier is not held and `underline = "hover"`).
         let link_hints = self.link_hint_view();
 
-        // Owned snapshot so the tabs borrow ends before `render`
-        // mutably borrows the renderer and the active scrollbar.
-        let snapshot = match self.active_tab() {
+        let active = self.active;
+        let Some(version) = self.tabs.get(active).map(|t| t.terminal.grid().version) else {
+            return;
+        };
+        // Version-gated snapshot: idle blink frames reuse the last clone
+        // instead of re-cloning `rows x cols` Cells every frame. A tab
+        // switch changes `active`, so two tabs sharing a version still
+        // rebuild (their content differs).
+        if self.snapshot_tab != active || self.snapshot_version != version {
+            let rows: Vec<Vec<grid::Cell>> = self.tabs[active]
+                .terminal
+                .grid()
+                .view_rows()
+                .into_iter()
+                .cloned()
+                .collect();
+            self.snapshot_rows = rows;
+            self.snapshot_version = version;
+            self.snapshot_tab = active;
+        }
+
+        // Small owned fields; the heavy `rows` stay in the cache above and
+        // are borrowed for `render` (disjoint from the `&mut` borrows below).
+        let (
+            cursor,
+            effective_cursor,
+            cursor_shape,
+            total,
+            visible,
+            offset,
+            is_alt,
+            selection_view,
+        ) = match self.tabs.get(active) {
             Some(tab) => {
                 let grid = tab.terminal.grid();
                 let cursor = grid.cursor();
-                let rows: Vec<Vec<grid::Cell>> = grid.view_rows().into_iter().cloned().collect();
-                let version = grid.version;
                 let style = tab.terminal.cursor_style();
                 // Steady cursors (DECSCUSR 2/4/6) ignore the blink phase;
                 // blinking shapes follow `self.cursor_visible`.
@@ -75,10 +103,8 @@ impl App {
                         grid.rows(),
                     )
                 });
-                Some((
-                    rows,
+                (
                     cursor,
-                    version,
                     effective_cursor,
                     style.shape,
                     total,
@@ -86,24 +112,9 @@ impl App {
                     tab.terminal.scroll_offset(),
                     grid.is_alt(),
                     selection_view,
-                ))
+                )
             }
-            None => None,
-        };
-        let Some((
-            rows,
-            cursor,
-            version,
-            effective_cursor,
-            cursor_shape,
-            total,
-            visible,
-            offset,
-            is_alt,
-            selection_view,
-        )) = snapshot
-        else {
-            return;
+            None => return,
         };
         // Highlight snapshot for the find bar (owned, so the tab can be
         // borrowed mutably for the overlay below).
@@ -113,29 +124,36 @@ impl App {
         // Owned: the overlay borrows titles while also taking
         // `&mut` to the active tab's scrollbar.
         let titles = self.tab_titles();
-        let active = self.active;
 
-        let (renderer, window) = match (self.renderer.as_mut(), self.window.as_ref()) {
-            (Some(r), Some(w)) => (r, w),
-            _ => return,
-        };
         // Snapshot for settings change detection: the overlay mutates
         // `self.config` in place during `render`; any diff is live-applied
         // and auto-saved afterwards (both Ok and surface-error paths).
-        let config_before = self.config.clone();
+        // Gated on the panel: idle frames skip the full `Config` clone.
+        let config_before: Option<crate::config::Config> = if self.settings.open {
+            Some(self.config.clone())
+        } else {
+            None
+        };
         // Same idea for the find bar: the query field mutates `tab.search`
         // in place during the frame; a change re-matches on the next redraw.
-        let search_query_before = self
-            .tabs
-            .get(active)
-            .map(|t| t.search.query.clone())
-            .unwrap_or_default();
-        let output = {
+        // Closed bars can't edit, so skip that `String` clone too.
+        let search_query_before: Option<String> = if self.search_open() {
+            self.tabs.get(active).map(|t| t.search.query.clone())
+        } else {
+            None
+        };
+        // Borrow the cached rows (disjoint from the `&mut` borrows below).
+        let (output, config_changed, query_changed) = {
+            let (Some(renderer), Some(window)) = (self.renderer.as_mut(), self.window.as_ref())
+            else {
+                return;
+            };
             let Some(tab) = self.tabs.get_mut(active) else {
                 return;
             };
-            match renderer.render(
-                &rows,
+            let rows = &self.snapshot_rows;
+            let out = match renderer.render(
+                rows,
                 renderer::CursorCtx {
                     pos: (cursor.x, cursor.y),
                     visible: effective_cursor,
@@ -171,13 +189,26 @@ impl App {
                     let fullscreen =
                         super::is_fullscreen_like(window, s.width.max(1), s.height.max(1));
                     renderer.resize(s.width.max(1), s.height.max(1), fullscreen);
-                    if self.config != config_before {
-                        self.apply_settings_changes(&config_before);
+                    if let Some(before) = config_before.as_ref()
+                        && self.config != *before
+                    {
+                        self.apply_settings_changes(before);
                         self.save_config_from_settings();
                     }
                     return;
                 }
-            }
+            };
+            // Did the frame mutate live state? Compare against the gated
+            // snapshots (None = panel closed = no mutation possible).
+            let cfg_changed = config_before
+                .as_ref()
+                .is_some_and(|before| self.config != *before);
+            let q_changed = search_query_before.as_ref().is_some_and(|before| {
+                self.tabs
+                    .get(active)
+                    .is_some_and(|t| t.search.query != *before)
+            });
+            (out, cfg_changed, q_changed)
         };
 
         // egui's own next-frame request (hover fades, panel animations,
@@ -209,11 +240,7 @@ impl App {
         }
         // The bar edited the query during this frame: re-match + reveal on
         // the next redraw (this frame's highlight was already shaped).
-        if self
-            .tabs
-            .get(active)
-            .is_some_and(|t| t.search.query != search_query_before)
-        {
+        if query_changed {
             if let Some(tab) = self.tabs.get_mut(active) {
                 tab.search.query_changed();
             }
@@ -249,8 +276,11 @@ impl App {
         }
         // Settings overlay edited the live config during this frame:
         // route to the session and auto-save (GUI wins over external edits).
-        if self.config != config_before {
-            self.apply_settings_changes(&config_before);
+        // `config_before` is `None` when the panel was closed (no clone, no
+        // mutation possible); `config_changed` was computed right after the
+        // frame while the snapshot was still alive.
+        if config_changed && let Some(before) = config_before.as_ref() {
+            self.apply_settings_changes(before);
             self.save_config_from_settings();
         }
     }

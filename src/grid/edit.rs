@@ -381,17 +381,22 @@ impl Grid {
         self.bump();
     }
 
-    /// After a range erase, dangling halves outside the range (lead without
-    /// continuation or vice versa) are repaired to spaces.
-    fn repair_wide_after_erase(&mut self) {
-        let blank = self.erase_cell();
-        for row in self.cells.iter_mut() {
-            Self::fix_row_wide(row, &blank);
+    /// After a range erase, dangling halves on the affected row (lead without
+    /// continuation or vice versa) are repaired to spaces. Fully blanked
+    /// rows need no repair, so callers scope this to the partial row only.
+    fn repair_wide_row(&mut self, y: usize) {
+        if y >= self.cells.len() {
+            return;
         }
+        let blank = self.erase_cell();
+        Self::fix_row_wide(&mut self.cells[y], &blank);
     }
 
     pub fn erase_in_display(&mut self, mode: u16) {
         self.stick_to_bottom();
+        // Only the cursor row can strand a wide half: fully blanked rows
+        // are already clean, and `clear_all` fills with blanks.
+        let mut repair_row: Option<usize> = None;
         match mode {
             0 => {
                 // cursor to end
@@ -404,6 +409,7 @@ impl Grid {
                         self.cells[y][x] = self.erase_cell();
                     }
                 }
+                repair_row = Some(cy);
             }
             1 => {
                 let (cx, cy) = (self.cursor.x, self.cursor.y);
@@ -415,6 +421,7 @@ impl Grid {
                 for x in 0..=cx.min(self.cols.saturating_sub(1)) {
                     self.cells[cy][x] = self.erase_cell();
                 }
+                repair_row = Some(cy);
             }
             2 => {
                 self.clear_all();
@@ -425,7 +432,9 @@ impl Grid {
             }
             _ => {}
         }
-        self.repair_wide_after_erase();
+        if let Some(y) = repair_row {
+            self.repair_wide_row(y);
+        }
         self.bump();
     }
 
@@ -450,7 +459,8 @@ impl Grid {
             }
             _ => {}
         }
-        self.repair_wide_after_erase();
+        // EL touches only the cursor row; a full-grid scan is pure overhead.
+        self.repair_wide_row(y);
         self.bump();
     }
 

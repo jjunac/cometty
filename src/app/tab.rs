@@ -19,12 +19,18 @@ use super::{App, UserEvent};
 
 /// Kernel facts for the `$command` / `$cwd` label variables, refreshed
 /// only while the tab's PTY is producing output (see
-/// [`Tab::refresh_title`]). Kept here so label rendering stays syscall-free.
+/// [`Tab::refresh_title`]). `pgid`/`command` describe the foreground job;
+/// `cwd` is the *shell's* directory, the fallback behind `OSC 7`, and
+/// `cwd_baseline` tells a live OSC 7 report from a finished job's leftover.
+/// Kept here so label rendering stays syscall-free.
 #[derive(Default)]
 pub(crate) struct Foreground {
     pgid: Option<i32>,
     command: Option<String>,
     cwd: Option<String>,
+    /// `Terminal::cwd_version` when the shell last owned the terminal;
+    /// OSC 7 reports older than this are leftovers from a finished job.
+    cwd_baseline: u64,
 }
 
 /// Cached view-space link runs for the hint underlines. Rebuilt only when
@@ -91,11 +97,16 @@ impl Tab {
     ///
     /// Called after this tab's PTY produced output: a job taking or
     /// releasing the terminal and a shell `cd` both echo through the tty,
-    /// so the foreground pid and cwd are re-read exactly when they can
-    /// change. `command` is only resolved when the pid changed; `cwd` is
-    /// re-read every time (same pid, different directory). Failed queries
-    /// keep the last known value: a job that exited between `tcgetpgrp`
-    /// and the lookup must not blank the label for a frame.
+    /// so the foreground pid and the shell's cwd are re-read exactly when
+    /// they can change. `command` is only resolved when the pid changed;
+    /// `cwd` is re-read every time (same pid, different directory) but
+    /// always from the *shell* process, never the foreground job: `ls -R`
+    /// and `find` walk with `fts(3)`, which `chdir`s through the tree and
+    /// would otherwise flicker the label. Failed queries keep the last
+    /// known value: a job that exited between `tcgetpgrp` and the lookup
+    /// must not blank the label for a frame. While the shell owns the
+    /// terminal the OSC 7 baseline is refreshed, so only reports emitted
+    /// by a job itself count as live (see [`osc7_is_live`]).
     pub(crate) fn refresh_title(&mut self) {
         let pgid = self.pty.foreground_pgid();
         if pgid != self.foreground.pgid {
@@ -104,8 +115,14 @@ impl Tab {
                 self.foreground.command = Some(command);
             }
         }
-        if let Some(cwd) = pgid.and_then(procinfo::cwd) {
+        if let Some(cwd) = self.pty.shell_pid().or(pgid).and_then(procinfo::cwd) {
             self.foreground.cwd = Some(cwd);
+        }
+        // Every OSC 7 seen while the shell owns the terminal is accounted
+        // for; a later report (from the next job) is the only one allowed
+        // to move `$cwd` away from the shell's own directory.
+        if self.pty.shell_pid().is_some_and(|pid| pgid == Some(pid)) {
+            self.foreground.cwd_baseline = self.terminal.cwd_version();
         }
     }
 }
@@ -145,7 +162,8 @@ pub struct TitleVars<'a> {
     pub title: &'a str,
     /// Foreground process basename, when the kernel could report one.
     pub command: Option<&'a str>,
-    /// Working directory (kernel-reported, else `OSC 7`), `~`-shortened.
+    /// Working directory: shell-reported `OSC 7` or the shell process's
+    /// kernel cwd (see [`preferred_cwd`]), `~`-shortened.
     pub cwd: Option<&'a str>,
     /// 0-based tab index; the `$tab` variable is 1-based.
     pub tab: usize,
@@ -280,6 +298,42 @@ fn truncate_label(label: &str, max_chars: usize) -> String {
     format!("{kept}…")
 }
 
+/// Source precedence for the `$cwd` label variable.
+///
+/// While a job owns the terminal, the shell's `OSC 7` wins: an integrated
+/// remote (`ssh`) or nested shell reports its own directory, which the
+/// local kernel query cannot see. The shell's kernel cwd is the fallback
+/// and never the job's own cwd — `ls -R` / `find` walk with `fts(3)`,
+/// which `chdir`s through the tree and would flicker the label.
+///
+/// While the shell itself owns the terminal its kernel cwd is
+/// authoritative: a live query beats an `OSC 7` left behind by a job that
+/// has since exited (a file manager, a remote shell) when the local shell
+/// emits none.
+pub fn preferred_cwd<'a>(
+    osc7: Option<&'a str>,
+    kernel: Option<&'a str>,
+    shell_foreground: bool,
+) -> Option<&'a str> {
+    if shell_foreground {
+        kernel.or(osc7)
+    } else {
+        osc7.or(kernel)
+    }
+}
+
+/// Whether an `OSC 7` report is live for the current foreground job.
+///
+/// While a job owns the terminal only a report emitted since the shell
+/// last had control counts — an integrated `ssh`/nested shell or a file
+/// manager reporting as it runs. A leftover from a finished job (a remote
+/// path after `ssh` exits, a file manager's last directory) must not
+/// resurface during the next job. At the prompt the shell's own report is
+/// always current.
+pub fn osc7_is_live(reported: u64, baseline: u64, shell_foreground: bool) -> bool {
+    shell_foreground || reported != baseline
+}
+
 /// Map an old `active` tab index across removal of `removed` indices.
 ///
 /// Counts how many removed tabs sat before `active` and shifts it down
@@ -329,14 +383,25 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, t)| {
-                // Kernel-reported cwd, else the shell's OSC 7 (shortened
-                // at the last moment so the cache keeps raw paths).
-                let cwd = t
-                    .foreground
-                    .cwd
-                    .as_deref()
-                    .or_else(|| t.terminal.cwd())
-                    .map(procinfo::shorten_home);
+                // Shell-reported OSC 7 (only while it is live for the
+                // current job) or the shell process's kernel cwd, picked by
+                // who owns the terminal (see `preferred_cwd`); shortened at
+                // the last moment so the cache keeps raw paths.
+                let shell_foreground = t
+                    .pty
+                    .shell_pid()
+                    .is_some_and(|pid| t.foreground.pgid == Some(pid));
+                let osc7_live = osc7_is_live(
+                    t.terminal.cwd_version(),
+                    t.foreground.cwd_baseline,
+                    shell_foreground,
+                );
+                let cwd = preferred_cwd(
+                    t.terminal.cwd().filter(|_| osc7_live),
+                    t.foreground.cwd.as_deref(),
+                    shell_foreground,
+                )
+                .map(procinfo::shorten_home);
                 format_title(
                     &TitleVars {
                         title: t.terminal.title(),
@@ -559,6 +624,44 @@ mod tests {
             format_title(&vars("", Some("cargo"), Some("~/dev/cometty"), 1), &cfg),
             "cargo | ~/dev/cometty"
         );
+    }
+
+    #[test]
+    fn cwd_prefers_osc7_while_a_job_is_foreground() {
+        // An integrated `ssh` / nested shell reports its own directory.
+        assert_eq!(
+            preferred_cwd(Some("/remote"), Some("/local"), false),
+            Some("/remote")
+        );
+        // Stock shell (no OSC 7): the shell's kernel cwd, never the job's.
+        assert_eq!(preferred_cwd(None, Some("/local"), false), Some("/local"));
+        assert_eq!(preferred_cwd(None, None, false), None);
+    }
+
+    #[test]
+    fn cwd_prefers_kernel_at_the_prompt() {
+        // Live kernel query beats an OSC 7 left by an exited job.
+        assert_eq!(
+            preferred_cwd(Some("/stale"), Some("/local"), true),
+            Some("/local")
+        );
+        // Kernel query unavailable: fall back to OSC 7.
+        assert_eq!(
+            preferred_cwd(Some("/reported"), None, true),
+            Some("/reported")
+        );
+        assert_eq!(preferred_cwd(None, None, true), None);
+    }
+
+    #[test]
+    fn osc7_liveness_follows_terminal_ownership() {
+        // Reported after the shell last owned the terminal: live.
+        assert!(osc7_is_live(2, 1, false));
+        // Leftover from a finished job (`ssh`, file manager): stale.
+        assert!(!osc7_is_live(1, 1, false));
+        assert!(!osc7_is_live(0, 0, false));
+        // At the prompt the shell's own report is always current.
+        assert!(osc7_is_live(1, 1, true));
     }
 
     #[test]

@@ -3,6 +3,13 @@
 use super::App;
 use crate::scrollbar;
 
+/// Pure policy behind [`App::should_clear_selection`]: output clears the
+/// selection unless a drag is in progress. Free function so it is
+/// unit-testable without an `App` (which owns the window + renderer).
+pub(crate) fn should_clear_selection_for(selecting: bool) -> bool {
+    !selecting
+}
+
 impl App {
     /// Visible `(col, view_row)` under the last known cursor position.
     /// `None` on chrome (tab bar / scrollbar) or outside the grid.
@@ -68,5 +75,13 @@ impl App {
             tab.selection = None;
             tab.selecting = false;
         }
+    }
+
+    /// Whether new PTY output may clear the active tab's selection.
+    /// An in-progress drag (`selecting`) survives: clearing it mid-drag
+    /// makes selecting under streaming output impossible. A completed
+    /// selection still clears on the next burst.
+    pub(crate) fn should_clear_selection(&self) -> bool {
+        should_clear_selection_for(self.active_tab().is_some_and(|t| t.selecting))
     }
 }

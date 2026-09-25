@@ -3,6 +3,15 @@
 use super::App;
 use crate::term::ClipboardOp;
 
+/// Normalize pasted text to the terminal's Enter byte: CRLF and lone CR
+/// both become CR, then lone LF becomes CR. Pure seam for unit tests; the
+/// bracketed-paste wrap stays in `input::wrap_bracketed_paste`.
+pub(crate) fn normalize_paste(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\n', "\r")
+}
+
 impl App {
     /// Lazily created system clipboard handle. `None` when the platform
     /// clipboard is unavailable (already logged).
@@ -131,11 +140,7 @@ impl App {
         let Some(text) = self.clipboard_text() else {
             return;
         };
-        // Normalize all line endings to CR, the terminal's Enter byte.
-        let normalized = text
-            .replace("\r\n", "\n")
-            .replace('\r', "\n")
-            .replace('\n', "\r");
+        let normalized = normalize_paste(&text);
         let enabled = self
             .active_tab()
             .is_some_and(|t| t.terminal.bracketed_paste());
@@ -143,5 +148,40 @@ impl App {
         if let Some(tab) = self.active_tab() {
             tab.pty.write(bytes);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paste_normalizes_all_line_endings_to_cr() {
+        assert_eq!(normalize_paste("a\nb"), "a\rb");
+        assert_eq!(normalize_paste("a\r\nb"), "a\rb");
+        assert_eq!(normalize_paste("a\rb"), "a\rb");
+        assert_eq!(normalize_paste("a\r\nb\nc\rd"), "a\rb\rc\rd");
+        assert_eq!(normalize_paste("plain"), "plain");
+        assert_eq!(normalize_paste(""), "");
+        // CRLF must collapse to one CR, not two.
+        assert_eq!(normalize_paste("\r\n").chars().count(), 1);
+    }
+
+    #[test]
+    fn clipboard_policy_gates_osc52() {
+        // `off` drops writes, `write` allows them, only `read-write`
+        // answers read queries (exfiltration guard).
+        let off = crate::config::ClipboardConfig {
+            osc52: "off".to_string(),
+        };
+        assert!(!off.allows_write() && !off.allows_read());
+        let write = crate::config::ClipboardConfig {
+            osc52: "write".to_string(),
+        };
+        assert!(write.allows_write() && !write.allows_read());
+        let rw = crate::config::ClipboardConfig {
+            osc52: "read-write".to_string(),
+        };
+        assert!(rw.allows_write() && rw.allows_read());
     }
 }

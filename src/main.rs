@@ -34,21 +34,51 @@ use theme::Theme;
 /// CLI overrides layered on top of the TOML file.
 /// Returns `(theme, config_path_override)` or `None` for `--help`/`--list-themes`.
 fn resolve_cli() -> anyhow::Result<Option<(Option<Theme>, Option<String>)>> {
-    let mut theme_override: Option<Theme> = None;
-    let mut config_path: Option<String> = None;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--list-themes" {
+    match parse_cli_args(&std::env::args().skip(1).collect::<Vec<_>>())? {
+        CliParsed::Run {
+            theme, config_path, ..
+        } => Ok(Some((theme, config_path))),
+        CliParsed::ListThemes => {
             for t in Theme::all() {
                 println!("{}", t.name);
             }
-            return Ok(None);
+            Ok(None)
+        }
+        CliParsed::Help => {
+            println!("cometty [--theme NAME] [--config PATH] [--list-themes]");
+            println!("Config file: $HOME/.config/cometty/config.toml");
+            println!("Settings panel: Ctrl+, / Cmd+, (or Cometty > Settings in the menu bar)");
+            Ok(None)
+        }
+    }
+}
+
+/// Parsed CLI form: pure seam over `std::env::args` so argument handling
+/// is unit-testable without spawning the GUI. Printing stays in
+/// `resolve_cli`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CliParsed {
+    Run {
+        theme: Option<Theme>,
+        config_path: Option<String>,
+    },
+    ListThemes,
+    Help,
+}
+
+pub(crate) fn parse_cli_args(args: &[String]) -> anyhow::Result<CliParsed> {
+    let mut theme_override: Option<Theme> = None;
+    let mut config_path: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--list-themes" {
+            return Ok(CliParsed::ListThemes);
         } else if arg == "--theme" {
             let name = args
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("--theme requires a value (try --list-themes)"))?;
             theme_override =
-                Some(Theme::from_name(&name).ok_or_else(|| {
+                Some(Theme::from_name(name).ok_or_else(|| {
                     anyhow::anyhow!("unknown theme {name:?} (try --list-themes)")
                 })?);
         } else if let Some(name) = arg.strip_prefix("--theme=") {
@@ -60,19 +90,19 @@ fn resolve_cli() -> anyhow::Result<Option<(Option<Theme>, Option<String>)>> {
             let path = args
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("--config requires a value"))?;
-            config_path = Some(path);
+            config_path = Some(path.clone());
         } else if let Some(path) = arg.strip_prefix("--config=") {
             config_path = Some(path.to_string());
         } else if arg == "-h" || arg == "--help" {
-            println!("cometty [--theme NAME] [--config PATH] [--list-themes]");
-            println!("Config file: $HOME/.config/cometty/config.toml");
-            println!("Settings panel: Ctrl+, / Cmd+, (or Cometty > Settings in the menu bar)");
-            return Ok(None);
+            return Ok(CliParsed::Help);
         } else {
             return Err(anyhow::anyhow!("unknown argument {arg:?} (try --help)"));
         }
     }
-    Ok(Some((theme_override, config_path)))
+    Ok(CliParsed::Run {
+        theme: theme_override,
+        config_path,
+    })
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -409,4 +439,69 @@ fn main() -> anyhow::Result<()> {
     );
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn cli_empty_runs_with_defaults() {
+        assert_eq!(
+            parse_cli_args(&args(&[])).unwrap(),
+            CliParsed::Run {
+                theme: None,
+                config_path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn cli_theme_and_config_forms() {
+        let vscode = Theme::from_name("vscode").unwrap();
+        assert_eq!(
+            parse_cli_args(&args(&["--theme", "vscode"])).unwrap(),
+            CliParsed::Run {
+                theme: Some(vscode),
+                config_path: None,
+            }
+        );
+        assert_eq!(
+            parse_cli_args(&args(&["--theme=vscode", "--config=/tmp/c.toml"])).unwrap(),
+            CliParsed::Run {
+                theme: Some(Theme::from_name("vscode").unwrap()),
+                config_path: Some("/tmp/c.toml".to_string()),
+            }
+        );
+        assert_eq!(
+            parse_cli_args(&args(&["--config", "/tmp/c.toml"])).unwrap(),
+            CliParsed::Run {
+                theme: None,
+                config_path: Some("/tmp/c.toml".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn cli_help_and_list_themes() {
+        assert_eq!(parse_cli_args(&args(&["--help"])).unwrap(), CliParsed::Help);
+        assert_eq!(parse_cli_args(&args(&["-h"])).unwrap(), CliParsed::Help);
+        assert_eq!(
+            parse_cli_args(&args(&["--list-themes"])).unwrap(),
+            CliParsed::ListThemes
+        );
+    }
+
+    #[test]
+    fn cli_rejects_bad_input() {
+        assert!(parse_cli_args(&args(&["--theme"])).is_err());
+        assert!(parse_cli_args(&args(&["--theme", "nope"])).is_err());
+        assert!(parse_cli_args(&args(&["--config"])).is_err());
+        assert!(parse_cli_args(&args(&["--frobnicate"])).is_err());
+        assert!(parse_cli_args(&args(&["extra-positional"])).is_err());
+    }
 }

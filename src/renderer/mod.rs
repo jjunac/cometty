@@ -146,6 +146,10 @@ pub struct Renderer {
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
+    /// Cached tab-title widths for the current egui font: titles rarely
+    /// change but were shaped every frame via `layout_no_wrap`.
+    title_width_cache: std::collections::HashMap<String, f32>,
+    title_width_font: Option<egui::FontId>,
 }
 
 impl Renderer {
@@ -312,6 +316,8 @@ impl Renderer {
             egui_ctx,
             egui_state,
             egui_renderer,
+            title_width_cache: std::collections::HashMap::new(),
+            title_width_font: None,
         };
         r.update_viewport(clamped_w, clamped_h);
         log::debug!(

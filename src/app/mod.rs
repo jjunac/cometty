@@ -75,6 +75,11 @@ pub struct App {
     /// Ring buffer for the log panel; the global logger also holds a clone.
     pub(crate) log_buffer: Arc<Mutex<LogBuffer>>,
     pub(crate) menu: Option<crate::menu::NativeMenu>,
+    /// Version-gated grid snapshot: idle blink frames reuse the last clone
+    /// instead of re-cloning `rows x cols` Cells every frame.
+    pub(crate) snapshot_rows: Vec<Vec<crate::grid::Cell>>,
+    pub(crate) snapshot_version: u64,
+    pub(crate) snapshot_tab: usize,
 }
 
 impl App {
@@ -112,6 +117,9 @@ impl App {
             logs: LogsPanel::default(),
             log_buffer,
             menu: None,
+            snapshot_rows: Vec::new(),
+            snapshot_version: u64::MAX,
+            snapshot_tab: usize::MAX,
         }
     }
 

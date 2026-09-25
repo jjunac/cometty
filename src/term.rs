@@ -29,6 +29,10 @@ pub struct Terminal {
     // Last OSC 7 working directory set by the shell, when it reports one.
     // Fallback source for the `$cwd` label variable.
     cwd: Option<String>,
+    // Monotonic count of OSC 7 reports, so the tab label can tell a live
+    // report (a running job's own directory) from one left behind by a
+    // finished job.
+    cwd_version: u64,
     max_title_chars: usize,
     // Last graphic character emitted via `print`, for `REP` (`CSI n b`).
     // Control sequences never clear it; only a new graphic updates it.
@@ -324,6 +328,7 @@ impl Terminal {
             pending_wrap: false,
             title: String::new(),
             cwd: None,
+            cwd_version: 0,
             max_title_chars: config.terminal.max_title_chars.max(1),
             last_graphic: None,
             pending_response: Vec::new(),
@@ -337,10 +342,15 @@ impl Terminal {
     }
 
     /// Last `OSC 7` working directory reported by the shell, when any.
-    /// Fallback source for the tab label's `$cwd` (the kernel-reported
-    /// foreground-process cwd wins when available).
+    /// Source for the tab label's `$cwd` alongside the kernel-reported
+    /// shell cwd (see `app::tab::preferred_cwd`).
     pub fn cwd(&self) -> Option<&str> {
         self.cwd.as_deref()
+    }
+
+    /// Monotonic count of `OSC 7` reports; see [`Self::cwd`].
+    pub fn cwd_version(&self) -> u64 {
+        self.cwd_version
     }
 
     #[allow(dead_code)]
@@ -493,18 +503,25 @@ impl Terminal {
         self.parser = parser;
     }
 
-    fn param_or(params: &Params, idx: usize, default: u16) -> u16 {
-        let flat: Vec<u16> = params.iter().flat_map(|p| p.iter().copied()).collect();
-        if idx < flat.len() {
-            let v = flat[idx];
-            if v == 0 { default } else { v }
-        } else {
-            default
+    fn param_at(params: &Params, idx: usize, default: u16) -> u16 {
+        let mut i = 0;
+        for group in params.iter() {
+            for &v in group.iter() {
+                if i == idx {
+                    return if v == 0 { default } else { v };
+                }
+                i += 1;
+            }
         }
+        default
     }
 
-    fn params_flat(params: &Params) -> Vec<u16> {
-        params.iter().flat_map(|p| p.iter().copied()).collect()
+    fn params_iter(params: &Params) -> impl Iterator<Item = u16> + '_ {
+        params.iter().flat_map(|p| p.iter().copied())
+    }
+
+    fn params_is_empty(params: &Params) -> bool {
+        Self::params_iter(params).next().is_none()
     }
 
     fn set_private_mode(&mut self, mode: u16, set: bool) {
@@ -662,18 +679,17 @@ impl vte::Perform for Terminal {
             if intermediates == [b'?'] && (action == 'h' || action == 'l') {
                 let set = action == 'h';
                 self.pending_wrap = false;
-                for mode in Self::params_flat(params) {
+                for mode in Self::params_iter(params) {
                     self.set_private_mode(mode, set);
                 }
             } else if intermediates == [b' '] && action == 'q' {
                 // DECSCUSR: `CSI Ps SP q` cursor shape + blink.
                 self.pending_wrap = false;
-                self.set_cursor_style(Self::param_or(params, 0, 0));
+                self.set_cursor_style(Self::param_at(params, 0, 0));
             } else if intermediates == [b'?'] && action == 'n' {
                 // DECXCPR: `CSI ? 6 n` extended cursor position report.
                 self.pending_wrap = false;
-                let flat = Self::params_flat(params);
-                if flat.first().copied().unwrap_or(0) == 6 {
+                if Self::params_iter(params).next().unwrap_or(0) == 6 {
                     let (row, col) = self.cpr_position();
                     let reply = format!("\x1b[?{row};{col}R");
                     self.push_response(reply.as_bytes());
@@ -681,14 +697,14 @@ impl vte::Perform for Terminal {
             } else if intermediates == [b'$'] && action == 'p' {
                 // DECRQM (ANSI): `CSI Ps $ p`.
                 self.pending_wrap = false;
-                let mode = Self::params_flat(params).first().copied().unwrap_or(0);
+                let mode = Self::params_iter(params).next().unwrap_or(0);
                 let val = self.grid.query_ansi_mode(mode);
                 let reply = format!("\x1b[{mode};{val}$y");
                 self.push_response(reply.as_bytes());
             } else if intermediates == [b'?', b'$'] && action == 'p' {
                 // DECRQM (private): `CSI ? Ps $ p` stub.
                 self.pending_wrap = false;
-                let mode = Self::params_flat(params).first().copied().unwrap_or(0);
+                let mode = Self::params_iter(params).next().unwrap_or(0);
                 let val = self.grid.query_private_mode(mode);
                 let reply = format!("\x1b[?{mode};{val}$y");
                 self.push_response(reply.as_bytes());
@@ -704,7 +720,7 @@ impl vte::Perform for Terminal {
             'h' | 'l' => {
                 // SM / RM without `?`: only IRM (4) is supported.
                 let set = action == 'h';
-                for mode in Self::params_flat(params) {
+                for mode in Self::params_iter(params) {
                     if mode == 4 {
                         self.grid.set_insert_mode(set);
                     }
@@ -712,14 +728,13 @@ impl vte::Perform for Terminal {
             }
             'r' => {
                 // DECSTBM: `CSI top;bottom r` (1-based). Empty = full reset.
-                let flat = Self::params_flat(params);
-                if flat.is_empty() {
+                if Self::params_is_empty(params) {
                     self.grid.reset_scroll_region();
                     self.grid.home_cursor();
                 } else {
                     let rows = self.grid.rows();
-                    let top = Self::param_or(params, 0, 1);
-                    let bottom = Self::param_or(params, 1, rows.max(1) as u16);
+                    let top = Self::param_at(params, 0, 1);
+                    let bottom = Self::param_at(params, 1, rows.max(1) as u16);
                     let top0 = top.saturating_sub(1) as usize;
                     let bottom0 = bottom.saturating_sub(1) as usize;
                     // Invalid (`top >= bottom`) is ignored.
@@ -727,40 +742,40 @@ impl vte::Perform for Terminal {
                 }
             }
             'A' => {
-                let n = Self::param_or(params, 0, 1) as isize;
+                let n = Self::param_at(params, 0, 1) as isize;
                 self.grid.move_cursor(0, -n);
             }
             'B' | 'e' => {
-                let n = Self::param_or(params, 0, 1) as isize;
+                let n = Self::param_at(params, 0, 1) as isize;
                 self.grid.move_cursor(0, n);
             }
             'C' | 'a' => {
-                let n = Self::param_or(params, 0, 1) as isize;
+                let n = Self::param_at(params, 0, 1) as isize;
                 self.grid.move_cursor(n, 0);
             }
             'D' => {
-                let n = Self::param_or(params, 0, 1) as isize;
+                let n = Self::param_at(params, 0, 1) as isize;
                 self.grid.move_cursor(-n, 0);
             }
             'E' => {
-                let n = Self::param_or(params, 0, 1) as isize;
+                let n = Self::param_at(params, 0, 1) as isize;
                 let y = self.grid.cursor().y as isize + n;
                 let y = y.clamp(0, self.grid.rows().saturating_sub(1) as isize) as usize;
                 self.grid.set_cursor(0, y);
             }
             'F' => {
-                let n = Self::param_or(params, 0, 1) as isize;
+                let n = Self::param_at(params, 0, 1) as isize;
                 let y = self.grid.cursor().y as isize - n;
                 let y = y.clamp(0, self.grid.rows().saturating_sub(1) as isize) as usize;
                 self.grid.set_cursor(0, y);
             }
             'G' | '`' => {
-                let col = Self::param_or(params, 0, 1).saturating_sub(1) as usize;
+                let col = Self::param_at(params, 0, 1).saturating_sub(1) as usize;
                 let y = self.grid.cursor().y;
                 self.grid.set_cursor(col, y);
             }
             'd' => {
-                let mut row = Self::param_or(params, 0, 1).saturating_sub(1) as usize;
+                let mut row = Self::param_at(params, 0, 1).saturating_sub(1) as usize;
                 if self.grid.origin_mode() {
                     row = row.saturating_add(self.grid.scroll_region().0);
                 }
@@ -768,19 +783,19 @@ impl vte::Perform for Terminal {
                 self.grid.set_cursor(x, row);
             }
             'H' | 'f' => {
-                let mut row = Self::param_or(params, 0, 1).saturating_sub(1) as usize;
-                let col = Self::param_or(params, 1, 1).saturating_sub(1) as usize;
+                let mut row = Self::param_at(params, 0, 1).saturating_sub(1) as usize;
+                let col = Self::param_at(params, 1, 1).saturating_sub(1) as usize;
                 if self.grid.origin_mode() {
                     row = row.saturating_add(self.grid.scroll_region().0);
                 }
                 self.grid.set_cursor(col, row);
             }
             'J' => {
-                let mode = Self::param_or(params, 0, 0);
+                let mode = Self::param_at(params, 0, 0);
                 self.grid.erase_in_display(mode);
             }
             'K' => {
-                let mode = Self::param_or(params, 0, 0);
+                let mode = Self::param_at(params, 0, 0);
                 self.grid.erase_in_line(mode);
             }
             'm' => {
@@ -791,22 +806,22 @@ impl vte::Perform for Terminal {
             'u' => self.grid.restore_cursor(),
             '@' => {
                 // ICH: insert blanks at the cursor, shifting the row right.
-                let n = Self::param_or(params, 0, 1) as usize;
+                let n = Self::param_at(params, 0, 1) as usize;
                 self.grid.insert_chars(n);
             }
             'P' => {
                 // DCH: delete chars at the cursor, shifting the row left.
-                let n = Self::param_or(params, 0, 1) as usize;
+                let n = Self::param_at(params, 0, 1) as usize;
                 self.grid.delete_chars(n);
             }
             'X' => {
                 // ECH: erase chars at the cursor without shifting.
-                let n = Self::param_or(params, 0, 1) as usize;
+                let n = Self::param_at(params, 0, 1) as usize;
                 self.grid.erase_chars(n);
             }
             'b' => {
                 // REP: repeat the last graphic character.
-                let n = Self::param_or(params, 0, 1) as usize;
+                let n = Self::param_at(params, 0, 1) as usize;
                 let n = n.clamp(1, 16384);
                 if let Some(c) = self.last_graphic {
                     // Route through `print` so wrap / wide / insert-mode
@@ -824,7 +839,7 @@ impl vte::Perform for Terminal {
                 self.push_response(b"\x1b[?1;2c");
             }
             'n' => {
-                let ps = Self::params_flat(params).first().copied().unwrap_or(0);
+                let ps = Self::params_iter(params).next().unwrap_or(0);
                 match ps {
                     5 => self.push_response(b"\x1b[0n"),
                     6 => {
@@ -836,19 +851,19 @@ impl vte::Perform for Terminal {
                 }
             }
             'L' => {
-                let n = Self::param_or(params, 0, 1) as usize;
+                let n = Self::param_at(params, 0, 1) as usize;
                 self.grid.insert_lines(n);
             }
             'M' => {
-                let n = Self::param_or(params, 0, 1) as usize;
+                let n = Self::param_at(params, 0, 1) as usize;
                 self.grid.delete_lines(n);
             }
             'S' => {
-                let n = Self::param_or(params, 0, 1) as usize;
+                let n = Self::param_at(params, 0, 1) as usize;
                 self.grid.scroll_up(n);
             }
             'T' => {
-                let n = Self::param_or(params, 0, 1) as usize;
+                let n = Self::param_at(params, 0, 1) as usize;
                 self.grid.scroll_down(n);
             }
             _ => {}
@@ -906,6 +921,7 @@ impl vte::Perform for Terminal {
         }
         if let Some(cwd) = osc_cwd(params, self.max_title_chars) {
             self.cwd = Some(cwd);
+            self.cwd_version += 1;
         }
         if let Some(link) = osc_hyperlink(params) {
             self.grid.set_hyperlink(link.as_deref());
@@ -1085,6 +1101,27 @@ mod tests {
         assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (0, 0));
         feed_str(&mut t, "\x1b[99E");
         assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (0, 3));
+    }
+
+    #[test]
+    fn csi_params_index_without_alloc() {
+        // Empty, zero, and multi-param forms all resolve without a heap
+        // Vec per query (see `param_at` / `params_iter`).
+        let mut t = test_terminal(5, 4);
+        feed_str(&mut t, "\x1b[H");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (0, 0));
+        feed_str(&mut t, "\x1b[0;0H");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (0, 0));
+        feed_str(&mut t, "\x1b[2;3H");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (2, 1));
+        // Subparam form (`:`) flattens the same way.
+        feed_str(&mut t, "\x1b[3:4H");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (3, 2));
+        // Relative moves default a missing/zero count to 1.
+        feed_str(&mut t, "\x1b[1;1H\x1b[A");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (0, 0));
+        feed_str(&mut t, "\x1b[1;1H\x1b[0C");
+        assert_eq!((t.grid().cursor().x, t.grid().cursor().y), (1, 0));
     }
 
     #[test]
@@ -1332,14 +1369,19 @@ mod tests {
     fn osc_cwd_is_stored_for_labels() {
         let mut t = test_terminal(10, 2);
         assert_eq!(t.cwd(), None);
+        assert_eq!(t.cwd_version(), 0);
         feed_str(&mut t, "\x1b]7;file://localhost/Users/x/dev\x07");
         assert_eq!(t.cwd(), Some("/Users/x/dev"));
+        assert_eq!(t.cwd_version(), 1);
         // A bare OSC 7 keeps the last directory instead of clearing it.
         feed_str(&mut t, "\x1b]7\x07");
         assert_eq!(t.cwd(), Some("/Users/x/dev"));
-        // Full reset (ESC c) drops it along with the title.
+        assert_eq!(t.cwd_version(), 1);
+        // Full reset (ESC c) drops it along with the title; the version
+        // stays monotonic so a later report still counts as fresh.
         feed_str(&mut t, "\x1bc");
         assert_eq!(t.cwd(), None);
+        assert_eq!(t.cwd_version(), 1);
         assert_eq!(t.title(), "");
     }
 
@@ -1818,5 +1860,82 @@ mod tests {
         assert_eq!(t.take_response(), b"\x1b[4;2$y");
         feed_str(&mut t, "\x1b[4h\x1b[4$p");
         assert_eq!(t.take_response(), b"\x1b[4;1$y");
+    }
+
+    /// Full observable state after a feed: cells plus the side channels
+    /// (`take_*` drain, so each snapshot owns its copy).
+    #[derive(Debug, PartialEq)]
+    struct FeedSnapshot {
+        cells: Vec<Vec<crate::grid::Cell>>,
+        title: String,
+        cwd: Option<String>,
+        clipboard: Vec<ClipboardOp>,
+        response: Vec<u8>,
+    }
+
+    fn snapshot_after(t: &mut Terminal) -> FeedSnapshot {
+        let cells = (0..t.rows())
+            .map(|y| {
+                (0..t.cols())
+                    .map(|x| t.grid().cell(x, y).unwrap())
+                    .collect()
+            })
+            .collect();
+        FeedSnapshot {
+            cells,
+            title: t.title().to_string(),
+            cwd: t.cwd().map(|s| s.to_string()),
+            clipboard: t.take_clipboard(),
+            response: t.take_response(),
+        }
+    }
+
+    #[test]
+    fn split_feeds_match_whole_feeds_at_every_offset() {
+        // The 8KB PTY read boundary can cut an escape sequence anywhere:
+        // every split point must render exactly like the one-shot feed.
+        // Covers CSI, SGR truecolor, OSC title/cwd/hyperlink/clipboard,
+        // ESC singles, alt-screen, and multibyte UTF-8 cut mid-char.
+        let cases: &[&[u8]] = &[
+            b"\x1b[2;3H",
+            b"\x1b[38;2;10;20;30mX",
+            b"\x1b]0;nvim | ~/dev\x07",
+            b"\x1b]7;file://localhost/Users/x/dev\x07",
+            b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\",
+            b"\x1b]52;c;aGk=\x07",
+            b"\x1bM\x1b7ab\x1b8",
+            b"\x1b[?1049hX\x1b[?1049l",
+            b"\x1b[1;31mhi\x1b]0;ti;tle\x07\x1b[0m",
+            "é中\x1b[31m✓ok".as_bytes(),
+        ];
+        for seq in cases {
+            let mut reference = test_terminal(10, 5);
+            reference.feed(seq);
+            let reference = snapshot_after(&mut reference);
+            for split in 1..seq.len() {
+                let mut t = test_terminal(10, 5);
+                t.feed(&seq[..split]);
+                t.feed(&seq[split..]);
+                assert_eq!(
+                    snapshot_after(&mut t),
+                    reference,
+                    "seq={seq:?} split={split}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn byte_at_a_time_feed_matches() {
+        // Degenerate chunking: one byte per `feed` must still converge.
+        let seq = b"\x1b[1;31mhi\x1b]0;title\x07\x1b[0m\x1b[2;3H";
+        let mut reference = test_terminal(10, 5);
+        reference.feed(seq);
+        let reference = snapshot_after(&mut reference);
+        let mut t = test_terminal(10, 5);
+        for b in seq.iter() {
+            t.feed(std::slice::from_ref(b));
+        }
+        assert_eq!(snapshot_after(&mut t), reference);
     }
 }
