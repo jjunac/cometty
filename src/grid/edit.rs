@@ -228,32 +228,30 @@ impl Grid {
             // 1-column grid can't fit a wide char: degrade to narrow.
             let w = if w == 2 && self.cols == 1 { 1 } else { w };
             let (cx, cy) = (self.cursor.x, self.cursor.y);
-            if cy < self.rows && cx < self.cols {
-                self.clear_split_wide(cx, cy, w);
-                self.cells[cy][cx] = super::cell::Cell {
-                    ch,
-                    extra: None,
-                    width: w as u8,
-                    fg: self.pen.fg,
-                    bg: self.pen.bg,
-                    bold: self.pen.bold,
-                    dim: self.pen.dim,
-                    italic: self.pen.italic,
-                    inverse: self.pen.inverse,
-                    strikethrough: self.pen.strikethrough,
-                    overline: self.pen.overline,
-                    underline: self.pen.underline,
-                    underline_color: self.pen.underline_color,
-                    hyperlink: self.current_hyperlink,
-                };
-                if w == 2 && cx + 1 < self.cols {
-                    self.cells[cy][cx + 1] = self.placeholder_cell();
-                }
-                self.cursor.x += w;
-                if !self.auto_wrap && self.cursor.x >= self.cols {
-                    // DECAWM off: stay on the last column, overwriting it.
-                    self.cursor.x = self.cols.saturating_sub(1);
-                }
+            self.clear_split_wide(cx, cy, w);
+            self.cells[cy][cx] = super::cell::Cell {
+                ch,
+                extra: None,
+                width: w as u8,
+                fg: self.pen.fg,
+                bg: self.pen.bg,
+                bold: self.pen.bold,
+                dim: self.pen.dim,
+                italic: self.pen.italic,
+                inverse: self.pen.inverse,
+                strikethrough: self.pen.strikethrough,
+                overline: self.pen.overline,
+                underline: self.pen.underline,
+                underline_color: self.pen.underline_color,
+                hyperlink: self.current_hyperlink,
+            };
+            if w == 2 && cx + 1 < self.cols {
+                self.cells[cy][cx + 1] = self.placeholder_cell();
+            }
+            self.cursor.x += w;
+            if !self.auto_wrap && self.cursor.x >= self.cols {
+                // DECAWM off: stay on the last column, overwriting it.
+                self.cursor.x = self.cols.saturating_sub(1);
             }
             if self.cursor.x >= self.cols {
                 // Defer wrap until next printable or explicit newline handling

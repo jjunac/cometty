@@ -303,9 +303,8 @@ impl Grid {
         self.reset_margins_and_modes();
         self.in_alt = true;
         self.scroll_offset = 0;
-        if !clear {
-            // Fresh alt buffer is already blank; keep cursor at home.
-        }
+        // Fresh alt buffer is already blank (`clear` only matters when
+        // re-entering); keep cursor at home.
         self.bump();
     }
 

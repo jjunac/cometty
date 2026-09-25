@@ -84,6 +84,10 @@ fn osc_parts(params: &[&[u8]]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
 }
 
 /// Extract an `OSC 0/1/2` window-title update from vte's split params.
+///
+/// Embedded control characters (newline, BEL, ESC, …) are stripped: titles
+/// flow into the tab bar and the OS window title, where controls could break
+/// layout or smuggle sequences.
 fn osc_title(params: &[&[u8]], max_chars: usize) -> Option<String> {
     let (num, payload) = osc_parts(params)?;
     if !TITLE_OSC.contains(&num.as_slice()) {
@@ -92,7 +96,9 @@ fn osc_title(params: &[&[u8]], max_chars: usize) -> Option<String> {
     // A bare `ESC ] 0 BEL` carries no payload: ignore it instead of
     // clearing the title.
     let payload = payload?;
-    let s = String::from_utf8_lossy(&payload).trim().to_string();
+    let raw = String::from_utf8_lossy(&payload);
+    let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let s = cleaned.trim().to_string();
     let max_chars = max_chars.max(1);
     Some(s.chars().take(max_chars).collect())
 }
@@ -1266,6 +1272,33 @@ mod tests {
             Some("split;title".to_string())
         );
         assert_eq!(osc_title(&[b"0"], 256), None);
+    }
+
+    #[test]
+    fn osc_title_strips_control_chars() {
+        // Embedded newline / BEL / ESC must not reach the tab bar or OS
+        // window title (layout breakage / sequence smuggling).
+        assert_eq!(
+            osc_title(&[b"0", b"evil\ntitle"], 256),
+            Some("eviltitle".to_string())
+        );
+        assert_eq!(osc_title(&[b"0", b"a\x07b"], 256), Some("ab".to_string()));
+        assert_eq!(
+            osc_title(&[b"2", b"\x1b]0;smuggled"], 256),
+            Some("]0;smuggled".to_string())
+        );
+        // A title of only controls collapses to empty (stored, not ignored:
+        // the shell explicitly set it).
+        assert_eq!(osc_title(&[b"0", b"\x07\x07"], 256), Some("".to_string()));
+        // Legitimate titles with `;`, `|` and unicode survive.
+        assert_eq!(
+            osc_title(&[b"0", "nvim | ~/dév".as_bytes()], 256),
+            Some("nvim | ~/dév".to_string())
+        );
+        // End-to-end: fed sequence lands sanitized in the stored title.
+        let mut t = test_terminal(10, 2);
+        feed_str(&mut t, "\x1b]0;evil\ntitle\x07");
+        assert_eq!(t.title(), "eviltitle");
     }
 
     #[test]

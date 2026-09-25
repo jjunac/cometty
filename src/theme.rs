@@ -168,7 +168,6 @@ impl Theme {
     }
 
     /// Previous built-in colors (Tomorrow Night), kept for fallback/tests.
-    #[allow(dead_code)]
     pub const fn tomorrow_night() -> Self {
         Self {
             name: "tomorrow-night",
@@ -206,7 +205,6 @@ impl Theme {
     }
 
     /// Look up a theme by name. Used by future `--theme` / config support.
-    #[allow(dead_code)]
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "tokyo-night" | "tokyo_night" | "default" => Some(Self::tokyo_night()),
@@ -217,7 +215,6 @@ impl Theme {
     }
 
     /// All built-in themes, for future theme listing/switching UI.
-    #[allow(dead_code)]
     pub fn all() -> [Self; 3] {
         [Self::vscode(), Self::tokyo_night(), Self::tomorrow_night()]
     }

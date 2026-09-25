@@ -21,13 +21,15 @@ pub struct LinkSpan {
 
 /// URL schemes cometty is willing to hand to the OS opener. Everything else
 /// (including payload-free custom schemes) is ignored.
-const ALLOWED_SCHEMES: [&str; 5] = ["http", "https", "ftp", "file", "mailto"];
+///
+/// Note: `file` is deliberately absent. Any terminal output (remote ssh,
+/// `curl`, logs) can paint a clickable link, so handing `file://` to the OS
+/// opener would let untrusted output open arbitrary local paths.
+const ALLOWED_SCHEMES: [&str; 4] = ["http", "https", "ftp", "mailto"];
 
 /// Literal prefixes that start a URL candidate. `mailto:` needs no `//`;
-/// `www.` is accepted without a scheme.
-const PREFIXES: [&str; 6] = [
-    "http://", "https://", "ftp://", "file://", "mailto:", "www.",
-];
+/// `www.` is accepted without a scheme (normalized to `https://` at open).
+const PREFIXES: [&str; 5] = ["http://", "https://", "ftp://", "mailto:", "www."];
 
 /// Resolve a column to its cluster lead (mirrors `selection::resolve_lead`:
 /// a continuation maps back to the wide lead).
@@ -206,12 +208,26 @@ pub fn url_text(row: &[Cell], span: LinkSpan) -> String {
 
 /// The detected URL covering `col`, if any (continuations resolve to their
 /// lead). OSC 8 cells are checked by the caller first.
+///
+/// Scheme-less `www.` detections are normalized to `https://` so the
+/// `detected_url_at -> sanitize_uri -> open_command` round-trip succeeds
+/// instead of underlining a link whose click is then swallowed as rejected.
 pub fn detected_url_at(row: &[Cell], col: usize) -> Option<String> {
     let col = resolve_lead(row, col);
     detect_urls(row)
         .into_iter()
         .find(|s| col >= s.start && col <= s.end)
-        .map(|s| url_text(row, s))
+        .map(|s| normalize_url(&url_text(row, s)))
+}
+
+/// Prepend `https://` to scheme-less `www.` detections (case-insensitive);
+/// all other text passes through unchanged.
+fn normalize_url(url: &str) -> String {
+    if url.len() >= 4 && url[..4].eq_ignore_ascii_case("www.") {
+        format!("https://{url}")
+    } else {
+        url.to_string()
+    }
 }
 
 /// Per-row link runs in view space: OSC 8 links plus detected URLs not
@@ -318,11 +334,18 @@ pub fn sanitize_uri(uri: &str) -> Option<String> {
 
 /// Argv for opening `uri` on `platform`, or `None` when refused.
 /// The URI is passed as a single argument (no shell), so no escaping is
-/// needed; `cmd /C start ""` needs the empty title argument on Windows.
+/// needed on macOS/Linux (`open`/`xdg-open` exec directly). On Windows the
+/// launcher is `cmd /C start`, which *is* a shell: Rust's argv quoting only
+/// quotes args containing space/tab/newline/quote, so cmd metacharacters
+/// (`& | < > ( ) ^ % !`) in an attacker-controlled URI would be interpreted
+/// as command separators. URIs containing them are refused on Windows.
 /// Validation guarantees an allowlisted scheme, so the URI can never look
 /// like an option to the opener.
 pub fn open_command(uri: &str, platform: Platform) -> Option<Vec<String>> {
     let uri = sanitize_uri(uri)?;
+    if platform == Platform::Windows && contains_cmd_metachars(&uri) {
+        return None;
+    }
     Some(match platform {
         Platform::Macos => vec!["open".to_string(), uri],
         Platform::Linux => vec!["xdg-open".to_string(), uri],
@@ -334,6 +357,15 @@ pub fn open_command(uri: &str, platform: Platform) -> Option<Vec<String>> {
             uri,
         ],
     })
+}
+
+/// True when `uri` contains characters `cmd.exe` interprets even inside a
+/// quoted argv element (command separators, redirection, grouping, delayed
+/// / environment-variable expansion). Controls/newlines are already stripped
+/// by `sanitize_uri`, so only these printable metacharacters are checked.
+fn contains_cmd_metachars(uri: &str) -> bool {
+    uri.chars()
+        .any(|c| matches!(c, '&' | '|' | '<' | '>' | '(' | ')' | '^' | '%' | '!' | '"'))
 }
 
 #[derive(Debug)]
@@ -392,7 +424,10 @@ mod tests {
         assert_eq!(spans("www.example.com"), vec![(0, 14)]);
         assert_eq!(spans("ftp://host/file"), vec![(0, 14)]);
         assert_eq!(spans("mailto:a@b.c"), vec![(0, 11)]);
-        assert_eq!(spans("file:///tmp/x"), vec![(0, 12)]);
+        // `file://` is not an openable link (untrusted output could point it
+        // at arbitrary local paths), so it is not detected either: detecting
+        // it would underline a link whose click is then swallowed as rejected.
+        assert!(spans("file:///tmp/x").is_empty());
         // A nested prefix stays one link, not two overlapping ones.
         assert_eq!(spans("https://www.example.com"), vec![(0, 22)]);
     }
@@ -532,5 +567,69 @@ mod tests {
             vec!["cmd", "/C", "start", "", "https://x.y"]
         );
         assert!(open_command("javascript:x", Platform::Linux).is_none());
+        // `file://` is refused on every platform: untrusted terminal output
+        // must not open arbitrary local paths.
+        assert!(open_command("file:///tmp/x", Platform::Macos).is_none());
+        assert!(open_command("file:///tmp/x", Platform::Linux).is_none());
+        assert!(open_command("file:///tmp/x", Platform::Windows).is_none());
+    }
+
+    #[test]
+    fn windows_refuses_cmd_metachars_others_accept() {
+        // `&` would chain a second command under `cmd /C start`.
+        assert!(open_command("https://x.y/&calc", Platform::Windows).is_none());
+        for evil in [
+            "https://x.y/a|b",
+            "https://x.y/a>b",
+            "https://x.y/a<b",
+            "https://x.y/(b)",
+            "https://x.y/a^b",
+            "https://x.y/%PATH%",
+            "https://x.y/a!b",
+            "https://x.y/a\"b",
+        ] {
+            assert!(
+                open_command(evil, Platform::Windows).is_none(),
+                "{evil} must be refused on Windows"
+            );
+            // macOS/Linux exec the opener directly (no shell), so the same
+            // URI stays openable there.
+            assert!(
+                open_command(evil, Platform::Macos).is_some(),
+                "{evil} must stay openable on macOS"
+            );
+            assert!(
+                open_command(evil, Platform::Linux).is_some(),
+                "{evil} must stay openable on Linux"
+            );
+        }
+        // Benign query/fragment characters still pass on Windows.
+        assert!(open_command("https://x.y/a?b=c#frag", Platform::Windows).is_some());
+        // Fail-closed tradeoff: `&` is legitimate in multi-param queries
+        // (`?a=1&b=2`) but indistinguishable from cmd chaining, so such URLs
+        // are refused on Windows (copy-paste still works).
+        assert!(open_command("https://x.y/a?a=1&b=2", Platform::Windows).is_none());
+    }
+
+    #[test]
+    fn www_detection_round_trips_to_open() {
+        let row = cells("see www.example.com/x now");
+        let url = detected_url_at(&row, 5).expect("www. must be detected");
+        assert_eq!(url, "https://www.example.com/x");
+        // The normalized URL must survive validation and produce an opener
+        // argv on every platform (previously it was rejected for no scheme,
+        // swallowing the click).
+        for platform in [Platform::Macos, Platform::Linux, Platform::Windows] {
+            assert!(
+                open_command(&url, platform).is_some(),
+                "normalized www. URL must open on {platform:?}"
+            );
+        }
+        // Case-insensitive prefix still normalizes.
+        let row = cells("WWW.EXAMPLE.COM");
+        assert_eq!(
+            detected_url_at(&row, 0).as_deref(),
+            Some("https://WWW.EXAMPLE.COM")
+        );
     }
 }

@@ -76,9 +76,6 @@ impl App {
         if removed {
             self.active = active_after_removals(self.active, &exited, self.tabs.len());
         }
-        if self.tabs.is_empty() {
-            return true;
-        }
         if removed {
             // Dropping to 1 tab hides the bar and hands space back.
             self.sync_tab_sizes();

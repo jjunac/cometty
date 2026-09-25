@@ -18,3 +18,18 @@ jobs:
       - run: cargo test
       - run: cargo clippy -- -D warnings
       - run: cargo fmt --check
+
+  # macOS is a first-class target (`cfg(target_os = "macos")` covers procinfo
+  # unsafe blocks, the Dock icon, the fullscreen-stripe workaround, Cmd-key
+  # branches): compile + test it so a macOS-only break never ships green.
+  # No system-deps install needed (system frameworks ship with the runner).
+  check-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo test
+      - run: cargo clippy -- -D warnings
+      - run: cargo fmt --check
