@@ -7,10 +7,10 @@
 //! app live-applies the diff and auto-saves afterwards.
 
 use crate::app::settings::{
-    CURSOR_SHAPES, FONT_FAMILIES, KNOWN_THEMES, LOG_LEVELS, SettingsPanel, SettingsSection,
-    is_known_theme, normalize_min_max, repair_finite_f32, repair_min_u32, repair_min_u64,
-    repair_min_usize, repair_positive_f32, repair_positive_f64, reset_all, reset_section,
-    sanitize_cursor_shape, sanitize_key_label,
+    CURSOR_SHAPES, FONT_FAMILIES, KNOWN_THEMES, LINK_MODIFIERS, LINK_UNDERLINES, LOG_LEVELS,
+    OSC52_MODES, SettingsPanel, SettingsSection, is_known_theme, normalize_min_max,
+    repair_finite_f32, repair_min_u32, repair_min_u64, repair_min_usize, repair_positive_f32,
+    repair_positive_f64, reset_all, reset_section, sanitize_cursor_shape, sanitize_key_label,
 };
 use crate::config::{Config, MAX_LOG_BUFFER_LINES, MIN_LOG_BUFFER_LINES};
 
@@ -981,6 +981,114 @@ fn show_section(
                 1.0..=200.0,
                 d.input.pixel_fallback_line_height,
             );
+        }
+        SettingsSection::Links => {
+            ui.label(
+                "Hold the open modifier to underline every OSC 8 hyperlink and \
+                 detected URL; click while holding it to open the link in the \
+                 OS browser. Detected URLs must include a scheme (http, https, \
+                 ftp, file, mailto) or start with www.",
+            );
+            ui.horizontal(|ui| {
+                let slot = begin_reset_slot(ui);
+                ui.label("Open modifier");
+                egui::ComboBox::from_id_salt("links-modifier")
+                    .selected_text(config.links.open_modifier.as_str())
+                    .show_ui(ui, |ui| {
+                        for mode in LINK_MODIFIERS {
+                            if ui
+                                .selectable_value(
+                                    &mut config.links.open_modifier,
+                                    mode.to_string(),
+                                    mode,
+                                )
+                                .changed()
+                            {
+                                ed.mark();
+                            }
+                        }
+                    });
+                if end_reset_slot(
+                    ui,
+                    slot,
+                    "open modifier",
+                    config.links.open_modifier != d.links.open_modifier,
+                ) {
+                    config.links.open_modifier = d.links.open_modifier.clone();
+                    ed.mark();
+                }
+            });
+            ui.horizontal(|ui| {
+                let slot = begin_reset_slot(ui);
+                ui.label("Underline");
+                egui::ComboBox::from_id_salt("links-underline")
+                    .selected_text(config.links.underline.as_str())
+                    .show_ui(ui, |ui| {
+                        for mode in LINK_UNDERLINES {
+                            if ui
+                                .selectable_value(
+                                    &mut config.links.underline,
+                                    mode.to_string(),
+                                    mode,
+                                )
+                                .changed()
+                            {
+                                ed.mark();
+                            }
+                        }
+                    });
+                if end_reset_slot(
+                    ui,
+                    slot,
+                    "underline",
+                    config.links.underline != d.links.underline,
+                ) {
+                    config.links.underline = d.links.underline.clone();
+                    ed.mark();
+                }
+            });
+            ed.flag(
+                ui,
+                "Detect plain-text URLs",
+                &mut config.links.detect_urls,
+                true,
+            );
+        }
+        SettingsSection::Clipboard => {
+            ui.label(
+                "OSC 52 lets terminal programs (tmux, nvim, …) read and write \
+                 the system clipboard. Writes are convenient; reads expose the \
+                 clipboard to any program, so they are opt-in.",
+            );
+            ui.horizontal(|ui| {
+                let slot = begin_reset_slot(ui);
+                ui.label("OSC 52 access");
+                egui::ComboBox::from_id_salt("clipboard-osc52")
+                    .selected_text(config.clipboard.osc52.as_str())
+                    .show_ui(ui, |ui| {
+                        for mode in OSC52_MODES {
+                            if ui
+                                .selectable_value(
+                                    &mut config.clipboard.osc52,
+                                    mode.to_string(),
+                                    mode,
+                                )
+                                .changed()
+                            {
+                                ed.mark();
+                            }
+                        }
+                    });
+                if end_reset_slot(
+                    ui,
+                    slot,
+                    "OSC 52 access",
+                    config.clipboard.osc52 != d.clipboard.osc52,
+                ) {
+                    config.clipboard.osc52 = d.clipboard.osc52.clone();
+                    ed.mark();
+                }
+            });
         }
         SettingsSection::Logs => {
             ui.label(

@@ -27,6 +27,25 @@ pub(crate) struct Foreground {
     cwd: Option<String>,
 }
 
+/// Cached view-space link runs for the hint underlines. Rebuilt only when
+/// the grid view or the URL-detection toggle changed, so holding the hint
+/// modifier does not re-scan the screen every frame.
+pub(crate) struct LinkHintCache {
+    version: u64,
+    detect_urls: bool,
+    view: crate::links::HintView,
+}
+
+impl Default for LinkHintCache {
+    fn default() -> Self {
+        Self {
+            version: u64::MAX,
+            detect_urls: true,
+            view: crate::links::HintView::default(),
+        }
+    }
+}
+
 /// A single terminal tab.
 pub struct Tab {
     pub(crate) terminal: Terminal,
@@ -38,6 +57,8 @@ pub struct Tab {
     pub(crate) foreground: Foreground,
     /// Per-tab find bar (query + matches + current).
     pub(crate) search: SearchPanel,
+    /// Per-tab link hint cache (view only).
+    pub(crate) link_hints: LinkHintCache,
 }
 
 impl Tab {
@@ -51,7 +72,19 @@ impl Tab {
             is_alt: false,
             foreground: Foreground::default(),
             search: SearchPanel::default(),
+            link_hints: LinkHintCache::default(),
         }
+    }
+
+    /// View-space link runs, rebuilt when the grid view changed.
+    pub(crate) fn link_hints(&mut self, detect_urls: bool) -> &crate::links::HintView {
+        let version = self.terminal.grid().version;
+        if self.link_hints.version != version || self.link_hints.detect_urls != detect_urls {
+            self.link_hints.version = version;
+            self.link_hints.detect_urls = detect_urls;
+            self.link_hints.view = crate::links::HintView::build(self.terminal.grid(), detect_urls);
+        }
+        &self.link_hints.view
     }
 
     /// Re-query the foreground process group behind `$command` / `$cwd`.

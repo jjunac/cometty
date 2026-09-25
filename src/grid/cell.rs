@@ -44,6 +44,9 @@ pub struct Cell {
     pub overline: bool,
     pub underline: UnderlineStyle,
     pub underline_color: Option<Rgb>,
+    /// OSC 8 hyperlink id into the grid's interned URI table
+    /// (`None` = not part of a link). Continuations inherit their lead's id.
+    pub hyperlink: Option<u16>,
 }
 
 impl Cell {
@@ -104,6 +107,7 @@ impl Default for Cell {
             overline: false,
             underline: UnderlineStyle::None,
             underline_color: None,
+            hyperlink: None,
         }
     }
 }
@@ -188,6 +192,7 @@ impl Grid {
             overline: false,
             underline: UnderlineStyle::None,
             underline_color: None,
+            hyperlink: None,
         }
     }
 
@@ -210,12 +215,14 @@ impl Grid {
             overline: false,
             underline: UnderlineStyle::None,
             underline_color: None,
+            hyperlink: None,
         }
     }
 
     /// Trailing placeholder for a double-width lead. Inherits the lead's
     /// style so cursor/selection painting stays consistent; text callers
-    /// skip continuations.
+    /// skip continuations. Carries the current hyperlink so both halves of
+    /// a linked wide cluster share one id (runs stay contiguous).
     pub(crate) fn placeholder_cell(&self) -> Cell {
         Cell {
             ch: ' ',
@@ -231,6 +238,7 @@ impl Grid {
             overline: self.pen.overline,
             underline: self.pen.underline,
             underline_color: self.pen.underline_color,
+            hyperlink: self.current_hyperlink,
         }
     }
 

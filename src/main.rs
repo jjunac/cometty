@@ -3,6 +3,7 @@ mod config;
 mod grid;
 mod icon;
 mod input;
+mod links;
 mod logbuf;
 mod logging;
 mod menu;
@@ -253,7 +254,16 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::ModifiersChanged(m) => {
+                let hints_were = self.hints_active();
                 self.modifiers = m.state();
+                // Pressing/releasing the link modifier toggles hint
+                // underlines and the hover cursor.
+                if self.hints_active() != hints_were {
+                    self.update_link_cursor();
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 self.on_keyboard(&event, egui_consumed);

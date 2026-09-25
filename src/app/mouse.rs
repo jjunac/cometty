@@ -53,8 +53,10 @@ impl App {
 
     pub(crate) fn on_cursor_moved(&mut self, x: f32, y: f32) {
         self.cursor_pos = Some((x, y));
-        // Hovering the tab strip must repaint (hover highlight / × reveal)
+        // Hovering a link (modifier held) switches to the pointer cursor;
+        // hovering the tab strip must repaint (hover highlight / × reveal)
         // even when no selection drag is in progress.
+        self.update_link_cursor();
         let tab_count = self.tabs.len();
         if self
             .renderer
@@ -101,11 +103,13 @@ impl App {
 
     pub(crate) fn on_cursor_left(&mut self) {
         self.cursor_pos = None;
+        self.set_link_cursor_icon(winit::window::CursorIcon::Default);
     }
 
     pub(crate) fn on_focused(&mut self, focused: bool) {
         if !focused {
             self.mouse_pressed = 0;
+            self.link_press = false;
         }
         let report = self.active_tab().is_some_and(|t| t.terminal.focus_report());
         if report && let Some(tab) = self.active_tab() {
@@ -151,6 +155,13 @@ impl App {
                         }
                         return;
                     }
+                    // Cmd/Ctrl+click on a link opens it and never reaches
+                    // the app or the selection (checked before mouse
+                    // reporting so links stay clickable inside TUIs).
+                    if button == MouseButton::Left && self.open_link_at_cursor() {
+                        self.link_press = true;
+                        return;
+                    }
                     if let Some(bit) = mouse_bit(button) {
                         self.mouse_pressed |= bit;
                     }
@@ -176,6 +187,11 @@ impl App {
                 ElementState::Released => {
                     if let Some(bit) = mouse_bit(button) {
                         self.mouse_pressed &= !bit;
+                    }
+                    // The press opened a link: swallow its release.
+                    if button == MouseButton::Left && self.link_press {
+                        self.link_press = false;
+                        return;
                     }
                     if let Some((_, sgr)) = self.mouse_report_state() {
                         let Some((col, view_row)) = self.cell_under_cursor() else {

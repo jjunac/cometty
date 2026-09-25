@@ -1,6 +1,7 @@
 mod alt;
 mod cell;
 mod edit;
+mod link;
 mod scroll;
 mod style;
 pub mod unicode;
@@ -8,7 +9,7 @@ pub mod unicode;
 pub use alt::MouseMode;
 pub use cell::{Cell, Cursor, CursorShape, CursorStyle, Pen, UnderlineStyle};
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use crate::theme::Theme;
 
@@ -24,6 +25,16 @@ pub struct Grid {
     max_dim: usize,
     cursor: Cursor,
     pen: Pen,
+    /// OSC 8 link applied to subsequently printed cells (not part of the
+    /// pen: `SGR 0` must not clear an active hyperlink).
+    current_hyperlink: Option<u16>,
+    /// Interned OSC 8 URIs; a cell's `hyperlink` is an index into this.
+    hyperlinks: Vec<Box<str>>,
+    hyperlink_index: HashMap<Box<str>, u16>,
+    /// Total bytes in `hyperlinks` (byte budget, see `grid::link`).
+    hyperlink_bytes: usize,
+    /// One-shot guard so hostile OSC 8 spam logs the overflow once.
+    hyperlink_overflow_warned: bool,
     saved_cursor: Option<Cursor>,
     saved_pen: Option<Pen>,
     pub version: u64,
@@ -105,6 +116,7 @@ impl Grid {
             overline: false,
             underline: UnderlineStyle::None,
             underline_color: None,
+            hyperlink: None,
         };
         Self {
             cols,
@@ -131,6 +143,11 @@ impl Grid {
             },
             saved_cursor: None,
             saved_pen: None,
+            current_hyperlink: None,
+            hyperlinks: Vec::new(),
+            hyperlink_index: HashMap::new(),
+            hyperlink_bytes: 0,
+            hyperlink_overflow_warned: false,
             version: 0,
             content_version: 0,
             in_alt: false,

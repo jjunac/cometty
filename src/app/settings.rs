@@ -24,11 +24,13 @@ pub enum SettingsSection {
     Scrollbar,
     Tabbar,
     Input,
+    Links,
+    Clipboard,
     Logs,
 }
 
 impl SettingsSection {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::Theme,
         Self::Font,
         Self::Window,
@@ -39,6 +41,8 @@ impl SettingsSection {
         Self::Scrollbar,
         Self::Tabbar,
         Self::Input,
+        Self::Links,
+        Self::Clipboard,
         Self::Logs,
     ];
 
@@ -54,6 +58,8 @@ impl SettingsSection {
             Self::Scrollbar => "Scrollbar",
             Self::Tabbar => "Tab bar",
             Self::Input => "Input",
+            Self::Links => "Links",
+            Self::Clipboard => "Clipboard",
             Self::Logs => "Logs",
         }
     }
@@ -160,7 +166,9 @@ pub fn diff_actions(old: &Config, new: &Config) -> ApplyActions {
         || old.tabbar != new.tabbar
         || old.cursor != new.cursor
         || old.selection != new.selection
-        || old.input != new.input;
+        || old.input != new.input
+        || old.links != new.links
+        || old.clipboard != new.clipboard;
     let log = old.log != new.log;
     let any = old != new;
     ApplyActions {
@@ -188,6 +196,8 @@ pub fn reset_section(config: &mut Config, section: SettingsSection) {
         SettingsSection::Scrollbar => config.scrollbar = defaults.scrollbar,
         SettingsSection::Tabbar => config.tabbar = defaults.tabbar,
         SettingsSection::Input => config.input = defaults.input,
+        SettingsSection::Links => config.links = defaults.links,
+        SettingsSection::Clipboard => config.clipboard = defaults.clipboard,
         SettingsSection::Logs => config.log = defaults.log,
     }
 }
@@ -200,6 +210,12 @@ pub fn reset_all(config: &mut Config) {
 pub const KNOWN_THEMES: [&str; 3] = ["tokyo-night", "vscode", "tomorrow-night"];
 pub const FONT_FAMILIES: [&str; 5] = ["monospace", "sans", "serif", "cursive", "fantasy"];
 pub const CURSOR_SHAPES: [&str; 3] = ["block", "underline", "bar"];
+/// Values offered for `[links] open_modifier` (in picker order).
+pub const LINK_MODIFIERS: [&str; 5] = ["auto", "cmd", "ctrl", "alt", "none"];
+/// Values offered for `[links] underline`.
+pub const LINK_UNDERLINES: [&str; 3] = ["always", "hover", "never"];
+/// Values offered for `[clipboard] osc52` (least to most permissive).
+pub const OSC52_MODES: [&str; 3] = ["off", "write", "read-write"];
 /// Values offered for `[log] level` (least to most verbose). Parsing is
 /// `log`'s own, so these names are just the picker's list.
 pub const LOG_LEVELS: [&str; 6] = ["off", "error", "warn", "info", "debug", "trace"];
@@ -421,6 +437,12 @@ mod tests {
         let a = diff_actions(&old, &new);
         assert!(a.log && a.any);
         assert!(!a.chrome && !a.font && !a.theme);
+        new = old.clone();
+        new.links.underline = "always".to_string();
+        assert!(diff_actions(&old, &new).chrome);
+        new = old.clone();
+        new.clipboard.osc52 = "read-write".to_string();
+        assert!(diff_actions(&old, &new).chrome);
     }
 
     #[test]

@@ -23,6 +23,10 @@ impl App {
     pub(crate) fn drain_pty(&mut self) -> bool {
         let mut got_data = false;
         let mut exited: Vec<usize> = Vec::new();
+        // OSC 52 requests leave the terminal (which owns no clipboard), but
+        // the app-wide arboard handle is borrowed mutably: collect first,
+        // apply after the tab loop.
+        let mut clipboard_ops: Vec<(usize, crate::term::ClipboardOp)> = Vec::new();
         for (i, tab) in self.tabs.iter_mut().enumerate() {
             let mut got_bytes = false;
             loop {
@@ -34,6 +38,8 @@ impl App {
                         if !reply.is_empty() {
                             tab.pty.write(reply);
                         }
+                        clipboard_ops
+                            .extend(tab.terminal.take_clipboard().into_iter().map(|op| (i, op)));
                         got_data = true;
                         got_bytes = true;
                     }
@@ -52,6 +58,11 @@ impl App {
             if got_bytes {
                 tab.refresh_title();
             }
+        }
+        // Apply OSC 52 requests while tab indices still match (a tab
+        // removed below could shift another tab's reply target).
+        if !clipboard_ops.is_empty() {
+            self.handle_clipboard_ops(clipboard_ops);
         }
         // Remove exited tabs from the back so indices stay valid, then
         // remap the active index once (tabs before it may have vanished).

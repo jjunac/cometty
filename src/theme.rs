@@ -81,6 +81,9 @@ pub struct Theme {
     pub search_match: Rgb,
     /// Find-bar highlight for the current match.
     pub search_active: Rgb,
+    /// Link/URL hint underline (hyperlinks are only underlined, never
+    /// recolored, so the app's own styling stays intact).
+    pub link: Rgb,
 }
 
 impl Theme {
@@ -101,6 +104,8 @@ impl Theme {
             // VS Code's find-match hues over the Dark+ background.
             search_match: Rgb::new(0x61, 0x32, 0x14),
             search_active: Rgb::new(0x9E, 0x6A, 0x03),
+            // `terminal.ansiBlue` brightened for a thin underline.
+            link: Rgb::new(0x37, 0x94, 0xFF),
             palette: [
                 Rgb::new(0x00, 0x00, 0x00), // black
                 Rgb::new(0xCD, 0x31, 0x31), // red
@@ -139,6 +144,8 @@ impl Theme {
             // the light foreground.
             search_match: Rgb::new(0x4E, 0x3F, 0x28),
             search_active: Rgb::new(0x8F, 0x6F, 0x3D),
+            // Palette blue, the theme's own hyperlink hue.
+            link: Rgb::new(0x7A, 0xA2, 0xF7),
             palette: [
                 Rgb::new(0x15, 0x16, 0x1E), // black
                 Rgb::new(0xF7, 0x76, 0x8E), // red
@@ -175,6 +182,8 @@ impl Theme {
             tab_border: Rgb::new(0x5A, 0x5E, 0x5E),
             search_match: Rgb::new(0x4A, 0x42, 0x32),
             search_active: Rgb::new(0x8F, 0x74, 0x40),
+            // Palette blue, as in the other themes.
+            link: Rgb::new(0x81, 0xA2, 0xBE),
             palette: [
                 Rgb::new(0x1D, 0x1F, 0x21),
                 Rgb::new(0xCC, 0x66, 0x66),
@@ -287,6 +296,7 @@ mod tests {
             assert_ne!(theme.search_match, theme.background, "{}", theme.name);
             assert_ne!(theme.search_active, theme.background, "{}", theme.name);
             assert_ne!(theme.search_match, theme.search_active, "{}", theme.name);
+            assert_ne!(theme.link, theme.background, "{}", theme.name);
         }
     }
 

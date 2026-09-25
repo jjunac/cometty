@@ -163,6 +163,15 @@ fn d_lines_per_tick() -> f64 {
 fn d_pixel_fallback() -> f32 {
     20.0
 }
+fn d_open_modifier() -> String {
+    "auto".to_string()
+}
+fn d_link_underline() -> String {
+    "hover".to_string()
+}
+fn d_osc52() -> String {
+    "write".to_string()
+}
 
 // --- sections ---
 
@@ -511,6 +520,57 @@ impl Default for InputConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LinksConfig {
+    /// Which modifier reveals link hints and opens them on click:
+    /// `"auto"` (Cmd on macOS, Ctrl elsewhere), `"cmd"`, `"ctrl"`, `"alt"`,
+    /// or `"none"` (hints and click-to-open disabled).
+    #[serde(default = "d_open_modifier")]
+    pub open_modifier: String,
+    /// When link underlines are painted: `"always"`, `"hover"`
+    /// (only while the open modifier is held), or `"never"`.
+    #[serde(default = "d_link_underline")]
+    pub underline: String,
+    /// Detect plain-text URLs (`https://…`, `www.…`, `mailto:…`) in
+    /// addition to `OSC 8` hyperlinks.
+    #[serde(default = "d_true")]
+    pub detect_urls: bool,
+}
+
+impl Default for LinksConfig {
+    fn default() -> Self {
+        Self {
+            open_modifier: d_open_modifier(),
+            underline: d_link_underline(),
+            detect_urls: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ClipboardConfig {
+    /// `OSC 52` access: `"off"`, `"write"` (apps may set the clipboard),
+    /// or `"read-write"` (apps may also read it back — privacy risk).
+    #[serde(default = "d_osc52")]
+    pub osc52: String,
+}
+
+impl Default for ClipboardConfig {
+    fn default() -> Self {
+        Self { osc52: d_osc52() }
+    }
+}
+
+impl ClipboardConfig {
+    pub fn allows_write(&self) -> bool {
+        matches!(self.osc52.as_str(), "write" | "read-write")
+    }
+
+    pub fn allows_read(&self) -> bool {
+        self.osc52 == "read-write"
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -533,6 +593,10 @@ pub struct Config {
     pub selection: SelectionConfig,
     #[serde(default)]
     pub input: InputConfig,
+    #[serde(default)]
+    pub links: LinksConfig,
+    #[serde(default)]
+    pub clipboard: ClipboardConfig,
     #[serde(default)]
     pub log: LogConfig,
 }
@@ -616,6 +680,26 @@ impl Config {
             Err(_) => d_log_level(),
         };
         self.tabbar.title_format = self.tabbar.title_format.trim().to_string();
+        // Enum-ish strings: unknown values fall back to the compiled
+        // defaults so the picker and the runtime agree.
+        self.links.open_modifier = match self
+            .links
+            .open_modifier
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            known @ ("auto" | "cmd" | "ctrl" | "alt" | "none") => known.to_string(),
+            _ => d_open_modifier(),
+        };
+        self.links.underline = match self.links.underline.trim().to_ascii_lowercase().as_str() {
+            known @ ("always" | "hover" | "never") => known.to_string(),
+            _ => d_link_underline(),
+        };
+        self.clipboard.osc52 = match self.clipboard.osc52.trim().to_ascii_lowercase().as_str() {
+            known @ ("off" | "write" | "read-write") => known.to_string(),
+            _ => d_osc52(),
+        };
         self.log.buffer_lines = self
             .log
             .buffer_lines
@@ -655,6 +739,11 @@ mod tests {
         assert_eq!(c.input.lines_per_tick, 7.0);
         assert_eq!(c.input.search_key, "f");
         assert!(c.input.search_ctrl && c.input.search_super);
+        assert_eq!(c.links.open_modifier, "auto");
+        assert_eq!(c.links.underline, "hover");
+        assert!(c.links.detect_urls);
+        assert_eq!(c.clipboard.osc52, "write");
+        assert!(c.clipboard.allows_write() && !c.clipboard.allows_read());
         assert_eq!(c.log.level, "debug");
         assert_eq!(c.log.filter, "");
         assert_eq!(c.log.buffer_lines, 1000);
@@ -738,6 +827,26 @@ mod tests {
         let c: Config = toml::from_str("[theme]\nname=\"solarized\"\n").unwrap();
         assert_eq!(c.theme.name, "solarized");
         assert_eq!(c.font.size, 14.0);
+    }
+
+    #[test]
+    fn links_and_clipboard_sanitize_enums() {
+        let c: Config = toml::from_str(
+            "[links]\nopen_modifier=\"CMD\"\nunderline=\"weird\"\ndetect_urls=false\n[clipboard]\nosc52=\"read-write\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.links.open_modifier, "CMD", "raw value kept for repair");
+        assert_eq!(c.links.underline, "weird");
+        assert!(!c.links.detect_urls);
+        let s = c.sanitized();
+        assert_eq!(s.links.open_modifier, "cmd");
+        assert_eq!(s.links.underline, "hover", "unknown value repaired");
+        assert!(!s.links.detect_urls, "boolean survives sanitize");
+        assert_eq!(s.clipboard.osc52, "read-write");
+        assert!(s.clipboard.allows_read());
+        // Unknown osc52 mode falls back to write-only.
+        let bad: Config = toml::from_str("[clipboard]\nosc52=\"loud\"\n").unwrap();
+        assert_eq!(bad.sanitized().clipboard.osc52, "write");
     }
 
     #[test]

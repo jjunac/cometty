@@ -1,7 +1,22 @@
+use base64::Engine as _;
 use vte::{Params, Parser};
 
 use crate::grid::{CursorShape, CursorStyle, Grid, MouseMode};
 use crate::theme::Theme;
+
+/// Clipboard request decoded from `OSC 52`. `Terminal` never touches the
+/// system clipboard itself; the app drains these after each feed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClipboardOp {
+    /// `OSC 52 ; target ; base64` — write the decoded text.
+    Set(String),
+    /// `OSC 52 ; target ; ?` — reply with clipboard contents when allowed.
+    Query,
+}
+
+/// Largest decoded `OSC 52` payload accepted, in bytes. Anything bigger is
+/// logged and dropped (clipboard writes are not a bulk transfer channel).
+pub const MAX_CLIPBOARD_BYTES: usize = 1 << 20;
 
 pub struct Terminal {
     grid: Grid,
@@ -21,13 +36,16 @@ pub struct Terminal {
     // Bytes queued for the PTY (DA / CPR / DSR / DECRQM replies).
     // Drained by `take_response` in the app's PTY loop.
     pending_response: Vec<u8>,
+    // Clipboard requests queued by OSC 52, drained by the app (which owns
+    // the arboard handle and the OSC 52 policy).
+    pending_clipboard: Vec<ClipboardOp>,
 }
 
 /// OSC numbers cometty interprets today (window/icon title + cwd);
 /// everything else is logged and ignored.
 const TITLE_OSC: [&[u8]; 3] = [b"0", b"1", b"2"];
 /// Every OSC number cometty acts on; the rest are marked unhandled in logs.
-const HANDLED_OSC: [&[u8]; 4] = [b"0", b"1", b"2", b"7"];
+const HANDLED_OSC: [&[u8]; 6] = [b"0", b"1", b"2", b"7", b"8", b"52"];
 /// Payload characters shown in an OSC debug line before truncating: OSC 52
 /// base64 blobs and OSC 8 URLs can be kilobytes long.
 const OSC_SUMMARY_CHARS: usize = 120;
@@ -123,6 +141,107 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Extract an `OSC 8` hyperlink update: `params;URI`.
+///
+/// `Some(None)` ends the current link (empty URI), `Some(Some(uri))` starts
+/// or restarts one; `None` means the sequence is not an OSC 8 (or carries no
+/// `;` separator, which is malformed and ignored). The `id=` params before
+/// the separator are not interpreted: the URI alone identifies a link.
+fn osc_hyperlink(params: &[&[u8]]) -> Option<Option<String>> {
+    let (num, payload) = osc_parts(params)?;
+    if num.as_slice() != b"8" {
+        return None;
+    }
+    let payload = payload?;
+    let sep = payload.iter().position(|&b| b == b';')?;
+    let uri = &payload[sep + 1..];
+    if uri.is_empty() {
+        return Some(None);
+    }
+    Some(Some(String::from_utf8_lossy(uri).into_owned()))
+}
+
+/// Extract an `OSC 52` clipboard operation: `target;payload`.
+///
+/// Targets: `c` (clipboard), `p` (primary), `s` (selection), `0..7` (cut
+/// buffers) and empty all map to the system clipboard; unknown targets are
+/// ignored. `?` is a read request; anything else must be base64 text.
+/// Payloads over `max_bytes` decoded, invalid base64, and non-`?` binary
+/// data are dropped with a debug log.
+fn osc_clipboard(params: &[&[u8]], max_bytes: usize) -> Option<ClipboardOp> {
+    let (num, payload) = osc_parts(params)?;
+    if num.as_slice() != b"52" {
+        return None;
+    }
+    let payload = payload?;
+    let sep = payload.iter().position(|&b| b == b';')?;
+    let target = &payload[..sep];
+    let known_target = target.is_empty()
+        || target == b"c"
+        || target == b"p"
+        || target == b"s"
+        || (target.len() == 1 && (b'0'..=b'7').contains(&target[0]));
+    if !known_target {
+        log::debug!(
+            "OSC 52 target {:?} ignored",
+            String::from_utf8_lossy(target)
+        );
+        return None;
+    }
+    let data = &payload[sep + 1..];
+    if data == b"?" {
+        return Some(ClipboardOp::Query);
+    }
+    // tmux wraps long base64 payloads with newlines; whitespace is not data.
+    let filtered: Vec<u8> = data
+        .iter()
+        .copied()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    if filtered.is_empty() {
+        return Some(ClipboardOp::Set(String::new()));
+    }
+    // Bound the decode: 4 base64 chars per 3 bytes (plus padding).
+    if filtered.len() > max_bytes.div_ceil(3) * 4 {
+        log::warn!(
+            "OSC 52 payload ignored: {} bytes encoded (limit {max_bytes})",
+            filtered.len()
+        );
+        return None;
+    }
+    let engine = base64::engine::general_purpose::STANDARD;
+    let decoded = match engine
+        .decode(&filtered)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&filtered))
+    {
+        Ok(decoded) => decoded,
+        Err(e) => {
+            log::warn!("OSC 52 payload is not valid base64 ({e})");
+            return None;
+        }
+    };
+    if decoded.len() > max_bytes {
+        log::warn!(
+            "OSC 52 payload ignored: {} bytes decoded (limit {max_bytes})",
+            decoded.len()
+        );
+        return None;
+    }
+    Some(ClipboardOp::Set(
+        String::from_utf8_lossy(&decoded).into_owned(),
+    ))
+}
+
+/// `OSC 52` reply carrying clipboard `text` (ST-terminated, `c` target).
+pub fn osc52_reply(text: &str) -> Vec<u8> {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let mut out = Vec::with_capacity(encoded.len() + 8);
+    out.extend_from_slice(b"\x1b]52;c;");
+    out.extend_from_slice(encoded.as_bytes());
+    out.extend_from_slice(b"\x1b\\");
+    out
+}
+
 /// Well-known OSC numbers, for readable log lines. Numbers cometty does
 /// not interpret are still named here when the meaning is standard.
 fn osc_name(num: &[u8]) -> Option<&'static str> {
@@ -160,6 +279,11 @@ fn osc_summary(params: &[&[u8]]) -> String {
         return summary;
     };
     summary.push_str(": ");
+    // Clipboard payloads are private: never echo their contents.
+    if num.as_slice() == b"52" {
+        summary.push_str(&format!("<redacted, {} bytes>", payload.len()));
+        return summary;
+    }
     let text = String::from_utf8_lossy(&payload);
     for (shown, ch) in text.chars().enumerate() {
         if shown == OSC_SUMMARY_CHARS {
@@ -197,6 +321,7 @@ impl Terminal {
             max_title_chars: config.terminal.max_title_chars.max(1),
             last_graphic: None,
             pending_response: Vec::new(),
+            pending_clipboard: Vec::new(),
         }
     }
 
@@ -281,6 +406,12 @@ impl Terminal {
     /// The app writes the result back via `PtySession::write`.
     pub fn take_response(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.pending_response)
+    }
+
+    /// Take queued `OSC 52` clipboard requests. The app owns the system
+    /// clipboard and the read/write policy, so the terminal only queues.
+    pub fn take_clipboard(&mut self) -> Vec<ClipboardOp> {
+        std::mem::take(&mut self.pending_clipboard)
     }
 
     fn push_response(&mut self, bytes: &[u8]) {
@@ -739,6 +870,7 @@ impl vte::Perform for Terminal {
                     self.grid.reset_margins_and_modes();
                     // Reset pen before clearing so BCE erase uses default bg.
                     self.grid.sgr(&[0]);
+                    self.grid.set_hyperlink(None);
                     self.grid.clear_all();
                     self.grid.set_cursor(0, 0);
                     self.title.clear();
@@ -761,13 +893,19 @@ impl vte::Perform for Terminal {
             osc_summary(params),
             if bell_terminated { "BEL" } else { "ST" }
         );
-        // Only window/icon titles (0/1/2) and cwd (7) are tracked; the
-        // former feeds tab labels, the latter the `$cwd` fallback.
+        // Tracked OSC numbers: titles (0/1/2) feed tab labels, cwd (7) the
+        // `$cwd` fallback, 8 the per-cell hyperlink state, 52 clipboard.
         if let Some(title) = osc_title(params, self.max_title_chars) {
             self.title = title;
         }
         if let Some(cwd) = osc_cwd(params, self.max_title_chars) {
             self.cwd = Some(cwd);
+        }
+        if let Some(link) = osc_hyperlink(params) {
+            self.grid.set_hyperlink(link.as_deref());
+        }
+        if let Some(op) = osc_clipboard(params, MAX_CLIPBOARD_BYTES) {
+            self.pending_clipboard.push(op);
         }
     }
 }
@@ -1201,14 +1339,113 @@ mod tests {
         let long = vec![b'x'; 4096];
         let params: [&[u8]; 3] = [b"52", b"c", &long];
         let summary = osc_summary(&params);
-        assert!(summary.starts_with("52 (clipboard, unhandled): c;"));
-        assert!(summary.contains("bytes)"), "truncation reports length");
+        assert!(
+            summary.starts_with("52 (clipboard): <redacted"),
+            "clipboard contents never reach the log: {summary}"
+        );
+        assert!(summary.contains("bytes>"), "redaction reports length");
         assert!(summary.len() < 200, "bounded line, got {}", summary.len());
 
         // Control bytes escape instead of breaking the log row.
         let escaped = osc_summary(&[b"9", b"a\nb\x07c"]);
         assert!(!escaped.contains('\n'));
         assert!(escaped.contains("\\n"));
+    }
+
+    #[test]
+    fn osc8_hyperlink_applies_to_printed_cells() {
+        let mut t = test_terminal(20, 2);
+        feed_str(&mut t, "\x1b]8;;https://example.com\x07cli\x1b]8;;\x07ck");
+        let row = t.grid().global_line(0).unwrap();
+        let id = row[0].hyperlink.expect("c is linked");
+        assert_eq!(t.grid().hyperlink_uri(id), Some("https://example.com"));
+        assert_eq!(row[1].hyperlink, Some(id));
+        assert_eq!(row[2].hyperlink, Some(id));
+        assert_eq!(row[3].hyperlink, None, "empty URI ends the link");
+        // `id=` params are accepted and ignored; BEL or ST both work.
+        feed_str(&mut t, "\x1b]8;id=42;https://a.b\x1b\\x");
+        let row = t.grid().global_line(0).unwrap();
+        assert!(row[5].hyperlink.is_some());
+        // SGR does not clear an active hyperlink (spec behavior).
+        feed_str(&mut t, "\x1b]8;;https://c.d\x07\x1b[0my");
+        let row = t.grid().global_line(0).unwrap();
+        assert!(row[6].hyperlink.is_some(), "SGR 0 keeps the link open");
+        // Full reset (ESC c) drops the link state and clears cells.
+        feed_str(&mut t, "\x1bc");
+        feed_str(&mut t, "z");
+        let row = t.grid().global_line(0).unwrap();
+        assert_eq!(row[0].hyperlink, None);
+    }
+
+    #[test]
+    fn osc8_hyperlink_parser_shapes() {
+        assert_eq!(osc_hyperlink(&[]), None);
+        assert_eq!(osc_hyperlink(&[b"0", b"x"]), None);
+        assert_eq!(
+            osc_hyperlink(&[b"8", b";https://a.b"]),
+            Some(Some("https://a.b".to_string()))
+        );
+        assert_eq!(
+            osc_hyperlink(&[b"8", b"id=7;https://a.b"]),
+            Some(Some("https://a.b".to_string()))
+        );
+        assert_eq!(osc_hyperlink(&[b"8", b";"]), Some(None));
+        // Malformed (no separator) is ignored rather than treated as a URI.
+        assert_eq!(osc_hyperlink(&[b"8", b"id=7"]), None);
+        assert_eq!(osc_hyperlink(&[b"7", b"file:///tmp"]), None);
+    }
+
+    #[test]
+    fn osc8_hyperlink_shows_in_hint_view() {
+        let mut t = test_terminal(24, 2);
+        feed_str(
+            &mut t,
+            "\x1b]8;;https://example.com\x07link\x1b]8;;\x07 plain https://a.b",
+        );
+        let view = crate::links::HintView::build(t.grid(), true);
+        // OSC 8 run (cols 0..3) and the detected URL (cols 11..21).
+        assert_eq!(view.rows[0], vec![(0, 3), (11, 21)]);
+        assert!(view.hit(0, 2, 1));
+        assert!(!view.hit(0, 4, 1));
+        // `detect_urls = false` keeps only the OSC 8 run.
+        let view = crate::links::HintView::build(t.grid(), false);
+        assert_eq!(view.rows[0], vec![(0, 3)]);
+    }
+
+    #[test]
+    fn osc52_set_decode_and_queue() {
+        let mut t = test_terminal(10, 2);
+        // "hi" -> aGk=
+        feed_str(&mut t, "\x1b]52;c;aGk=\x07");
+        assert_eq!(t.take_clipboard(), vec![ClipboardOp::Set("hi".to_string())]);
+        // Whitespace/newlines inside the payload are tolerated (tmux).
+        feed_str(&mut t, "\x1b]52;c;YW\n\tI=\x07");
+        assert_eq!(t.take_clipboard(), vec![ClipboardOp::Set("ab".to_string())]);
+        // Unknown targets are ignored; an empty payload clears the clipboard.
+        feed_str(&mut t, "\x1b]52;z;YQ==\x07");
+        feed_str(&mut t, "\x1b]52;c;\x07");
+        assert_eq!(t.take_clipboard(), vec![ClipboardOp::Set(String::new())]);
+        // Invalid base64 is dropped.
+        feed_str(&mut t, "\x1b]52;c;!!!not-base64!!!\x07");
+        assert!(t.take_clipboard().is_empty());
+    }
+
+    #[test]
+    fn osc52_query_and_reply_roundtrip() {
+        let mut t = test_terminal(10, 2);
+        feed_str(&mut t, "\x1b]52;c;?\x07");
+        assert_eq!(t.take_clipboard(), vec![ClipboardOp::Query]);
+        let reply = osc52_reply("hi");
+        assert_eq!(reply, b"\x1b]52;c;aGk=\x1b\\".to_vec());
+    }
+
+    #[test]
+    fn osc52_oversized_payload_is_dropped() {
+        let mut t = test_terminal(10, 2);
+        // 4/3 bytes encoded per input byte: exceed the cap without decoding.
+        let encoded = "A".repeat(MAX_CLIPBOARD_BYTES / 3 * 4 + 8);
+        feed_str(&mut t, &format!("\x1b]52;c;{encoded}\x07"));
+        assert!(t.take_clipboard().is_empty());
     }
 
     #[test]

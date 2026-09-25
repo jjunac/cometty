@@ -48,6 +48,10 @@ impl App {
         // A background refresh never scrolls on its own.
         self.refresh_search();
 
+        // Link hint underlines for this frame (owned snapshot; `None` when
+        // the hint modifier is not held and `underline = "hover"`).
+        let link_hints = self.link_hint_view();
+
         // Owned snapshot so the tabs borrow ends before `render`
         // mutably borrows the renderer and the active scrollbar.
         let snapshot = match self.active_tab() {
@@ -141,6 +145,7 @@ impl App {
                 renderer::HighlightCtx {
                     selection: selection_view,
                     search: search_view.as_ref(),
+                    links: link_hints.as_ref(),
                 },
                 renderer::ScrollCtx {
                     window,
@@ -215,6 +220,12 @@ impl App {
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
+        }
+
+        // Link hover feedback follows the grid under the pointer (content
+        // may have scrolled or changed since the last mouse move).
+        if self.hints_active() {
+            self.update_link_cursor();
         }
 
         if let Some(target) = output.scroll_to

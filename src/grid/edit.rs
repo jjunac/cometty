@@ -244,6 +244,7 @@ impl Grid {
                     overline: self.pen.overline,
                     underline: self.pen.underline,
                     underline_color: self.pen.underline_color,
+                    hyperlink: self.current_hyperlink,
                 };
                 if w == 2 && cx + 1 < self.cols {
                     self.cells[cy][cx + 1] = self.placeholder_cell();

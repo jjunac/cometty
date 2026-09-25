@@ -86,6 +86,14 @@ search_ctrl = true
 search_super = true
 lines_per_tick = 7.0
 
+[links]
+open_modifier = "auto"  # auto (Cmd on macOS, Ctrl elsewhere) | cmd | ctrl | alt | none
+underline = "hover"     # always | hover (while the modifier is held) | never
+detect_urls = true      # also underline/click plain-text http(s)://, www., mailto:, ...
+
+[clipboard]
+osc52 = "write"  # off | write (apps may set the clipboard) | read-write (reads can exfiltrate)
+
 [log]
 level = "debug"        # in-app buffer: cometty's own logs (off | error | warn | info | debug | trace)
 filter = ""            # RUST_LOG-style override, e.g. "cometty=debug,wgpu=debug,warn"
@@ -122,5 +130,6 @@ buffer_lines = 1000    # ring capacity; stderr output still follows RUST_LOG
 - [x] Full SGR: dim / italic / inverse / strike / overline, underline styles + `58/59` colors, colon `38:2:r:g:b` form
 - [x] Tab switching: `Ctrl+Tab` / `Ctrl+Shift+Tab` + `Cmd+1-9` wired to tab switch
 - [x] Search: `Ctrl+F` / `Cmd+F` overlay (top-right find bar), smart-case match highlight over scrollback + screen (current match brighter), `Enter`/`Shift+Enter` (or `F3`/`Shift+F3`) next/prev with wrap-around, `Esc` close; `[input] search_key`/`search_ctrl`/`search_super`
+- [x] Hyperlinks: `OSC 8` runs stored per cell; hold the open modifier (`Cmd` on macOS, `Ctrl` elsewhere; `[links] open_modifier`) to underline every link — plus detected plain-text URLs — and click to open in the OS browser (scheme allowlist `http/https/ftp/file/mailto`, no shell involved); `[links] underline` (`always`/`hover`/`never`) and `detect_urls` tune the hints
+- [x] Clipboard: `OSC 52` writes from tmux/nvim/… gated by `[clipboard] osc52` (`off`/`write`/`read-write`); reads are opt-in because a `?` request can exfiltrate the clipboard; payloads are capped at 1 MiB and redacted in the log panel
 - [ ] Bell (visual flash; currently ignored) + font zoom (`Ctrl +/-/0`) + confirm-close on dirty foreground process
-- [ ] Hyperlinks (`OSC 8` + `Cmd+click`) + clipboard (`OSC 52`) + URL hint + open

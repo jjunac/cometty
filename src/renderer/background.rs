@@ -165,8 +165,8 @@ impl super::Renderer {
 
     /// Fill the scratch vertex buffer with background quads for cells that
     /// differ from the theme background (plus block elements, cursor,
-    /// selection, search matches, underline/strike/overline), ensure GPU
-    /// capacity, and upload. Returns the vertex count to draw.
+    /// selection, search matches, underline/strike/overline, link hints),
+    /// ensure GPU capacity, and upload. Returns the vertex count to draw.
     ///
     /// Every rect is snapped to whole device pixels with shared edges, so
     /// neighbouring cells tile without hairline seams.
@@ -189,6 +189,7 @@ impl super::Renderer {
         let pad = self.scale_factor.max(1.0);
         let search_match_col = self.theme.search_match.as_linear_f32_array();
         let search_active_col = self.theme.search_active.as_linear_f32_array();
+        let hint_col = self.theme.link.as_linear_f32_array();
         for (y, row) in grid_rows.iter().enumerate() {
             // Cell rects snap to whole device pixels; adjacent cells share
             // exact edges, so row/column backgrounds tile without seams.
@@ -286,6 +287,15 @@ impl super::Renderer {
                 if cell.overline {
                     let oy = py + pad;
                     self.push_quad(&mut verts, px, oy, w_px, underline_h, fg_col);
+                }
+                // Link hints (OSC 8 / detected URLs): same strip as a text
+                // underline, tinted with the theme's link color. Cells that
+                // already underline keep the app's own styling.
+                if cell.underline == crate::grid::UnderlineStyle::None
+                    && highlights.links.is_some_and(|view| view.hit(y, x, span))
+                {
+                    let uy = row_bottom - underline_h - pad;
+                    self.push_quad(&mut verts, px, uy, w_px, underline_h, hint_col);
                 }
                 // Cursor: shape-dependent, drawn last so it covers bg/underline.
                 if is_cursor {

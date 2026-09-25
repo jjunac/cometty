@@ -1,8 +1,105 @@
-//! Clipboard copy/paste paths.
+//! Clipboard copy/paste paths (selection shortcuts + OSC 52).
 
 use super::App;
+use crate::term::ClipboardOp;
 
 impl App {
+    /// Lazily created system clipboard handle. `None` when the platform
+    /// clipboard is unavailable (already logged).
+    fn ensure_clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(cb) => self.clipboard = Some(cb),
+                Err(e) => {
+                    log::warn!("clipboard unavailable: {e:#}");
+                    return None;
+                }
+            }
+        }
+        self.clipboard.as_mut()
+    }
+
+    /// Write `text` to the system clipboard. Used by the copy shortcut and
+    /// by `OSC 52` writes.
+    pub(crate) fn set_clipboard_text(&mut self, text: &str) -> bool {
+        let Some(cb) = self.ensure_clipboard() else {
+            return false;
+        };
+        match cb.set_text(text.to_string()) {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("clipboard write failed: {e:#}");
+                false
+            }
+        }
+    }
+
+    /// Read the system clipboard, if available.
+    pub(crate) fn clipboard_text(&mut self) -> Option<String> {
+        let cb = self.ensure_clipboard()?;
+        match cb.get_text() {
+            Ok(text) => Some(text),
+            Err(e) => {
+                log::debug!("clipboard read failed: {e:#}");
+                None
+            }
+        }
+    }
+
+    /// Apply queued `OSC 52` requests from [`super::pty_io::App::drain_pty`].
+    ///
+    /// Writes are gated by `[clipboard] osc52` (`off` drops them), reads
+    /// only work in `read-write` — a `?` request is how an app would
+    /// exfiltrate the clipboard, so it is opt-in and logged at debug when
+    /// denied. Replies go to the tab that asked.
+    pub(crate) fn handle_clipboard_ops(&mut self, ops: Vec<(usize, ClipboardOp)>) {
+        let write_ok = self.config.clipboard.allows_write();
+        let read_ok = self.config.clipboard.allows_read();
+        let mut denied_read_logged = false;
+        for (tab, op) in ops {
+            match op {
+                ClipboardOp::Set(text) => {
+                    if write_ok {
+                        log::debug!("OSC 52 clipboard write ({} bytes)", text.len());
+                        self.set_clipboard_text(&text);
+                    } else {
+                        log::debug!(
+                            "OSC 52 write ignored (osc52 = {})",
+                            self.config.clipboard.osc52
+                        );
+                    }
+                }
+                ClipboardOp::Query => {
+                    if !read_ok {
+                        if !denied_read_logged {
+                            denied_read_logged = true;
+                            log::debug!(
+                                "OSC 52 read ignored (osc52 = {})",
+                                self.config.clipboard.osc52
+                            );
+                        }
+                        continue;
+                    }
+                    let Some(text) = self.clipboard_text() else {
+                        continue;
+                    };
+                    if text.len() > crate::term::MAX_CLIPBOARD_BYTES {
+                        log::warn!(
+                            "OSC 52 read reply skipped: {} bytes (limit {})",
+                            text.len(),
+                            crate::term::MAX_CLIPBOARD_BYTES
+                        );
+                        continue;
+                    }
+                    log::debug!("OSC 52 clipboard read reply ({} bytes)", text.len());
+                    if let Some(tab) = self.tabs.get_mut(tab) {
+                        tab.pty.write(crate::term::osc52_reply(&text));
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn copy_selection(&mut self) {
         let text = {
             let Some(tab) = self.active_tab() else {
@@ -27,34 +124,13 @@ impl App {
         if text.is_empty() {
             return;
         }
-        if self.clipboard.is_none() {
-            match arboard::Clipboard::new() {
-                Ok(cb) => self.clipboard = Some(cb),
-                Err(e) => {
-                    log::warn!("clipboard unavailable: {e:#}");
-                    return;
-                }
-            }
-        }
-        if let Some(cb) = self.clipboard.as_mut()
-            && let Err(e) = cb.set_text(text)
-        {
-            log::warn!("clipboard copy failed: {e:#}");
-        }
+        self.set_clipboard_text(&text);
     }
 
     pub(crate) fn paste_from_clipboard(&mut self) {
-        if self.clipboard.is_none() {
-            match arboard::Clipboard::new() {
-                Ok(cb) => self.clipboard = Some(cb),
-                Err(e) => {
-                    log::warn!("clipboard unavailable: {e:#}");
-                    return;
-                }
-            }
-        }
-        let text = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok());
-        let Some(text) = text else { return };
+        let Some(text) = self.clipboard_text() else {
+            return;
+        };
         // Normalize all line endings to CR, the terminal's Enter byte.
         let normalized = text
             .replace("\r\n", "\n")

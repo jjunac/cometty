@@ -7,6 +7,7 @@
 pub mod clipboard;
 pub mod geometry;
 pub mod keyboard;
+pub mod links;
 pub mod logs;
 pub mod mouse;
 pub mod pty_io;
@@ -62,6 +63,11 @@ pub struct App {
     pub(crate) cursor_pos: Option<(f32, f32)>,
     pub(crate) last_click: Option<(Instant, (usize, usize))>,
     pub(crate) mouse_pressed: u8,
+    /// Last cursor icon pushed to the window (link hover changes it).
+    pub(crate) cursor_icon: winit::window::CursorIcon,
+    /// A left press opened a link: swallow the matching release so no
+    /// spurious release reaches a mouse-reporting app.
+    pub(crate) link_press: bool,
     pub(crate) clipboard: Option<arboard::Clipboard>,
     pub(crate) window_title: String,
     pub(crate) settings: SettingsPanel,
@@ -98,6 +104,8 @@ impl App {
             cursor_pos: None,
             last_click: None,
             mouse_pressed: 0,
+            cursor_icon: winit::window::CursorIcon::Default,
+            link_press: false,
             clipboard: None,
             window_title,
             settings: SettingsPanel::new(startup),

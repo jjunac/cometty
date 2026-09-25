@@ -34,6 +34,8 @@ muda = { version = "0.19", default-features = false }
 # Config file (TOML) + serde derives; used on every platform (these were
 # nested under the macOS-only section, which broke non-macOS builds).
 serde = { version = "1", features = ["derive"] }
+# OSC 52 clipboard payloads (base64 encode/decode); tiny, no transitive deps.
+base64 = "0.22"
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
 [target.'cfg(unix)'.dependencies]
 # Foreground-process `$command`/`$cwd` tab-label sources (`tcgetpgrp` +

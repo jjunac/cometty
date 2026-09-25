@@ -81,10 +81,13 @@ pub struct ScrollCtx<'a> {
 }
 
 /// Highlight inputs for [`Renderer::render`]: text selection + find
-/// matches. Grouped so `render` stays under the clippy arg limit.
+/// matches + link hint underlines. Grouped so `render` stays under the
+/// clippy arg limit.
 pub struct HighlightCtx<'a> {
     pub selection: Option<((usize, usize), (usize, usize))>,
     pub search: Option<&'a crate::search::SearchView>,
+    /// Link/URL underline runs while the hint modifier is held.
+    pub links: Option<&'a crate::links::HintView>,
 }
 
 /// Cursor input for [`Renderer::render`]: position + visibility + shape.
