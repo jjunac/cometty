@@ -143,6 +143,10 @@ pub struct Renderer {
     /// Painted find-bar rect (logical points), for press hit-testing.
     search_bar_rect: Option<egui::Rect>,
     last_grid_version: u64,
+    /// Whether the terminal has forced window IME on (see
+    /// [`Self::ensure_terminal_ime`]); reset when the settings panel
+    /// takes over so egui drives IME alone again.
+    ime_terminal_enabled: bool,
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
@@ -313,6 +317,7 @@ impl Renderer {
             fullscreen: false,
             search_bar_rect: None,
             last_grid_version: u64::MAX,
+            ime_terminal_enabled: false,
             egui_ctx,
             egui_state,
             egui_renderer,
@@ -366,6 +371,39 @@ impl Renderer {
         event: &winit::event::WindowEvent,
     ) -> egui_winit::EventResponse {
         self.egui_state.on_window_event(window, event)
+    }
+
+    /// True while an egui text field holds keyboard focus (find-bar query,
+    /// log filter, settings inputs). Anything else — unfocused, or focus
+    /// on chrome — means the terminal owns keystrokes.
+    pub fn text_edit_focused(&self) -> bool {
+        self.egui_ctx.text_edit_focused()
+    }
+
+    /// Drop whatever egui keyboard focus exists (stale chrome/text focus
+    /// after the pointer moved back to the grid). No-op when unfocused.
+    pub fn surrender_egui_focus(&mut self) {
+        if let Some(id) = self.egui_ctx.memory(|m| m.focused()) {
+            self.egui_ctx.memory_mut(|m| m.surrender_focus(id));
+        }
+    }
+
+    /// Force window IME on while the terminal owns the keyboard (settings
+    /// closed). egui enables IME only for its own text fields; without
+    /// this, macOS dead keys (`" ' ` ~` on US-Intl) produce neither text
+    /// nor `Ime` events and vanish before any handler runs. Normal keys
+    /// are unaffected: without marked text winit still emits plain
+    /// `KeyboardInput`. One-shot per settings-close (flagged) so the
+    /// per-frame call can't disturb an in-progress composition.
+    fn ensure_terminal_ime(&mut self, window: &winit::window::Window, settings_open: bool) {
+        if settings_open {
+            self.ime_terminal_enabled = false;
+            return;
+        }
+        if !self.ime_terminal_enabled {
+            window.set_ime_allowed(true);
+            self.ime_terminal_enabled = true;
+        }
     }
 
     /// Update the DPI scale factor. Font metrics are re-derived so logical

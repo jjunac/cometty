@@ -155,6 +155,15 @@ impl App {
                         }
                         return;
                     }
+                    // Grid press takes keyboard focus back from egui: a
+                    // stale text/chrome focus would otherwise keep eating
+                    // keys through the `consumed` flag. The settings panel
+                    // keeps its focus (it owns the keyboard while open).
+                    if !self.settings.open
+                        && let Some(r) = self.renderer.as_mut()
+                    {
+                        r.surrender_egui_focus();
+                    }
                     // Cmd/Ctrl+click on a link opens it and never reaches
                     // the app or the selection (checked before mouse
                     // reporting so links stay clickable inside TUIs).

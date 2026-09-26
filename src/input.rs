@@ -172,6 +172,12 @@ fn map_key(
                 if alt_prefix {
                     return Some(vec![0x1b, b'\r']);
                 }
+                // Shift+Enter sends LF while Enter sends CR (macOS/iTerm2
+                // convention), so TUIs can tell newline from submit
+                // without kitty keyboard protocol.
+                if shift && !ctrl && !modifiers.super_key() {
+                    return Some(b"\n".to_vec());
+                }
                 return Some(b"\r".to_vec());
             }
             NamedKey::Backspace => {
@@ -728,6 +734,46 @@ mod tests {
             &ModifiersState::empty(),
         );
         assert_eq!(out, Some(b"\r".to_vec()));
+    }
+
+    #[test]
+    fn shift_enter_sends_lf() {
+        // Shift+Enter is LF so TUIs can tell it apart from Enter (CR).
+        assert_eq!(
+            plain(
+                &Key::Named(NamedKey::Enter),
+                Some("\r"),
+                &ModifiersState::SHIFT
+            ),
+            Some(b"\n".to_vec())
+        );
+        // Modified variants keep the old CR mapping.
+        assert_eq!(
+            plain(
+                &Key::Named(NamedKey::Enter),
+                Some("\r"),
+                &(ModifiersState::SHIFT | ModifiersState::CONTROL)
+            ),
+            Some(b"\r".to_vec())
+        );
+        assert_eq!(
+            plain(
+                &Key::Named(NamedKey::Enter),
+                Some("\r"),
+                &(ModifiersState::SHIFT | ModifiersState::SUPER)
+            ),
+            // Super combos never reach the PTY (OS / app shortcuts).
+            None
+        );
+        // Alt+Enter stays ESC + CR (Alt prefix takes precedence).
+        assert_eq!(
+            plain(
+                &Key::Named(NamedKey::Enter),
+                Some("\r"),
+                &(ModifiersState::SHIFT | ModifiersState::ALT)
+            ),
+            Some(vec![0x1b, b'\r'])
+        );
     }
 
     #[test]

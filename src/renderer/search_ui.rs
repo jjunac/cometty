@@ -33,7 +33,9 @@ pub(crate) fn query_id() -> egui::Id {
 /// glyphs (U+2191/U+2193 shape as tofu boxes), so the chevron is painted
 /// as two line segments instead of text.
 fn chevron_button(ui: &mut egui::Ui, up: bool, hover: &str) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+    // Non-focusable click: the find bar must not trap Tab/focus; the
+    // query field keeps keyboard focus, chevrons stay mouse-only.
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::CLICK);
     let visuals = ui.style().interact(&resp);
     if resp.hovered() || resp.has_focus() {
         ui.painter()

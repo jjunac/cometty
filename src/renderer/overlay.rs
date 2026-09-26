@@ -82,6 +82,9 @@ impl Renderer {
         ) {
             let _ = self.egui_state.take_egui_input(window);
             self.search_bar_rect = None;
+            // No panels open here by construction: keep window IME on so
+            // dead keys reach `App::on_ime` (egui would leave it off).
+            self.ensure_terminal_ime(window, false);
             let now = std::time::Instant::now();
             let animating =
                 scrollbar.update(now, total, visible, offset, is_alt, false, &scrollbar_cfg);
@@ -204,7 +207,9 @@ impl Renderer {
                                             ui.push_id(i, |ui| {
                                                 let (tab_rect, tab_resp) = ui.allocate_exact_size(
                                                     egui::vec2(tab_w, container_h),
-                                                    egui::Sense::click(),
+                                                    // Non-focusable click: the strip must
+                                                    // never steal Tab/focus from the PTY.
+                                                    egui::Sense::CLICK,
                                                 );
                                                 let is_active = i == active_tab;
                                                 let tab_hovered = tab_resp.hovered();
@@ -322,7 +327,8 @@ impl Renderer {
                                                     );
                                                     let close_resp = ui.allocate_rect(
                                                         ch_rect,
-                                                        egui::Sense::click(),
+                                                        // Non-focusable like the pill itself.
+                                                        egui::Sense::CLICK,
                                                     );
                                                     let close_hovered = close_resp.hovered();
                                                     // `close_hovered` included: the close rect
@@ -367,7 +373,8 @@ impl Renderer {
                             ui.push_id("new_tab", |ui| {
                                 let (plus_rect, plus_resp) = ui.allocate_exact_size(
                                     egui::vec2(plus_d, plus_d),
-                                    egui::Sense::click(),
+                                    // Non-focusable like the tab pills.
+                                    egui::Sense::CLICK,
                                 );
                                 let plus_hovered = plus_resp.hovered();
                                 let plus_painter = ui.painter().clone();
@@ -430,7 +437,8 @@ impl Renderer {
                     .gamma_multiply((opacity * 0.45).clamp(0.0, 1.0));
                 painter.rect_filled(track_rect, egui::CornerRadius::same(4), track_col);
 
-                let resp = ui.allocate_rect(track_rect, egui::Sense::click_and_drag());
+                // Non-focusable thumb: dragging must not steal PTY focus.
+                let resp = ui.allocate_rect(track_rect, egui::Sense::CLICK | egui::Sense::DRAG);
                 hovered = resp.hovered() || resp.dragged();
                 let active = scrollbar.is_dragging() || resp.dragged() || resp.hovered();
                 let thumb_base = if active {
@@ -522,6 +530,11 @@ impl Renderer {
             .map_or(std::time::Duration::MAX, |out| out.repaint_delay);
         self.egui_state
             .handle_platform_output(window, full_output.platform_output);
+        // egui enables IME only for its own text fields (disabling it
+        // otherwise), which would make macOS dead keys vanish. Re-enable
+        // after its decision whenever the settings panel doesn't own the
+        // keyboard; commits flow to the PTY via `App::on_ime`.
+        self.ensure_terminal_ime(window, settings.open);
         let paint_jobs = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
 
         let screen_descriptor = egui_wgpu::ScreenDescriptor {

@@ -16,7 +16,46 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 use super::App;
 
+/// Pure policy behind [`App::terminal_owns_keyboard`]: keystrokes belong
+/// to the terminal unless the settings panel is open (it swallows all),
+/// the find bar is waiting for focus, or an egui text field has focus.
+/// Free function so it is unit-testable without an `App`.
+pub(crate) fn terminal_owns_keyboard_for(
+    settings_open: bool,
+    search_focus_pending: bool,
+    text_edit_focused: bool,
+) -> bool {
+    !settings_open && !search_focus_pending && !text_edit_focused
+}
+
 impl App {
+    /// True when keystrokes belong to the terminal, not egui chrome.
+    pub(crate) fn terminal_owns_keyboard(&self) -> bool {
+        terminal_owns_keyboard_for(
+            self.settings.open,
+            self.search_focus_pending(),
+            self.renderer
+                .as_ref()
+                .is_some_and(|r| r.text_edit_focused()),
+        )
+    }
+
+    /// Dead-key / IME commits (e.g. `~ ' " \`` on macOS US-Intl) arrive
+    /// as `WindowEvent::Ime::Commit`, not `KeyboardInput`. egui also sees
+    /// the event, so only forward to the PTY when the terminal owns the
+    /// keyboard; otherwise the focused text field keeps it.
+    pub(crate) fn on_ime(&mut self, ime: &winit::event::Ime) {
+        let winit::event::Ime::Commit(text) = ime else {
+            return;
+        };
+        if text.is_empty() || !self.terminal_owns_keyboard() {
+            return;
+        }
+        if let Some(tab) = self.active_tab() {
+            tab.pty.write(text.as_bytes().to_vec());
+        }
+    }
+
     /// Returns true when the event was consumed locally (never reaches PTY).
     pub(crate) fn on_keyboard(
         &mut self,
@@ -234,5 +273,22 @@ impl App {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_owns_keyboard_for;
+
+    #[test]
+    fn keyboard_ownership_follows_panels_and_text_focus() {
+        // Pure terminal: Tab/IME belong to the PTY.
+        assert!(terminal_owns_keyboard_for(false, false, false));
+        // Settings panel swallows everything, even unfocused.
+        assert!(!terminal_owns_keyboard_for(true, false, false));
+        assert!(!terminal_owns_keyboard_for(true, false, true));
+        // Find bar waiting for focus, or any text field focused.
+        assert!(!terminal_owns_keyboard_for(false, true, false));
+        assert!(!terminal_owns_keyboard_for(false, false, true));
     }
 }

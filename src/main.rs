@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use app::{App, AppStartup, UserEvent};
@@ -242,8 +243,18 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         // egui chrome first: scrollbar hover/drag consumes pointer events.
+        // Exception: Tab while the terminal owns the keyboard.
+        // `egui-winit` marks every Tab consumed (focus navigation), so the
+        // first Tab would strand focus in the tab strip and starve the PTY
+        // of Tab/arrows/Enter until the next grid click. A panel text
+        // field keeps Tab (focus navigation inside the panel).
+        let skip_egui_for_tab = matches!(
+            &event,
+            WindowEvent::KeyboardInput { event, .. }
+            if event.logical_key == Key::Named(NamedKey::Tab)
+        ) && self.terminal_owns_keyboard();
         let response = match (self.renderer.as_mut(), self.window.as_ref()) {
-            (Some(r), Some(w)) => r.on_window_event(w, &event),
+            (Some(r), Some(w)) if !skip_egui_for_tab => r.on_window_event(w, &event),
             _ => egui_winit::EventResponse::default(),
         };
         let egui_consumed = response.consumed;
@@ -297,6 +308,12 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 self.on_keyboard(&event, egui_consumed);
+            }
+            // Dead-key / IME commits (macOS US-Intl `~ ' " \``) never
+            // appear as `KeyboardInput`; egui already saw the event above,
+            // `on_ime` forwards to the PTY only when no text field owns it.
+            WindowEvent::Ime(ime) => {
+                self.on_ime(&ime);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.on_cursor_moved(position.x as f32, position.y as f32);
