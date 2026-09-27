@@ -154,6 +154,9 @@ pub struct Renderer {
     /// change but were shaped every frame via `layout_no_wrap`.
     title_width_cache: std::collections::HashMap<String, f32>,
     title_width_font: Option<egui::FontId>,
+    /// Natural-advance cache for fixed-cell normalization (see
+    /// `renderer::text::AdvanceCache`); cleared when family/size changes.
+    advance_cache: text::AdvanceCache,
 }
 
 impl Renderer {
@@ -230,6 +233,8 @@ impl Renderer {
         let mut buffer = Buffer::new(&mut font_system, metrics);
         buffer.set_wrap(Wrap::None);
         buffer.set_size(Some(clamped_w as f32), Some(clamped_h as f32));
+        // Fixed-cell advances come from per-span `letter_spacing` (see
+        // `renderer::text`); `monospace_width` rounding stays off.
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bg"),
@@ -323,6 +328,7 @@ impl Renderer {
             egui_renderer,
             title_width_cache: std::collections::HashMap::new(),
             title_width_font: None,
+            advance_cache: std::collections::HashMap::new(),
         };
         r.update_viewport(clamped_w, clamped_h);
         log::debug!(
@@ -359,6 +365,8 @@ impl Renderer {
         self.font_size = font_size;
         self.line_height = line_height;
         self.cell_width = cell_width;
+        // Family/size may have changed: drop cached natural advances.
+        self.advance_cache.clear();
         self.last_grid_version = u64::MAX;
     }
 
@@ -428,6 +436,8 @@ impl Renderer {
         self.font_size = font_size;
         self.line_height = line_height;
         self.cell_width = cell_width;
+        // Scaled size changed: drop cached natural advances.
+        self.advance_cache.clear();
         self.last_grid_version = u64::MAX;
         true
     }
@@ -703,6 +713,70 @@ mod tests {
             .collect()
     }
 
+    fn production_width_for_rows(rows: &[Vec<Cell>]) -> (f32, f32) {
+        let font = crate::config::FontConfig::default();
+        let (font_size, line_height, cell_width) = scaled_metrics(16.0, 1.0, &font);
+        let mut font_system = FontSystem::new();
+        let mut cache = super::text::AdvanceCache::new();
+        let theme = Theme::default();
+        let family = super::text::font_family(&font.family);
+        let features = super::text::terminal_font_features();
+        let mut ctx = super::text::NormCtx {
+            cell_width,
+            font_size,
+            line_height,
+            family,
+            features,
+            font_system: &mut font_system,
+            cache: &mut cache,
+        };
+        let lines = super::text::build_buffer_lines(rows, &theme, &mut ctx);
+        let metrics = Metrics::new(font_size, line_height);
+        let mut buffer = Buffer::new(&mut font_system, metrics);
+        buffer.set_wrap(Wrap::None);
+        buffer.set_size(Some(800.0), Some(600.0));
+        buffer.set_monospace_width(None);
+        buffer.lines.clear();
+        for line in lines {
+            buffer.lines.push(line);
+        }
+        let n = buffer.lines.len();
+        for i in 0..n {
+            buffer.line_layout(&mut font_system, i);
+        }
+        let w = buffer
+            .line_layout(&mut font_system, 0)
+            .and_then(|ls| ls.first().map(|l| l.w))
+            .unwrap_or(0.0);
+        (w, cell_width)
+    }
+
+    fn production_width_for_text(text: &str) -> (f32, f32) {
+        production_width_for_rows(&[test_cells(text)])
+    }
+
+    fn build_lines_for_text(
+        font_system: &mut FontSystem,
+        cache: &mut super::text::AdvanceCache,
+        rows: &[Vec<Cell>],
+    ) -> Vec<cosmic_text::BufferLine> {
+        let font = crate::config::FontConfig::default();
+        let (font_size, line_height, cell_width) = scaled_metrics(16.0, 1.0, &font);
+        let theme = Theme::default();
+        let family = super::text::font_family(&font.family);
+        let features = super::text::terminal_font_features();
+        let mut ctx = super::text::NormCtx {
+            cell_width,
+            font_size,
+            line_height,
+            family,
+            features,
+            font_system,
+            cache,
+        };
+        super::text::build_buffer_lines(rows, &theme, &mut ctx)
+    }
+
     #[test]
     fn buffer_lines_shape_to_visible_glyphs() {
         // Headless regression test for invisible text: lines pushed directly
@@ -715,10 +789,9 @@ mod tests {
         buffer.set_size(Some(800.0), Some(600.0));
 
         let rows = vec![test_cells("hello"), test_cells("hi")];
-        let theme = Theme::default();
-        let font = crate::config::FontConfig::default();
+        let mut cache = super::text::AdvanceCache::new();
         buffer.lines.clear();
-        for line in super::text::build_buffer_lines(&rows, &theme, &font) {
+        for line in build_lines_for_text(&mut font_system, &mut cache, &rows) {
             buffer.lines.push(line);
         }
 
@@ -735,8 +808,8 @@ mod tests {
 
     #[test]
     fn buffer_lines_skip_wide_continuations() {
-        let theme = Theme::default();
-        let font = crate::config::FontConfig::default();
+        let mut font_system = FontSystem::new();
+        let mut cache = super::text::AdvanceCache::new();
         let lead = Cell {
             ch: '中',
             extra: None,
@@ -754,7 +827,7 @@ mod tests {
             ..Default::default()
         };
         let rows = vec![vec![lead, cont, a]];
-        let lines = super::text::build_buffer_lines(&rows, &theme, &font);
+        let lines = build_lines_for_text(&mut font_system, &mut cache, &rows);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text(), "中a");
     }
@@ -763,8 +836,8 @@ mod tests {
     fn buffer_lines_shape_block_elements_as_spaces() {
         // Block elements are painted by the renderer as cell-sized rects, so
         // their glyphs must not be shaped (font glyphs leave row gaps).
-        let theme = Theme::default();
-        let font = crate::config::FontConfig::default();
+        let mut font_system = FontSystem::new();
+        let mut cache = super::text::AdvanceCache::new();
         let block = Cell {
             ch: '█',
             ..Default::default()
@@ -782,7 +855,7 @@ mod tests {
             ..Default::default()
         };
         let rows = vec![vec![block, half, a, shade]];
-        let lines = super::text::build_buffer_lines(&rows, &theme, &font);
+        let lines = build_lines_for_text(&mut font_system, &mut cache, &rows);
         // `█` and `▀` become spaces (drawn as rects); the shade keeps its
         // glyph (a dither pattern, nothing solid to draw).
         assert_eq!(lines[0].text(), "  a░");
@@ -790,8 +863,8 @@ mod tests {
 
     #[test]
     fn buffer_lines_include_zwj_cluster_once() {
-        let theme = Theme::default();
-        let font = crate::config::FontConfig::default();
+        let mut font_system = FontSystem::new();
+        let mut cache = super::text::AdvanceCache::new();
         let cluster = "👨\u{200D}👩\u{200D}👧";
         let mut chars = cluster.chars();
         let first = chars.next().unwrap();
@@ -809,7 +882,7 @@ mod tests {
             ..Default::default()
         };
         let rows = vec![vec![lead, cont]];
-        let lines = super::text::build_buffer_lines(&rows, &theme, &font);
+        let lines = build_lines_for_text(&mut font_system, &mut cache, &rows);
         assert_eq!(lines[0].text(), cluster);
     }
 
@@ -844,5 +917,98 @@ mod tests {
         assert_eq!((w, h), (2560, 1600));
         // Never shrink below a usable surface.
         assert_eq!(shrink_fullscreen_surface(1, 1, true), (1, 1));
+    }
+
+    #[test]
+    fn fixed_cell_normalizes_spinner_frames() {
+        // OpenCode-style loading bar: dots vs full squares must occupy the
+        // same columns so trailing text doesn't jitter left/right.
+        // Note: `\u{2588}` (full block) is rect-painted + shaped as a space (see
+        // `blocks.rs`), and trailing spaces trim, so lone blocks collapse;
+        // they are covered via the suffixed case below instead.
+        let frames = [
+            "...",
+            "\u{00b7}\u{00b7}\u{00b7}",
+            "\u{25a0}\u{25a0}\u{25a0}",
+            "\u{25cf}\u{25cf}\u{25cf}",
+            "\u{280b}\u{280b}\u{280b}",
+        ];
+        let mut widths = Vec::new();
+        let mut cells = 0.0;
+        for f in frames {
+            let (w, cell) = production_width_for_text(f);
+            widths.push(w);
+            cells = cell;
+        }
+        for w in &widths {
+            assert!(
+                (*w - 3.0 * cells).abs() < 0.5,
+                "frame width {w} != 3 cells ({cells})"
+            );
+        }
+        let first = widths[0];
+        for w in &widths[1..] {
+            assert!(
+                (*w - first).abs() < 0.5,
+                "spinner frames differ: {first} vs {w}"
+            );
+        }
+        // Suffix stability: the same trailing text after different prefixes
+        // must start at the same x (i.e. total widths match).
+        let (a, cell) = production_width_for_text("\u{00b7}\u{00b7}\u{00b7}hi");
+        let (b, _) = production_width_for_text("\u{25a0}\u{25a0}\u{25a0}hi");
+        let (c, _) = production_width_for_text("\u{2588}\u{2588}\u{2588}hi");
+        assert!(
+            (a - b).abs() < 0.5,
+            "suffix shifts with spinner frame: {a} vs {b}"
+        );
+        assert!(
+            (a - c).abs() < 0.5,
+            "suffix shifts with block frame: {a} vs {c}"
+        );
+        assert!(
+            (a - 5.0 * cell).abs() < 0.5,
+            "row width {a} != 5 cells ({cell})"
+        );
+    }
+
+    #[test]
+    fn fixed_cell_keeps_wide_cells_double() {
+        // `\u{3042}` (Hiragana, wide) uses a vector fallback with finite advances.
+        // (`\u{4e2d}` hits macOS `GB18030Bitmap`, whose advances shape to inf --
+        // a pre-existing font issue outside this fix.)
+        let lead = Cell {
+            ch: '\u{3042}',
+            extra: None,
+            width: 2,
+            ..Default::default()
+        };
+        let cont = Cell {
+            ch: ' ',
+            extra: None,
+            width: 0,
+            ..Default::default()
+        };
+        let rows = vec![vec![lead, cont]];
+        let (w, cell) = production_width_for_rows(&rows);
+        assert!(
+            (w - 2.0 * cell).abs() < 0.5,
+            "wide cell width {w} != 2 cells ({cell})"
+        );
+    }
+
+    #[test]
+    fn fixed_cell_disables_ligatures_across_columns() {
+        // `...` must stay three cells, never ligate to a single ellipsis.
+        let (w, cell) = production_width_for_text("...");
+        assert!(
+            (w - 3.0 * cell).abs() < 0.5,
+            "ligature collapsed columns: {w} != 3 cells ({cell})"
+        );
+        let mut font_system = FontSystem::new();
+        let mut cache = super::text::AdvanceCache::new();
+        let rows = vec![test_cells("...")];
+        let lines = build_lines_for_text(&mut font_system, &mut cache, &rows);
+        assert_eq!(lines[0].text(), "...");
     }
 }
