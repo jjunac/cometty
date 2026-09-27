@@ -62,6 +62,9 @@ pub struct App {
     pub(crate) wheel_accum: f64,
     pub(crate) cursor_pos: Option<(f32, f32)>,
     pub(crate) last_click: Option<(Instant, (usize, usize))>,
+    /// Last single press on empty macOS titlebar chrome, for double-click
+    /// zoom. Separate from grid `last_click` (cell-based word select).
+    pub(crate) last_titlebar_click: Option<Instant>,
     pub(crate) mouse_pressed: u8,
     /// Last cursor icon pushed to the window (link hover changes it).
     pub(crate) cursor_icon: winit::window::CursorIcon,
@@ -108,6 +111,7 @@ impl App {
             wheel_accum: 0.0,
             cursor_pos: None,
             last_click: None,
+            last_titlebar_click: None,
             mouse_pressed: 0,
             cursor_icon: winit::window::CursorIcon::Default,
             link_press: false,

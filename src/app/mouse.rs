@@ -9,6 +9,16 @@ use super::App;
 use crate::grid::MouseMode;
 use crate::selection::{CellPos, Selection};
 
+/// True when a titlebar press at `now` completes a double-click: a previous
+/// press exists and falls within `threshold_ms`. Pure for headless testing.
+pub(crate) fn is_titlebar_double_click(
+    now: Instant,
+    last: Option<Instant>,
+    threshold_ms: u64,
+) -> bool {
+    matches!(last, Some(t) if now.duration_since(t).as_millis() <= u128::from(threshold_ms))
+}
+
 fn mouse_bit(button: MouseButton) -> Option<u8> {
     match button {
         MouseButton::Left => Some(1),
@@ -148,10 +158,11 @@ impl App {
                         .cursor_pos
                         .is_some_and(|(x, y)| self.press_on_chrome(x, y))
                     {
-                        // Merged macOS titlebar: dragging empty chrome moves
-                        // the window like Brave. No-op on other platforms.
+                        // Merged macOS titlebar: single click on empty chrome
+                        // drags the window like Brave, double-click toggles
+                        // native zoom. No-op on other platforms.
                         if cfg!(target_os = "macos") {
-                            self.maybe_drag_titlebar();
+                            self.handle_titlebar_press(button);
                         }
                         return;
                     }
@@ -294,11 +305,12 @@ impl App {
         }
     }
 
-    /// Start a native window drag when the press landed on empty
-    /// titlebar chrome (macOS merged titlebar). Does nothing on tabs,
-    /// the `+` button, or the traffic lights. Compiled everywhere so
+    /// Single click on empty titlebar chrome starts a native window drag;
+    /// double-click toggles native macOS zoom (`set_maximized`, which maps
+    /// to `zoom:`). Empty chrome only: tabs, the `+` button and the traffic
+    /// lights are excluded by `is_titlebar_drag`. Compiled everywhere so
     /// Linux CI type-checks it; only called on macOS.
-    fn maybe_drag_titlebar(&self) {
+    fn handle_titlebar_press(&mut self, button: MouseButton) {
         let Some((x_phys, y_phys)) = self.cursor_pos else {
             return;
         };
@@ -311,13 +323,28 @@ impl App {
         let scale = renderer.scale_factor().max(1.0);
         let screen_w_pts = window.inner_size().width.max(1) as f32 / scale;
         let bar_h = super::tab::bar_height_points(self.tabs.len(), &self.config.tabbar);
-        if crate::tabbar::is_titlebar_drag(
+        if !crate::tabbar::is_titlebar_drag(
             x_phys / scale,
             y_phys / scale,
             screen_w_pts,
             bar_h,
             &self.config.tabbar,
         ) {
+            return;
+        }
+        if button != MouseButton::Left {
+            return;
+        }
+        let now = Instant::now();
+        if is_titlebar_double_click(
+            now,
+            self.last_titlebar_click,
+            self.config.selection.double_click_ms,
+        ) {
+            self.last_titlebar_click = None;
+            window.set_maximized(!window.is_maximized());
+        } else {
+            self.last_titlebar_click = Some(now);
             let _ = window.drag_window();
         }
     }
@@ -415,5 +442,31 @@ impl App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_titlebar_double_click;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn titlebar_double_click_needs_a_prior_press() {
+        let now = Instant::now();
+        assert!(!is_titlebar_double_click(now, None, 400));
+    }
+
+    #[test]
+    fn titlebar_double_click_within_threshold() {
+        let first = Instant::now();
+        let second = first + Duration::from_millis(200);
+        assert!(is_titlebar_double_click(second, Some(first), 400));
+    }
+
+    #[test]
+    fn titlebar_double_click_outside_threshold() {
+        let first = Instant::now();
+        let second = first + Duration::from_millis(401);
+        assert!(!is_titlebar_double_click(second, Some(first), 400));
     }
 }
