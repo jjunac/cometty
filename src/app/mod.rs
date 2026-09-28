@@ -83,6 +83,12 @@ pub struct App {
     pub(crate) snapshot_rows: Vec<Vec<crate::grid::Cell>>,
     pub(crate) snapshot_version: u64,
     pub(crate) snapshot_tab: usize,
+    /// Key-to-paint latency probe (debug logs only, never affects
+    /// rendering): stamped when a keystroke is handed to the PTY writer,
+    /// consumed by the next drain (key-to-echo) and the next content
+    /// rebuild (echo-to-paint).
+    pub(crate) last_key_write: Option<Instant>,
+    pub(crate) last_echo: Option<Instant>,
 }
 
 impl App {
@@ -124,6 +130,8 @@ impl App {
             snapshot_rows: Vec::new(),
             snapshot_version: u64::MAX,
             snapshot_tab: usize::MAX,
+            last_key_write: None,
+            last_echo: None,
         }
     }
 

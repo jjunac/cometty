@@ -1,5 +1,7 @@
 //! Keyboard handling (copy/paste shortcuts, new tab, local scroll, PTY send).
 
+use std::time::Instant;
+
 use winit::event::ElementState;
 use winit::keyboard::{Key, NamedKey};
 
@@ -257,7 +259,7 @@ impl App {
             }
         }
         // Regular keys go to the active tab's PTY.
-        if event.state == ElementState::Pressed
+        let wrote_to_pty = if event.state == ElementState::Pressed
             && let Some(tab) = self.active_tab()
         {
             let cursor_app = tab.terminal.cursor_app_mode();
@@ -270,7 +272,17 @@ impl App {
                 &self.config.input,
             ) {
                 tab.pty.write(bytes);
+                true
+            } else {
+                false
             }
+        } else {
+            false
+        };
+        if wrote_to_pty {
+            // Latency probe: `drain_pty` turns this into a key-to-echo
+            // measurement, `on_redraw` into echo-to-paint (debug logs).
+            self.last_key_write = Some(Instant::now());
         }
         true
     }

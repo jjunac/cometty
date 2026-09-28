@@ -5,7 +5,7 @@
 //! (spawn/switch/close) lives here so `keyboard` / `pty_io` / `redraw`
 //! stay thin.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::config::{Config, TabbarConfig};
 use crate::procinfo;
@@ -108,6 +108,9 @@ impl Tab {
     /// terminal the OSC 7 baseline is refreshed, so only reports emitted
     /// by a job itself count as live (see [`osc7_is_live`]).
     pub(crate) fn refresh_title(&mut self) {
+        // Latency probe: this runs on the UI thread between echo and
+        // paint, so a slow query delays every keystroke's frame.
+        let start = Instant::now();
         let pgid = self.pty.foreground_pgid();
         if pgid != self.foreground.pgid {
             self.foreground.pgid = pgid;
@@ -123,6 +126,10 @@ impl Tab {
         // to move `$cwd` away from the shell's own directory.
         if self.pty.shell_pid().is_some_and(|pid| pgid == Some(pid)) {
             self.foreground.cwd_baseline = self.terminal.cwd_version();
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= Duration::from_millis(2) {
+            log::debug!("slow refresh_title {elapsed:?}");
         }
     }
 }

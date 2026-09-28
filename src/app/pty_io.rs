@@ -102,6 +102,22 @@ impl App {
             // Dropping to 1 tab hides the bar and hands space back.
             self.sync_tab_sizes();
         }
+        if got_data {
+            // Latency probe: keystroke -> first echo bytes back on the UI
+            // thread. Only attributed when recent; older stamps are stale
+            // background output, dropped silently.
+            if let Some(t) = self.last_key_write.take() {
+                let elapsed = t.elapsed();
+                if elapsed <= Duration::from_secs(2) {
+                    log::debug!("key-to-echo {elapsed:?} ({drained_bytes}B drained)");
+                }
+            }
+            self.last_echo = Some(Instant::now());
+            let drain_elapsed = start.elapsed();
+            if drain_elapsed >= Duration::from_millis(4) {
+                log::debug!("slow pty drain {drain_elapsed:?} ({drained_bytes}B)");
+            }
+        }
         if got_data && self.should_clear_selection() {
             // New output invalidates the selected text; alt switches too.
             // Skipped mid-drag (see `should_clear_selection`).

@@ -8,6 +8,8 @@ mod text;
 
 use background::{BG_SHADER, BgVertex};
 
+use std::time::{Duration, Instant};
+
 use cosmic_text::{Buffer, Metrics, Wrap};
 use glyphon::{
     Cache, FontSystem, Resolution, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer,
@@ -58,6 +60,31 @@ pub(crate) fn shrink_fullscreen_surface(width: u32, height: u32, fullscreen: boo
         return (width - 1, height);
     }
     (width, height)
+}
+
+/// Rate-limit slow-frame debug logs: at most one every 2s, so a
+/// sustained slowdown is visible without flooding the log panel.
+/// Free function so it is unit-testable without a `Renderer` (which
+/// needs a window + GPU).
+fn slow_log_due(last: &mut Option<Instant>, now: Instant) -> bool {
+    if last.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(2)) {
+        *last = Some(now);
+        true
+    } else {
+        false
+    }
+}
+
+/// Pick the lowest-latency vsync present mode the surface supports:
+/// `Mailbox` never blocks the CPU on acquire and never queues stale
+/// frames (no tearing); elsewhere fall back to `AutoVsync`.
+/// Free function so it is unit-testable without a GPU surface.
+fn pick_present_mode(supported: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+    if supported.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else {
+        wgpu::PresentMode::AutoVsync
+    }
 }
 
 /// egui chrome input for [`Renderer::render`]: tab strip + overlay scrollbar.
@@ -157,6 +184,15 @@ pub struct Renderer {
     /// Natural-advance cache for fixed-cell normalization (see
     /// `renderer::text::AdvanceCache`); cleared when family/size changes.
     advance_cache: text::AdvanceCache,
+    /// Per-row text hashes for the last shaped frame (see
+    /// `renderer::text::diff_rows`): typing re-shapes only changed lines.
+    /// Cleared with `last_grid_version` whenever metrics/theme/size change
+    /// (a hash hit is only valid under identical shaping inputs); kept
+    /// across `invalidate()` so content-identical frames skip layout.
+    shaped_hashes: Vec<u64>,
+    /// Last slow-frame log (see `slow_log_due`): rate-limits the
+    /// debug probes so a sustained slowdown can't flood the log panel.
+    last_slow_log: Option<Instant>,
 }
 
 impl Renderer {
@@ -216,7 +252,8 @@ impl Renderer {
         let mut config = surface
             .get_default_config(&adapter, clamped_w, clamped_h)
             .ok_or_else(|| anyhow::anyhow!("surface not supported"))?;
-        config.present_mode = wgpu::PresentMode::AutoVsync;
+        config.present_mode = pick_present_mode(&surface.get_capabilities(&adapter).present_modes);
+        log::debug!("present mode -> {:?}", config.present_mode);
         config.width = clamped_w;
         config.height = clamped_h;
         surface.configure(&device, &config);
@@ -329,6 +366,10 @@ impl Renderer {
             title_width_cache: std::collections::HashMap::new(),
             title_width_font: None,
             advance_cache: std::collections::HashMap::new(),
+            // Empty: the first render takes the full path below, which
+            // fills it; every config change clears it for the same reason.
+            shaped_hashes: Vec::new(),
+            last_slow_log: None,
         };
         r.update_viewport(clamped_w, clamped_h);
         log::debug!(
@@ -351,6 +392,8 @@ impl Renderer {
             self.theme = theme;
             self.egui_ctx.set_visuals(theme.to_egui_visuals());
             self.last_grid_version = u64::MAX;
+            // Span colors changed: hashes would falsely hit.
+            self.shaped_hashes.clear();
         }
     }
 
@@ -367,6 +410,8 @@ impl Renderer {
         self.cell_width = cell_width;
         // Family/size may have changed: drop cached natural advances.
         self.advance_cache.clear();
+        // Metrics feed every span's advance: hashes would falsely hit.
+        self.shaped_hashes.clear();
         self.last_grid_version = u64::MAX;
     }
 
@@ -438,6 +483,8 @@ impl Renderer {
         self.cell_width = cell_width;
         // Scaled size changed: drop cached natural advances.
         self.advance_cache.clear();
+        // Metrics feed every span's advance: hashes would falsely hit.
+        self.shaped_hashes.clear();
         self.last_grid_version = u64::MAX;
         true
     }
@@ -454,6 +501,8 @@ impl Renderer {
         );
         self.buffer
             .set_size(Some(self.width as f32), Some(self.height as f32));
+        // A new size can reflow layout: hashes would falsely hit.
+        self.shaped_hashes.clear();
         self.last_grid_version = u64::MAX;
     }
 
@@ -577,13 +626,29 @@ impl Renderer {
         highlights: HighlightCtx<'_>,
         scroll: ScrollCtx<'_>,
     ) -> anyhow::Result<RenderOutput> {
-        if grid_version != self.last_grid_version {
+        // Latency probe: per-keystroke reshape + submit cost. Slow-only,
+        // rate-limited debug logs; the fast path stays silent.
+        let render_start = Instant::now();
+        let rebuild_elapsed = if grid_version != self.last_grid_version {
+            let rebuild_start = Instant::now();
             self.rebuild_buffer(grid_rows);
+            let rebuild_elapsed = rebuild_start.elapsed();
+            if rebuild_elapsed >= Duration::from_millis(8)
+                && slow_log_due(&mut self.last_slow_log, Instant::now())
+            {
+                log::debug!("slow text rebuild {rebuild_elapsed:?}");
+            }
             self.last_grid_version = grid_version;
-        }
+            rebuild_elapsed
+        } else {
+            Duration::ZERO
+        };
 
         let tab_count = scroll.tab_titles.len();
+        let bg_start = Instant::now();
         let vert_count = self.paint_bg(grid_rows, &cursor, &highlights, tab_count);
+        let bg_elapsed = bg_start.elapsed();
+        let overlay_start = Instant::now();
         let overlay::OverlayOutput {
             scroll_to,
             selected_tab,
@@ -594,6 +659,7 @@ impl Renderer {
             screen_descriptor,
             egui_repaint_delay,
         } = self.paint_overlay(scroll);
+        let overlay_elapsed = overlay_start.elapsed();
 
         let out = RenderOutput {
             scroll_to,
@@ -604,6 +670,7 @@ impl Renderer {
             egui_repaint_delay,
         };
 
+        let acquire_start = Instant::now();
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -618,6 +685,9 @@ impl Renderer {
                 return Ok(out);
             }
         };
+        // Acquire is timed separately: with queued vsync it blocks for the
+        // previous frame's blank, which dwarfs real CPU work.
+        let acquire_elapsed = acquire_start.elapsed();
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -637,6 +707,7 @@ impl Renderer {
             custom_glyphs: &[],
         }];
 
+        let prepare_start = Instant::now();
         self.text_renderer.prepare(
             &self.device,
             &self.queue,
@@ -646,7 +717,9 @@ impl Renderer {
             text_areas,
             &mut self.swash_cache,
         )?;
+        let prepare_elapsed = prepare_start.elapsed();
 
+        let encode_start = Instant::now();
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -693,6 +766,20 @@ impl Renderer {
                 .render(&mut pass.forget_lifetime(), &paint_jobs, &screen_descriptor);
         }
         self.queue.submit(Some(encoder.finish()));
+        let encode_elapsed = encode_start.elapsed();
+        // Timed before `present`: presenting blocks on vsync by design
+        // (~16ms on 60Hz), so including it would flag every healthy frame.
+        let submit_elapsed = render_start.elapsed();
+        if submit_elapsed >= Duration::from_millis(12)
+            && slow_log_due(&mut self.last_slow_log, Instant::now())
+        {
+            log::debug!(
+                "slow frame submit={submit_elapsed:?} rebuild={rebuild_elapsed:?} \
+                 bg={bg_elapsed:?} overlay={overlay_elapsed:?} \
+                 prepare={prepare_elapsed:?} encode={encode_elapsed:?} \
+                 acquire={acquire_elapsed:?}"
+            );
+        }
         self.queue.present(frame);
         self.atlas.trim();
         Ok(out)
@@ -884,6 +971,185 @@ mod tests {
         let rows = vec![vec![lead, cont]];
         let lines = build_lines_for_text(&mut font_system, &mut cache, &rows);
         assert_eq!(lines[0].text(), cluster);
+    }
+
+    #[test]
+    fn row_text_hash_tracks_shaping_inputs_only() {
+        use super::text::{diff_rows, row_text_hash};
+        let base = test_cells("hello");
+        let h = row_text_hash(&base);
+        // Text, weight, style, and effective-fg changes invalidate.
+        assert_ne!(row_text_hash(&test_cells("hellp")), h);
+        let mut bold = base.clone();
+        bold[0].bold = true;
+        assert_ne!(row_text_hash(&bold), h);
+        let mut italic = base.clone();
+        italic[0].italic = true;
+        assert_ne!(row_text_hash(&italic), h);
+        let mut fg = base.clone();
+        fg[0].fg = crate::theme::Rgb { r: 1, g: 2, b: 3 };
+        assert_ne!(row_text_hash(&fg), h);
+        // Inverse swaps the effective foreground.
+        let mut inverse = base.clone();
+        inverse[0].inverse = true;
+        assert_ne!(row_text_hash(&inverse), h);
+        // Decoration-only changes paint via bg quads from the live grid,
+        // never text spans: the layout stays valid.
+        let mut deco = base.clone();
+        deco[1].underline = crate::grid::UnderlineStyle::Single;
+        deco[2].hyperlink = Some(7);
+        deco[3].bg = crate::theme::Rgb { r: 1, g: 2, b: 3 };
+        assert_eq!(row_text_hash(&deco), h);
+        // Wide continuations are skipped by shaping: mutating one must
+        // not invalidate the line.
+        let lead = Cell {
+            ch: '中',
+            extra: None,
+            width: 2,
+            ..Default::default()
+        };
+        let cont = Cell {
+            ch: ' ',
+            extra: None,
+            width: 0,
+            ..Default::default()
+        };
+        let row = vec![lead, cont];
+        let mut row2 = row.clone();
+        row2[1].ch = 'X';
+        row2[1].bold = true;
+        assert_eq!(row_text_hash(&row), row_text_hash(&row2));
+    }
+
+    #[test]
+    fn diff_rows_reports_changed_indices_once() {
+        use super::text::{diff_rows, row_text_hash};
+        let rows_a = vec![test_cells("a"), test_cells("b")];
+        let mut hashes: Vec<u64> = rows_a.iter().map(|row| row_text_hash(row)).collect();
+        // Identical rows: no work.
+        assert_eq!(diff_rows(&mut hashes, &rows_a), Some(vec![]));
+        // One edit: index reported, hashes updated in place.
+        let mut rows_b = rows_a.clone();
+        rows_b[1] = test_cells("c");
+        assert_eq!(diff_rows(&mut hashes, &rows_b), Some(vec![1]));
+        assert_eq!(diff_rows(&mut hashes, &rows_b), Some(vec![]));
+        // Row-count change: full rebuild required.
+        let mut rows_c = rows_b.clone();
+        rows_c.push(test_cells("d"));
+        assert_eq!(diff_rows(&mut hashes, &rows_c), None);
+    }
+
+    /// Shape `rows` into a laid-out buffer (production path, headless).
+    fn shape_buffer(
+        font_system: &mut FontSystem,
+        cache: &mut super::text::AdvanceCache,
+        rows: &[Vec<Cell>],
+    ) -> Buffer {
+        let font = crate::config::FontConfig::default();
+        let (font_size, line_height, _) = scaled_metrics(16.0, 1.0, &font);
+        let metrics = Metrics::new(font_size, line_height);
+        let mut buffer = Buffer::new(font_system, metrics);
+        buffer.set_wrap(Wrap::None);
+        buffer.set_size(Some(800.0), Some(600.0));
+        buffer.lines.clear();
+        for line in build_lines_for_text(font_system, cache, rows) {
+            buffer.lines.push(line);
+        }
+        let n = buffer.lines.len();
+        for i in 0..n {
+            buffer.line_layout(font_system, i);
+        }
+        buffer
+    }
+
+    fn layout_fingerprint(buffer: &mut Buffer, font_system: &mut FontSystem) -> Vec<String> {
+        (0..buffer.lines.len())
+            .map(|i| format!("{:?}", buffer.line_layout(font_system, i)))
+            .collect()
+    }
+
+    #[test]
+    fn partial_relayout_matches_full_rebuild() {
+        // Two consecutive frames where typing edited line 2 and toggled
+        // bold on line 4: replacing + laying out only the diffed lines
+        // must shape identically to a full rebuild.
+        let rows_a: Vec<Vec<Cell>> = (0..6)
+            .map(|r| test_cells(&format!("scrollback line {r} 0123456789")))
+            .collect();
+        let mut rows_b = rows_a.clone();
+        rows_b[2] = test_cells("scrollback line 2 0123456789!");
+        rows_b[4] = rows_a[4]
+            .iter()
+            .map(|c| Cell {
+                bold: true,
+                ..c.clone()
+            })
+            .collect();
+        let mut font_system = FontSystem::new();
+        let mut cache = super::text::AdvanceCache::new();
+        // Partial path, mirroring `rebuild_buffer`: full build of A, then
+        // single-line rebuilds for the diff to B.
+        let mut partial = shape_buffer(&mut font_system, &mut cache, &rows_a);
+        let mut hashes: Vec<u64> = rows_a
+            .iter()
+            .map(|row| super::text::row_text_hash(row))
+            .collect();
+        let changed = super::text::diff_rows(&mut hashes, &rows_b).expect("same row count");
+        assert_eq!(changed, vec![2, 4]);
+        let font = crate::config::FontConfig::default();
+        let (font_size, line_height, cell_width) = scaled_metrics(16.0, 1.0, &font);
+        let theme = Theme::default();
+        let family = super::text::font_family(&font.family);
+        let features = super::text::terminal_font_features();
+        for i in changed {
+            let line = {
+                let mut ctx = super::text::NormCtx {
+                    cell_width,
+                    font_size,
+                    line_height,
+                    family,
+                    features: features.clone(),
+                    font_system: &mut font_system,
+                    cache: &mut cache,
+                };
+                super::text::build_buffer_line(&rows_b[i], &theme, &mut ctx)
+            };
+            partial.lines[i] = line;
+            partial.line_layout(&mut font_system, i);
+        }
+        // Fresh full build of B.
+        let mut full = shape_buffer(&mut font_system, &mut cache, &rows_b);
+        assert_eq!(
+            layout_fingerprint(&mut partial, &mut font_system),
+            layout_fingerprint(&mut full, &mut font_system),
+        );
+    }
+
+    #[test]
+    fn slow_log_cooldown_suppresses_repeats() {
+        use std::time::{Duration, Instant};
+        let mut last = None;
+        let t0 = Instant::now();
+        // First slow frame logs.
+        assert!(slow_log_due(&mut last, t0));
+        // Immediate repeats are suppressed.
+        assert!(!slow_log_due(&mut last, t0));
+        assert!(!slow_log_due(&mut last, t0 + Duration::from_secs(1)));
+        // After the cooldown a slow frame logs again.
+        assert!(slow_log_due(&mut last, t0 + Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn present_mode_prefers_mailbox_with_fallback() {
+        assert_eq!(
+            pick_present_mode(&[wgpu::PresentMode::Fifo, wgpu::PresentMode::Mailbox]),
+            wgpu::PresentMode::Mailbox
+        );
+        assert_eq!(
+            pick_present_mode(&[wgpu::PresentMode::Fifo]),
+            wgpu::PresentMode::AutoVsync
+        );
+        assert_eq!(pick_present_mode(&[]), wgpu::PresentMode::AutoVsync);
     }
 
     #[test]

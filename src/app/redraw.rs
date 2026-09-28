@@ -60,6 +60,7 @@ impl App {
         // instead of re-cloning `rows x cols` Cells every frame. A tab
         // switch changes `active`, so two tabs sharing a version still
         // rebuild (their content differs).
+        let snap_before = (self.snapshot_tab, self.snapshot_version);
         if self.snapshot_tab != active || self.snapshot_version != version {
             let rows: Vec<Vec<grid::Cell>> = self.tabs[active]
                 .terminal
@@ -72,6 +73,9 @@ impl App {
             self.snapshot_version = version;
             self.snapshot_tab = active;
         }
+        // Latency probe: only a rebuilt snapshot can carry fresh echo to
+        // the screen, so blink-only frames must not consume `last_echo`.
+        let rebuilt = (self.snapshot_tab, self.snapshot_version) != snap_before;
 
         // Small owned fields; the heavy `rows` stay in the cache above and
         // are borrowed for `render` (disjoint from the `&mut` borrows below).
@@ -210,6 +214,21 @@ impl App {
             });
             (out, cfg_changed, q_changed)
         };
+        if rebuilt {
+            // Latency probe: echo bytes -> painted frame carrying them.
+            if let Some(t) = self.last_echo.take() {
+                let elapsed = t.elapsed();
+                if elapsed <= Duration::from_secs(2) {
+                    log::debug!("echo-to-paint {elapsed:?}");
+                }
+            }
+        } else {
+            // No new content reached the screen, so a pending echo stamp
+            // is spent: this frame already reflects everything drained.
+            // Dropping it keeps a later, unrelated frame from attributing
+            // a stale echo to itself.
+            self.last_echo.take();
+        }
 
         // egui's own next-frame request (hover fades, panel animations,
         // smooth scrolling, tooltips): zero means "right now" — every input
