@@ -133,8 +133,8 @@ fn d_title_format() -> String {
 fn d_double_click_ms() -> u64 {
     400
 }
-fn d_word_extra() -> String {
-    "_".to_string()
+fn d_word_regex() -> String {
+    DEFAULT_WORD_REGEX.to_string()
 }
 fn d_log_level() -> String {
     "debug".to_string()
@@ -396,16 +396,48 @@ impl Default for TabbarConfig {
 pub struct SelectionConfig {
     #[serde(default = "d_double_click_ms")]
     pub double_click_ms: u64,
-    /// Extra word chars beyond ASCII alphanumeric (default `"_"`).
-    #[serde(default = "d_word_extra")]
+    /// Match-words regex for double-click selection (default
+    /// `"[A-Za-z0-9_]+"`, the old alphanumeric-plus-`word_extra_chars`
+    /// behavior). Invalid or empty patterns fall back to the default at
+    /// runtime and are repaired on load.
+    #[serde(default = "d_word_regex")]
+    pub word_regex: String,
+    /// Deprecated: pre-regex extra word chars (default `"_"`). Loaded for
+    /// migration but never saved (`skip_serializing`); a non-default value
+    /// with a default `word_regex` is converted to `[A-Za-z0-9…]+` on load.
+    #[serde(default, skip_serializing)]
     pub word_extra_chars: String,
+}
+
+/// Default match-words pattern (also the pre-regex alphanumeric + `_` behavior).
+pub const DEFAULT_WORD_REGEX: &str = "[A-Za-z0-9_]+";
+
+impl SelectionConfig {
+    /// Effective pattern: `word_regex` when non-empty, else the default.
+    pub fn word_pattern(&self) -> &str {
+        if self.word_regex.is_empty() {
+            DEFAULT_WORD_REGEX
+        } else {
+            &self.word_regex
+        }
+    }
+
+    /// Compile the effective pattern, falling back to the default when
+    /// invalid. Never fails on the compiled default.
+    pub fn word_regex_compiled(&self) -> regex::Regex {
+        if let Ok(re) = regex::Regex::new(self.word_pattern()) {
+            return re;
+        }
+        regex::Regex::new(DEFAULT_WORD_REGEX).expect("default word regex compiles")
+    }
 }
 
 impl Default for SelectionConfig {
     fn default() -> Self {
         Self {
             double_click_ms: d_double_click_ms(),
-            word_extra_chars: d_word_extra(),
+            word_regex: d_word_regex(),
+            word_extra_chars: String::new(),
         }
     }
 }
@@ -704,6 +736,30 @@ impl Config {
             .log
             .buffer_lines
             .clamp(MIN_LOG_BUFFER_LINES, MAX_LOG_BUFFER_LINES);
+        // Deprecated `word_extra_chars` migration: a non-empty legacy value
+        // with a default `word_regex` becomes `[A-Za-z0-9…]+`. Runs before
+        // regex validation so a migrated pattern is itself validated.
+        if !self.selection.word_extra_chars.is_empty()
+            && self.selection.word_regex == DEFAULT_WORD_REGEX
+        {
+            let legacy = self.selection.word_extra_chars.clone();
+            if legacy != "_" {
+                let mut class = String::from("A-Za-z0-9");
+                for ch in legacy.chars() {
+                    if matches!(ch, ']' | '\\' | '^' | '-') {
+                        class.push('\\');
+                    }
+                    class.push(ch);
+                }
+                self.selection.word_regex = format!("[{class}]+");
+            }
+        }
+        self.selection.word_extra_chars.clear();
+        if self.selection.word_regex.is_empty()
+            || regex::Regex::new(&self.selection.word_regex).is_err()
+        {
+            self.selection.word_regex = DEFAULT_WORD_REGEX.to_string();
+        }
         self
     }
 }
@@ -735,7 +791,8 @@ mod tests {
         assert_eq!(c.tabbar.min_tab_width, 100.0);
         assert_eq!(c.tabbar.title_format, "$command | $cwd");
         assert_eq!(c.selection.double_click_ms, 400);
-        assert_eq!(c.selection.word_extra_chars, "_");
+        assert_eq!(c.selection.word_regex, "[A-Za-z0-9_]+");
+        assert!(c.selection.word_extra_chars.is_empty());
         assert_eq!(c.input.lines_per_tick, 7.0);
         assert_eq!(c.input.search_key, "f");
         assert!(c.input.search_ctrl && c.input.search_super);
@@ -847,6 +904,33 @@ mod tests {
         // Unknown osc52 mode falls back to write-only.
         let bad: Config = toml::from_str("[clipboard]\nosc52=\"loud\"\n").unwrap();
         assert_eq!(bad.sanitized().clipboard.osc52, "write");
+    }
+
+    #[test]
+    fn selection_word_regex_sanitizes_and_migrates() {
+        // Invalid and empty patterns repair to the default.
+        let bad: Config = toml::from_str("[selection]\nword_regex=\"([a-z\"\n").unwrap();
+        assert_eq!(bad.sanitized().selection.word_regex, DEFAULT_WORD_REGEX);
+        let mut empty = Config::default();
+        empty.selection.word_regex.clear();
+        assert_eq!(empty.sanitized().selection.word_regex, DEFAULT_WORD_REGEX);
+        // Custom patterns survive.
+        let custom: Config = toml::from_str("[selection]\nword_regex=\"[a-z]+\"\n").unwrap();
+        assert_eq!(custom.sanitized().selection.word_regex, "[a-z]+");
+        // Legacy `word_extra_chars` migrates to a char class.
+        let legacy: Config = toml::from_str("[selection]\nword_extra_chars=\"_-\"\n").unwrap();
+        let s = legacy.sanitized();
+        assert!(s.selection.word_extra_chars.is_empty());
+        let re = regex::Regex::new(&s.selection.word_regex).unwrap();
+        assert!(re.is_match("_"));
+        assert!(re.is_match("-"));
+        assert!(re.is_match("a"));
+        assert!(!re.is_match(" "));
+        // A set `word_regex` wins over the legacy field.
+        let both: Config =
+            toml::from_str("[selection]\nword_regex=\"[a-z]+\"\nword_extra_chars=\"_-\"\n")
+                .unwrap();
+        assert_eq!(both.sanitized().selection.word_regex, "[a-z]+");
     }
 
     #[test]

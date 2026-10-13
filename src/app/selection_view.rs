@@ -74,6 +74,8 @@ impl App {
         if let Some(tab) = self.active_tab_mut() {
             tab.selection = None;
             tab.selecting = false;
+            tab.select_mode = crate::selection::SelectMode::Char;
+            tab.select_anchor = None;
         }
     }
 

@@ -20,6 +20,16 @@ pub struct Selection {
     pub active: CellPos,
 }
 
+/// Drag-extend granularity: single-click chars, double-click words,
+/// triple-click lines. Stored per tab while `selecting` is true.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SelectMode {
+    #[default]
+    Char,
+    Word,
+    Line,
+}
+
 /// One grid column for selection math: `text` is the full grapheme cluster
 /// for a lead/narrow cell, `width` is 0 (continuation), 1 or 2.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,10 +168,11 @@ fn resolve_lead(cells: &[SelCell], x: usize) -> usize {
     x
 }
 
-/// Expand a cell to its word on a single visual row.
-/// Word chars are ASCII alphanumeric plus `config.word_extra_chars`
-/// (default `"_"`); anything else (including spaces) breaks.
-/// Wide / emoji clusters select as a single unit (lead + continuation).
+/// Expand a cell to its word on a single visual row (match-words regex).
+/// The pattern (`config.word_regex`, default `"[A-Za-z0-9_]+"`) is run with
+/// `find_iter`; the match containing `x` wins. A cell in no match (space,
+/// delimiter) selects just itself. Wide / emoji clusters select as a single
+/// unit (lead + continuation) without consulting the regex.
 pub fn expand_word(
     row: &[SelCell],
     x: usize,
@@ -176,38 +187,83 @@ pub fn expand_word(
         let end = (x + 1).min(row.len().saturating_sub(1));
         return (x, end);
     }
-    let text: Vec<char> = row
-        .iter()
-        .map(|c| c.text.chars().next().unwrap_or(' '))
-        .collect();
-    let x = x.min(text.len().saturating_sub(1));
-    if !is_word_char(text[x], config) {
-        return (x, x);
+    // Linearized row text plus cluster-boundary table: `starts[i]` is the
+    // byte offset of lead column `lead_cols[i]` in `text`.
+    let mut text = String::new();
+    let mut lead_cols: Vec<usize> = Vec::with_capacity(row.len());
+    let mut starts: Vec<usize> = Vec::with_capacity(row.len());
+    for (col, cell) in row.iter().enumerate() {
+        if cell.is_continuation() {
+            continue;
+        }
+        starts.push(text.len());
+        lead_cols.push(col);
+        text.push_str(&cell.text);
     }
-    let mut start = x;
-    while start > 0 {
-        let prev = start - 1;
-        // Don't cross a wide cluster boundary.
-        if row[prev].width == 2 || row[prev].is_continuation() || row[start].is_continuation() {
-            break;
-        }
-        if !is_word_char(text[prev], config) {
-            break;
-        }
-        start = prev;
+    if lead_cols.is_empty() {
+        return (0, 0);
     }
-    let mut end = x;
-    while end + 1 < text.len() {
-        let next = end + 1;
-        if row[next].width == 2 || row[next].is_continuation() {
-            break;
+    let pos = lead_cols.iter().position(|&c| c == x).unwrap_or(0);
+    let x_byte = starts[pos];
+    let re = config.word_regex_compiled();
+    for mat in re.find_iter(&text) {
+        let (s, e) = (mat.start(), mat.end());
+        if e <= s || x_byte < s || x_byte >= e {
+            continue;
         }
-        if !is_word_char(text[next], config) {
-            break;
+        // Boundaries must align to clusters so a match can never split a
+        // multi-byte grapheme (e.g. `e` + combining mark).
+        if !starts.contains(&s) || (e != text.len() && !starts.contains(&e)) {
+            continue;
         }
-        end = next;
+        let si = starts.iter().position(|&b| b == s).unwrap_or(0);
+        let ei = if e == text.len() {
+            lead_cols.len().saturating_sub(1)
+        } else {
+            starts
+                .iter()
+                .position(|&b| b == e)
+                .map(|i| i.saturating_sub(1))
+                .unwrap_or(0)
+        };
+        let mut start_col = lead_cols[si.min(lead_cols.len() - 1)];
+        let mut end_col = lead_cols[ei.min(lead_cols.len() - 1)];
+        if start_col > end_col {
+            std::mem::swap(&mut start_col, &mut end_col);
+        }
+        // A trailing wide lead inside the match takes its continuation.
+        if row[end_col].width == 2 {
+            end_col = (end_col + 1).min(row.len().saturating_sub(1));
+        }
+        return (start_col, end_col);
     }
-    (start, end)
+    (x, x)
+}
+
+/// Expand a visual row to its full line for triple-click: column `0`
+/// through the last non-blank cell (trailing spaces excluded so copy
+/// doesn't drag whitespace). A trailing wide cluster keeps its
+/// continuation. All-blank rows collapse to `(0, 0)`.
+pub fn expand_line(row: &[SelCell]) -> (usize, usize) {
+    if row.is_empty() {
+        return (0, 0);
+    }
+    let mut end = row.len();
+    while end > 0 {
+        let c = &row[end - 1];
+        if c.is_continuation() {
+            break;
+        }
+        if c.is_blank() {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    if end == 0 {
+        return (0, 0);
+    }
+    (0, end.saturating_sub(1))
 }
 
 /// Backwards-compatible word expansion over plain chars (tests / callers
@@ -219,10 +275,6 @@ pub fn expand_word_chars(row_text: &[char], x: usize) -> (usize, usize) {
         .map(|c| SelCell::narrow(&c.to_string()))
         .collect();
     expand_word(&cells, x, &crate::config::SelectionConfig::default())
-}
-
-fn is_word_char(ch: char, config: &crate::config::SelectionConfig) -> bool {
-    ch.is_ascii_alphanumeric() || config.word_extra_chars.contains(ch)
 }
 
 /// Extract selected text from lines resolved by `line_at`.
@@ -440,6 +492,48 @@ mod tests {
         assert_eq!(expand_word(&row, 0, &cfg), (0, 1));
         assert_eq!(expand_word(&row, 1, &cfg), (0, 1));
         assert_eq!(expand_word(&row, 2, &cfg), (2, 2));
+    }
+
+    #[test]
+    fn expand_word_follows_custom_regex() {
+        use crate::config::SelectionConfig;
+        let cfg = SelectionConfig {
+            word_regex: "[A-Za-z0-9_\\-./:]+".to_string(),
+            ..SelectionConfig::default()
+        };
+        // Path-ish runs stay whole with a permissive pattern.
+        let row = narrow_row("/tmp/foo-bar.txt baz");
+        assert_eq!(expand_word(&row, 6, &cfg), (0, 15));
+        // Default pattern would split the same row at `-` and `.`.
+        let def = SelectionConfig::default();
+        assert_eq!(expand_word(&row, 6, &def), (5, 7));
+    }
+
+    #[test]
+    fn expand_word_falls_back_on_invalid_regex() {
+        use crate::config::SelectionConfig;
+        let cfg = SelectionConfig {
+            word_regex: "([a-z".to_string(),
+            ..SelectionConfig::default()
+        };
+        let row = narrow_row("foo bar");
+        assert_eq!(expand_word(&row, 1, &cfg), (0, 2));
+        assert_eq!(expand_word(&row, 3, &cfg), (3, 3));
+    }
+
+    #[test]
+    fn expand_line_trims_trailing_blanks() {
+        assert_eq!(expand_line(&narrow_row("hello   ")), (0, 4));
+        assert_eq!(expand_line(&narrow_row("  hi  ")), (0, 3));
+        assert_eq!(expand_line(&narrow_row("      ")), (0, 0));
+        assert_eq!(expand_line(&[]), (0, 0));
+        let row = vec![
+            SelCell::wide("中"),
+            SelCell::continuation(),
+            SelCell::narrow(" "),
+            SelCell::narrow(" "),
+        ];
+        assert_eq!(expand_line(&row), (0, 1));
     }
 
     #[test]

@@ -36,6 +36,8 @@ muda = { version = "0.19", default-features = false }
 serde = { version = "1", features = ["derive"] }
 # OSC 52 clipboard payloads (base64 encode/decode); tiny, no transitive deps.
 base64 = "0.22"
+# Word selection pattern (`[selection] word_regex`, match-words semantics).
+regex = "1"
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
 [target.'cfg(unix)'.dependencies]
 # Foreground-process `$command`/`$cwd` tab-label sources (`tcgetpgrp` +

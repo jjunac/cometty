@@ -188,6 +188,8 @@ impl App {
                 tab.pty.resize(cols, rows);
                 tab.selection = None;
                 tab.selecting = false;
+                tab.select_mode = crate::selection::SelectMode::Char;
+                tab.select_anchor = None;
             }
         }
     }

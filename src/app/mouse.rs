@@ -19,6 +19,99 @@ pub(crate) fn is_titlebar_double_click(
     matches!(last, Some(t) if now.duration_since(t).as_millis() <= u128::from(threshold_ms))
 }
 
+/// Multi-click chain: last grid press time, view cell, and count
+/// (1 single, 2 word, 3 line). The 3rd press matches anywhere on the same
+/// view row (browsers do this); the 2nd needs the exact cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ClickState {
+    pub time: Instant,
+    pub pos: (usize, usize),
+    pub count: u8,
+}
+
+/// Next click count for a press at `pos`/`now`. Pure for headless testing:
+/// outside the threshold or after a triple the chain restarts at 1.
+pub(crate) fn next_click_count(
+    now: Instant,
+    last: Option<ClickState>,
+    pos: (usize, usize),
+    threshold_ms: u64,
+) -> u8 {
+    let Some(last) = last else {
+        return 1;
+    };
+    if now.duration_since(last.time).as_millis() > u128::from(threshold_ms) {
+        return 1;
+    }
+    if last.count >= 3 {
+        return 1;
+    }
+    if last.count == 2 {
+        // Triple-click: same view row is enough.
+        if last.pos.1 == pos.1 {
+            return 3;
+        }
+        return 1;
+    }
+    if last.pos == pos {
+        return 2;
+    }
+    1
+}
+
+/// `SelCell` snapshot of one global line for word/line math.
+fn sel_cells_for_global(grid: &crate::grid::Grid, global: usize) -> Vec<crate::selection::SelCell> {
+    grid.global_line_cells(global)
+        .map(|row| {
+            row.into_iter()
+                .map(|c| crate::selection::SelCell {
+                    text: c.cluster(),
+                    width: c.width,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Word bounds at (`col`, `global`), clamped to the grid width.
+fn word_bounds_at(
+    grid: &crate::grid::Grid,
+    col: usize,
+    global: usize,
+    config: &crate::config::SelectionConfig,
+) -> (usize, usize) {
+    let cols = grid.cols();
+    if cols == 0 {
+        return (0, 0);
+    }
+    let row = sel_cells_for_global(grid, global);
+    if row.is_empty() {
+        return (
+            col.min(cols.saturating_sub(1)),
+            col.min(cols.saturating_sub(1)),
+        );
+    }
+    let (mut sx, mut ex) = crate::selection::expand_word(&row, col, config);
+    sx = sx.min(cols.saturating_sub(1));
+    ex = ex.min(cols.saturating_sub(1));
+    (sx, ex)
+}
+
+/// Trimmed line end (inclusive) at `global`, clamped to the grid width.
+fn line_end_at(grid: &crate::grid::Grid, global: usize) -> usize {
+    let cols = grid.cols();
+    if cols == 0 {
+        return 0;
+    }
+    let row = sel_cells_for_global(grid, global);
+    if row.is_empty() {
+        return cols.saturating_sub(1);
+    }
+    crate::selection::expand_line(&row)
+        .1
+        .min(cols.saturating_sub(1))
+}
+
 fn mouse_bit(button: MouseButton) -> Option<u8> {
     match button {
         MouseButton::Left => Some(1),
@@ -100,11 +193,83 @@ impl App {
         }
         let cell = self.cell_under_cursor();
         let global = cell.and_then(|(_, row)| self.view_to_global(row));
-        if let (Some((col, _)), Some(g)) = (cell, global)
-            && let Some(tab) = self.active_tab_mut()
+        let (Some((col, _)), Some(g)) = (cell, global) else {
+            return;
+        };
+        // Drag granularity comes from the press chain: chars follow the
+        // cursor, words span whole matches, lines span whole rows.
+        let (mode, anchor) = self
+            .active_tab()
+            .and_then(|t| t.select_anchor.map(|a| (t.select_mode, a)))
+            .unwrap_or((crate::selection::SelectMode::Char, CellPos { x: col, y: g }));
+        let (anchor, active) = {
+            let Some(tab) = self.active_tab() else {
+                return;
+            };
+            let grid = tab.terminal.grid();
+            match mode {
+                crate::selection::SelectMode::Char => (
+                    CellPos {
+                        x: anchor.x,
+                        y: anchor.y,
+                    },
+                    CellPos { x: col, y: g },
+                ),
+                crate::selection::SelectMode::Word => {
+                    let (asx, aex) =
+                        word_bounds_at(grid, anchor.x, anchor.y, &self.config.selection);
+                    let (csx, cex) = word_bounds_at(grid, col, g, &self.config.selection);
+                    // Same global line: span both words on that line.
+                    if anchor.y == g {
+                        let s = asx.min(csx);
+                        let e = aex.max(cex);
+                        // Direction follows the drag so further motion is stable.
+                        if (g, col) < (anchor.y, anchor.x) {
+                            (CellPos { x: e, y: g }, CellPos { x: s, y: g })
+                        } else {
+                            (CellPos { x: s, y: g }, CellPos { x: e, y: g })
+                        }
+                    } else if g > anchor.y {
+                        (
+                            CellPos {
+                                x: asx,
+                                y: anchor.y,
+                            },
+                            CellPos { x: cex, y: g },
+                        )
+                    } else {
+                        (
+                            CellPos {
+                                x: aex,
+                                y: anchor.y,
+                            },
+                            CellPos { x: csx, y: g },
+                        )
+                    }
+                }
+                crate::selection::SelectMode::Line => {
+                    let (lo, hi) = (anchor.y.min(g), anchor.y.max(g));
+                    let end = line_end_at(grid, hi);
+                    // Anchor stays at the pressed end so direction survives.
+                    if g < anchor.y {
+                        (
+                            CellPos {
+                                x: end,
+                                y: anchor.y,
+                            },
+                            CellPos { x: 0, y: lo },
+                        )
+                    } else {
+                        (CellPos { x: 0, y: lo }, CellPos { x: end, y: hi })
+                    }
+                }
+            }
+        };
+        if let Some(tab) = self.active_tab_mut()
             && let Some(sel) = tab.selection.as_mut()
         {
-            sel.update(CellPos { x: col, y: g });
+            sel.anchor = anchor;
+            sel.update(active);
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
@@ -237,51 +402,111 @@ impl App {
                 let Some(global) = self.view_to_global(view_row) else {
                     return;
                 };
-                // Double-click: expand to word on the same visual row.
-                if let Some((t, (pc, pr))) = self.last_click
-                    && now.duration_since(t).as_millis()
-                        <= u128::from(self.config.selection.double_click_ms)
-                    && (pc, pr) == (col, view_row)
-                    && let Some(tab) = self.active_tab()
-                {
-                    let row_cells: Vec<crate::selection::SelCell> = tab
-                        .terminal
-                        .grid()
-                        .view_rows()
-                        .get(view_row)
-                        .map(|r| {
-                            r.iter()
-                                .map(|c| crate::selection::SelCell {
-                                    text: c.cluster(),
-                                    width: c.width,
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let (sx, ex) =
-                        crate::selection::expand_word(&row_cells, col, &self.config.selection);
-                    // Clamp to visible cols so a resized row can't overflow.
-                    let cols = tab.terminal.cols();
-                    let sx = sx.min(cols.saturating_sub(1));
-                    let ex = ex.min(cols.saturating_sub(1));
-                    if let Some(tab) = self.active_tab_mut() {
-                        tab.selection = Some(Selection {
-                            anchor: CellPos { x: sx, y: global },
-                            active: CellPos { x: ex, y: global },
-                        });
-                        tab.selecting = false;
+                let count = next_click_count(
+                    now,
+                    self.last_click,
+                    (col, view_row),
+                    self.config.selection.double_click_ms,
+                );
+                self.last_click = Some(ClickState {
+                    time: now,
+                    pos: (col, view_row),
+                    count,
+                });
+                match count {
+                    2 => {
+                        // Double-click: word on this visual row; hold-and-drag
+                        // extends by words (`select_mode` drives the motion).
+                        let (sx, ex, cols) = match self.active_tab() {
+                            Some(tab) => {
+                                let row_cells: Vec<crate::selection::SelCell> = tab
+                                    .terminal
+                                    .grid()
+                                    .view_rows()
+                                    .get(view_row)
+                                    .map(|r| {
+                                        r.iter()
+                                            .map(|c| crate::selection::SelCell {
+                                                text: c.cluster(),
+                                                width: c.width,
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                let (sx, ex) = crate::selection::expand_word(
+                                    &row_cells,
+                                    col,
+                                    &self.config.selection,
+                                );
+                                (sx, ex, tab.terminal.cols())
+                            }
+                            None => return,
+                        };
+                        // Clamp to visible cols so a resized row can't overflow.
+                        let sx = sx.min(cols.saturating_sub(1));
+                        let ex = ex.min(cols.saturating_sub(1));
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.selection = Some(Selection {
+                                anchor: CellPos { x: sx, y: global },
+                                active: CellPos { x: ex, y: global },
+                            });
+                            tab.selecting = true;
+                            tab.select_mode = crate::selection::SelectMode::Word;
+                            tab.select_anchor = Some(CellPos { x: col, y: global });
+                        }
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                        return;
                     }
-                    self.last_click = None;
-                    if let Some(w) = self.window.as_ref() {
-                        w.request_redraw();
+                    3 => {
+                        // Triple-click: whole visual line (trimmed); drag
+                        // extends by lines.
+                        let (sx, ex) = match self.active_tab() {
+                            Some(tab) => {
+                                let row_cells: Vec<crate::selection::SelCell> = tab
+                                    .terminal
+                                    .grid()
+                                    .view_rows()
+                                    .get(view_row)
+                                    .map(|r| {
+                                        r.iter()
+                                            .map(|c| crate::selection::SelCell {
+                                                text: c.cluster(),
+                                                width: c.width,
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                crate::selection::expand_line(&row_cells)
+                            }
+                            None => return,
+                        };
+                        let cols = self.active_tab().map(|t| t.terminal.cols()).unwrap_or(1);
+                        let sx = sx.min(cols.saturating_sub(1));
+                        let ex = ex.min(cols.saturating_sub(1));
+                        if let Some(tab) = self.active_tab_mut() {
+                            tab.selection = Some(Selection {
+                                anchor: CellPos { x: sx, y: global },
+                                active: CellPos { x: ex, y: global },
+                            });
+                            tab.selecting = true;
+                            tab.select_mode = crate::selection::SelectMode::Line;
+                            tab.select_anchor = Some(CellPos { x: col, y: global });
+                        }
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                        return;
                     }
-                    return;
+                    _ => {}
                 }
                 if let Some(tab) = self.active_tab_mut() {
                     tab.selection = Some(Selection::new(CellPos { x: col, y: global }));
                     tab.selecting = true;
+                    tab.select_mode = crate::selection::SelectMode::Char;
+                    tab.select_anchor = Some(CellPos { x: col, y: global });
                 }
-                self.last_click = Some((now, (col, view_row)));
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
@@ -293,6 +518,8 @@ impl App {
                 }
                 if let Some(tab) = self.active_tab_mut() {
                     tab.selecting = false;
+                    tab.select_anchor = None;
+                    tab.select_mode = crate::selection::SelectMode::Char;
                     if tab.selection.as_ref().is_some_and(|s| s.is_empty()) {
                         tab.selection = None;
                     }
@@ -447,7 +674,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::is_titlebar_double_click;
+    use super::{ClickState, is_titlebar_double_click, next_click_count};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -468,5 +695,53 @@ mod tests {
         let first = Instant::now();
         let second = first + Duration::from_millis(401);
         assert!(!is_titlebar_double_click(second, Some(first), 400));
+    }
+
+    fn click_at(time: Instant, pos: (usize, usize), count: u8) -> ClickState {
+        ClickState { time, pos, count }
+    }
+
+    #[test]
+    fn click_chain_single_double_triple() {
+        let t0 = Instant::now();
+        assert_eq!(next_click_count(t0, None, (5, 2), 400), 1);
+        let t1 = t0 + Duration::from_millis(100);
+        assert_eq!(
+            next_click_count(t1, Some(click_at(t0, (5, 2), 1)), (5, 2), 400),
+            2
+        );
+        // Third press anywhere on the same row counts as triple.
+        let t2 = t1 + Duration::from_millis(100);
+        assert_eq!(
+            next_click_count(t2, Some(click_at(t1, (5, 2), 2)), (9, 2), 400),
+            3
+        );
+        // Fourth press restarts the chain.
+        let t3 = t2 + Duration::from_millis(100);
+        assert_eq!(
+            next_click_count(t3, Some(click_at(t2, (9, 2), 3)), (9, 2), 400),
+            1
+        );
+    }
+
+    #[test]
+    fn click_chain_resets_on_timeout_or_move() {
+        let t0 = Instant::now();
+        let late = t0 + Duration::from_millis(401);
+        assert_eq!(
+            next_click_count(late, Some(click_at(t0, (5, 2), 1)), (5, 2), 400),
+            1
+        );
+        let t1 = t0 + Duration::from_millis(50);
+        // Different cell breaks a double.
+        assert_eq!(
+            next_click_count(t1, Some(click_at(t0, (5, 2), 1)), (6, 2), 400),
+            1
+        );
+        // Different row breaks a triple.
+        assert_eq!(
+            next_click_count(t1, Some(click_at(t0, (5, 2), 2)), (5, 3), 400),
+            1
+        );
     }
 }

@@ -58,6 +58,10 @@ pub struct Tab {
     pub(crate) pty: PtySession,
     pub(crate) selection: Option<Selection>,
     pub(crate) selecting: bool,
+    /// Granularity of the in-progress drag (char / word / line).
+    pub(crate) select_mode: crate::selection::SelectMode,
+    /// Raw press point (global) anchoring a word/line drag.
+    pub(crate) select_anchor: Option<crate::selection::CellPos>,
     pub(crate) scrollbar: ScrollbarUi,
     pub(crate) is_alt: bool,
     pub(crate) foreground: Foreground,
@@ -74,6 +78,8 @@ impl Tab {
             pty,
             selection: None,
             selecting: false,
+            select_mode: crate::selection::SelectMode::Char,
+            select_anchor: None,
             scrollbar: ScrollbarUi::new(Instant::now()),
             is_alt: false,
             foreground: Foreground::default(),
@@ -474,6 +480,8 @@ impl App {
                 tab.pty.resize(cols, rows);
                 tab.selection = None;
                 tab.selecting = false;
+                tab.select_mode = crate::selection::SelectMode::Char;
+                tab.select_anchor = None;
                 changed = true;
             }
         }

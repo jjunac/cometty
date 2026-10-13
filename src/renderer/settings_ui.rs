@@ -742,10 +742,21 @@ fn show_section(
             );
             ed.text(
                 ui,
-                "Extra word chars",
-                &mut config.selection.word_extra_chars,
-                &d.selection.word_extra_chars,
+                "Word regex",
+                &mut config.selection.word_regex,
+                &d.selection.word_regex,
             );
+            if regex::Regex::new(&config.selection.word_regex).is_err() {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    format!(
+                        "Invalid regex {:?}; using default {:?} until fixed.",
+                        config.selection.word_regex,
+                        crate::config::DEFAULT_WORD_REGEX
+                    ),
+                );
+            }
+            ui.weak("Match-words pattern for double-click (triple-click selects the line).");
         }
         SettingsSection::Scrollbar => {
             ed.f32(

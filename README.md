@@ -75,7 +75,7 @@ title_format = "$command | $cwd"  # $title (OSC), $command, $cwd (shell dir: OSC
 
 [selection]
 double_click_ms = 400
-word_extra_chars = "_"
+word_regex = "[A-Za-z0-9_]+"  # double-click match-words pattern; triple-click selects the line
 
 [input]
 copy_key = "c"

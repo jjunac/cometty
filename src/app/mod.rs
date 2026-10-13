@@ -61,7 +61,10 @@ pub struct App {
     pub(crate) pending_scale: Option<f32>,
     pub(crate) wheel_accum: f64,
     pub(crate) cursor_pos: Option<(f32, f32)>,
-    pub(crate) last_click: Option<(Instant, (usize, usize))>,
+    /// Multi-click chain for word/line select: last press time, view cell,
+    /// and count (1 single, 2 word, 3 line). Separate from
+    /// `last_titlebar_click` (macOS zoom).
+    pub(crate) last_click: Option<mouse::ClickState>,
     /// Last single press on empty macOS titlebar chrome, for double-click
     /// zoom. Separate from grid `last_click` (cell-based word select).
     pub(crate) last_titlebar_click: Option<Instant>,
