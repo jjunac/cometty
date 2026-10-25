@@ -76,9 +76,46 @@ pub struct Tab {
     pub(crate) last_key_write: Option<Instant>,
     pub(crate) last_output: Option<Instant>,
     pub(crate) last_service: Option<Instant>,
+    pub(crate) input_notice: Option<String>,
+    pub(crate) pending_reply: Option<Vec<u8>>,
 }
 
 impl Tab {
+    /// Global indices move when history is evicted. Keep a drag on the same
+    /// surviving rows; if either endpoint disappeared, cancel rather than
+    /// selecting unrelated recycled storage.
+    pub(crate) fn rebase_selection(&mut self, dropped: usize) {
+        if dropped == 0 {
+            return;
+        }
+        let valid = self.selection.as_mut().is_none_or(|selection| {
+            if let (Some(anchor), Some(active)) = (
+                selection.anchor.y.checked_sub(dropped),
+                selection.active.y.checked_sub(dropped),
+            ) {
+                selection.anchor.y = anchor;
+                selection.active.y = active;
+                true
+            } else {
+                false
+            }
+        });
+        let anchor_valid = self.select_anchor.as_mut().is_none_or(|anchor| {
+            if let Some(y) = anchor.y.checked_sub(dropped) {
+                anchor.y = y;
+                true
+            } else {
+                false
+            }
+        });
+        if !valid || !anchor_valid {
+            self.selection = None;
+            self.select_anchor = None;
+            self.selecting = false;
+            self.select_mode = crate::selection::SelectMode::Char;
+        }
+    }
+
     pub(crate) fn new(id: u64, terminal: Terminal, pty: PtySession) -> Self {
         Self {
             id,
@@ -98,6 +135,8 @@ impl Tab {
             last_key_write: None,
             last_output: None,
             last_service: None,
+            input_notice: None,
+            pending_reply: None,
         }
     }
 
@@ -459,7 +498,7 @@ impl App {
         }
     }
 
-    fn waker(&self) -> impl Fn() + Send + 'static {
+    fn waker(&self) -> impl Fn() + Send + Sync + 'static {
         let proxy: Option<winit::event_loop::EventLoopProxy<UserEvent>> = self.proxy.clone();
         move || {
             if let Some(p) = proxy.as_ref() {
@@ -635,6 +674,8 @@ impl App {
 mod tests {
     use super::*;
     use crate::config::{Config, TabbarConfig};
+    use crate::selection::{CellPos, Selection};
+    use crate::term::Terminal;
 
     fn cfg() -> TabbarConfig {
         TabbarConfig::default()
@@ -943,5 +984,27 @@ mod tests {
         assert_eq!(next_tab_index(0, 1, 1), 0);
         assert_eq!(next_tab_index(0, 1, -1), 0);
         assert_eq!(next_tab_index(0, 0, 1), 0);
+    }
+
+    #[test]
+    fn history_eviction_rebases_or_cancels_selections() {
+        let (pty, _, _) = crate::pty::test_support::session();
+        let mut tab = Tab::new(0, Terminal::new(4, 2, crate::theme::Theme::default()), pty);
+        tab.selection = Some(Selection {
+            anchor: CellPos { x: 0, y: 3 },
+            active: CellPos { x: 2, y: 3 },
+        });
+        tab.select_anchor = Some(CellPos { x: 0, y: 3 });
+        tab.selecting = true;
+        tab.rebase_selection(1);
+        let selection = tab.selection.unwrap();
+        assert_eq!((selection.anchor.y, selection.active.y), (2, 2));
+        assert_eq!(tab.select_anchor.unwrap().y, 2);
+        // The anchor row itself was evicted: don't silently select whatever
+        // recycled storage now occupies that line.
+        tab.rebase_selection(3);
+        assert!(tab.selection.is_none());
+        assert!(tab.select_anchor.is_none());
+        assert!(!tab.selecting);
     }
 }

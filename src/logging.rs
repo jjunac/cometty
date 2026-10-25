@@ -35,6 +35,7 @@ static STDERR_LEVEL: AtomicUsize = AtomicUsize::new(LevelFilter::Off as usize);
 /// Wake the event loop for new records only while the panel is open:
 /// a `RUST_LOG=trace` session must not pay a cross-thread wake per line.
 static WAKE_ENABLED: AtomicBool = AtomicBool::new(false);
+static WAKE_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Install the global logger, with `directives` as the initial buffer
 /// filter (see [`crate::config::LogConfig::filter_string`]). Failure is
@@ -123,6 +124,13 @@ pub fn record_filter_error() -> Option<String> {
 /// Let new records wake the event loop (panel open) or not (panel closed).
 pub fn set_wake_enabled(enabled: bool) {
     WAKE_ENABLED.store(enabled, Ordering::Relaxed);
+    if !enabled {
+        WAKE_PENDING.store(false, Ordering::Release);
+    }
+}
+
+pub fn acknowledge_wake() {
+    WAKE_PENDING.store(false, Ordering::Release);
 }
 
 /// Test seam for the panel's wake gating.
@@ -171,6 +179,7 @@ impl Log for AppLogger {
             }
             if WAKE_ENABLED.load(Ordering::Relaxed)
                 && let Some(proxy) = &self.proxy
+                && !WAKE_PENDING.swap(true, Ordering::AcqRel)
             {
                 let _ = proxy.send_event(UserEvent::LogAvailable);
             }

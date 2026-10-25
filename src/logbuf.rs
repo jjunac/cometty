@@ -31,6 +31,7 @@ const TRUNCATION_MARKER: &str = "… [truncated]";
 /// One captured log record.
 #[derive(Debug)]
 pub struct LogEntry {
+    pub id: u64,
     pub level: Level,
     pub target: String,
     pub message: String,
@@ -45,6 +46,8 @@ pub struct LogBuffer {
     /// Sum of [`entry_bytes`] over `entries`.
     bytes: usize,
     dropped: u64,
+    next_id: u64,
+    generation: u64,
 }
 
 impl LogBuffer {
@@ -56,6 +59,8 @@ impl LogBuffer {
             max_bytes: 1,
             bytes: 0,
             dropped: 0,
+            next_id: 1,
+            generation: 0,
         };
         buffer.set_capacity(max_lines);
         buffer
@@ -65,20 +70,27 @@ impl LogBuffer {
     /// from the settings panel; shrinking also releases the spare capacity.
     pub fn set_capacity(&mut self, max_lines: usize) {
         self.max_lines = max_lines.max(1);
-        self.max_bytes = (self.max_lines * BYTES_PER_LINE).min(MAX_BUDGET_BYTES);
+        self.max_bytes = self
+            .max_lines
+            .saturating_mul(BYTES_PER_LINE)
+            .min(MAX_BUDGET_BYTES);
         self.evict();
         self.entries.shrink_to_fit();
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Append one record, evicting oldest entries past either bound.
     pub fn push(&mut self, level: Level, target: &str, message: String) {
         let message = truncate_message(message);
         let entry = Arc::new(LogEntry {
+            id: self.next_id,
             level,
             target: target.to_string(),
             message,
             at: SystemTime::now(),
         });
+        self.next_id += 1;
+        self.generation = self.generation.wrapping_add(1);
         self.bytes += entry_bytes(&entry);
         self.entries.push_back(entry);
         self.evict();
@@ -88,6 +100,7 @@ impl LogBuffer {
     /// case-insensitive `needle` filter over target + message (empty =
     /// everything). O(n) clone of `Arc`s — intended for the panel's
     /// per-frame snapshot while it is open.
+    #[cfg(test)]
     pub fn filtered(&self, max_level: LevelFilter, needle: &str) -> Vec<Arc<LogEntry>> {
         let needle = needle.to_ascii_lowercase();
         self.entries
@@ -102,6 +115,34 @@ impl LogBuffer {
         self.entries.clear();
         self.bytes = 0;
         self.dropped = 0;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    pub fn bounds(&self) -> LogBounds {
+        LogBounds {
+            first: self.entries.front().map_or(self.next_id, |e| e.id),
+            next: self.next_id,
+            generation: self.generation,
+            total: self.len(),
+            dropped: self.dropped,
+        }
+    }
+
+    /// Only newly appended or requested scan slices are cloned under the lock.
+    pub fn since(&self, first: u64, limit: usize) -> Vec<Arc<LogEntry>> {
+        let base = self.bounds().first;
+        let start = first.saturating_sub(base).min(self.entries.len() as u64) as usize;
+        self.entries.range(start..).take(limit).cloned().collect()
+    }
+
+    pub fn entries_by_id(&self, ids: impl Iterator<Item = u64>) -> Vec<Arc<LogEntry>> {
+        let base = self.bounds().first;
+        ids.filter_map(|id| {
+            id.checked_sub(base)
+                .and_then(|i| self.entries.get(i as usize))
+                .cloned()
+        })
+        .collect()
     }
 
     pub fn len(&self) -> usize {
@@ -116,6 +157,7 @@ impl LogBuffer {
     }
 
     /// Entries evicted by the ring bounds since the last [`Self::clear`].
+    #[cfg(test)]
     pub fn dropped(&self) -> u64 {
         self.dropped
     }
@@ -145,7 +187,7 @@ fn level_passes(level: Level, max_level: LevelFilter) -> bool {
 /// itself (two `String` headers, timestamp, level) plus its text. The
 /// `Arc` header is small enough to absorb in `BYTES_PER_LINE` slop.
 fn entry_bytes(entry: &LogEntry) -> usize {
-    std::mem::size_of::<LogEntry>() + entry.target.len() + entry.message.len()
+    std::mem::size_of::<LogEntry>() + entry.target.capacity() + entry.message.capacity()
 }
 
 /// Case-insensitive (ASCII) substring match over target + message.
@@ -177,7 +219,107 @@ fn truncate_message(mut message: String) -> String {
     }
     message.truncate(cut);
     message.push_str(TRUNCATION_MARKER);
+    message.shrink_to_fit();
     message
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LogBounds {
+    pub first: u64,
+    pub next: u64,
+    pub generation: u64,
+    pub total: usize,
+    pub dropped: u64,
+}
+
+/// Display index holds IDs, not Arcs: evicted messages are never pinned by
+/// a hidden panel/cache. Query changes scan bounded slices outside the ring
+/// mutex; unchanged frames only read metadata and acquire visible entries.
+#[derive(Default)]
+pub struct LogIndex {
+    pub ids: VecDeque<u64>,
+    level: Option<LevelFilter>,
+    needle: String,
+    next: u64,
+    generation: Option<u64>,
+    pub bounds: LogBounds,
+    pub scanning: bool,
+}
+
+impl LogIndex {
+    pub fn refresh(
+        &mut self,
+        buffer: &std::sync::Mutex<LogBuffer>,
+        level: LevelFilter,
+        needle: &str,
+    ) {
+        let level_changed = self.level != Some(level);
+        let query_changed = !self.needle.eq_ignore_ascii_case(needle);
+        let (bounds, entries) = {
+            let ring = buffer.lock().unwrap_or_else(|p| p.into_inner());
+            let bounds = ring.bounds();
+            if level_changed || query_changed {
+                self.ids.clear();
+                self.next = bounds.first;
+                self.level = Some(level);
+                self.needle = needle.to_ascii_lowercase();
+                self.generation = None;
+            }
+            self.next = self.next.max(bounds.first);
+            let entries = if self.generation == Some(bounds.generation) && self.next == bounds.next
+            {
+                Vec::new()
+            } else {
+                ring.since(self.next, 8192)
+            };
+            (bounds, entries)
+        };
+        while self.ids.front().is_some_and(|&id| id < bounds.first) {
+            self.ids.pop_front();
+        }
+        let start = std::time::Instant::now();
+        let mut processed = 0usize;
+        for entry in entries {
+            if level_passes(entry.level, level) && matches(&entry, &self.needle) {
+                self.ids.push_back(entry.id);
+            }
+            self.next = entry.id + 1;
+            processed += 1;
+            // Always make progress even on a loaded/slow runner; ordinary
+            // batches finish well below the deadline.
+            if processed >= 256 && start.elapsed() >= Duration::from_millis(2) {
+                break;
+            }
+        }
+        self.bounds = bounds;
+        self.generation = Some(bounds.generation);
+        self.scanning = self.next < bounds.next;
+    }
+
+    pub fn visible(
+        &self,
+        buffer: &std::sync::Mutex<LogBuffer>,
+        range: std::ops::Range<usize>,
+    ) -> Vec<Arc<LogEntry>> {
+        buffer
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entries_by_id(self.ids.range(range).copied())
+    }
+
+    pub fn copy_snapshot(&self, buffer: &std::sync::Mutex<LogBuffer>) -> Vec<Arc<LogEntry>> {
+        let entries = buffer
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .since(0, usize::MAX);
+        entries
+            .into_iter()
+            .filter(|e| {
+                level_passes(e.level, self.level.unwrap_or(LevelFilter::Off))
+                    && matches(e, &self.needle)
+            })
+            .collect()
+    }
 }
 
 /// Wall-clock time of day as `HH:MM:SS.mmm`, in UTC.
@@ -313,6 +455,78 @@ mod tests {
         assert_eq!(format_hhmmss_mmm(one_hour_one_minute), "01:01:01.500");
         let next_day = UNIX_EPOCH + Duration::from_secs(86_400 + 61);
         assert_eq!(format_hhmmss_mmm(next_day), "00:01:01.000");
+    }
+
+    #[test]
+    fn log_index_is_incremental_bounded_and_never_pins_evicted_entries() {
+        let buffer = std::sync::Mutex::new(LogBuffer::new(4));
+        {
+            let mut ring = buffer.lock().unwrap();
+            for i in 0..4 {
+                ring.push(Level::Info, "cometty::test", format!("first {i}"));
+            }
+        }
+        let mut index = LogIndex::default();
+        index.refresh(&buffer, LevelFilter::Info, "first");
+        assert_eq!(index.ids.len(), 4);
+        assert!(!index.scanning);
+        let unchanged = index.bounds.generation;
+        index.refresh(&buffer, LevelFilter::Info, "first");
+        assert_eq!(index.bounds.generation, unchanged);
+        assert_eq!(index.ids.len(), 4);
+        {
+            let mut ring = buffer.lock().unwrap();
+            ring.push(Level::Info, "cometty::test", "first 4".into());
+            ring.push(Level::Warn, "cometty::test", "other".into());
+        }
+        index.refresh(&buffer, LevelFilter::Info, "first");
+        assert_eq!(
+            index.ids.len(),
+            3,
+            "evicted IDs drop; only newcomers are scanned"
+        );
+        let visible = index.visible(&buffer, 0..2);
+        assert_eq!(visible.len(), 2);
+        assert!(visible[0].message.starts_with("first"));
+        // Query change rescans from the current first ID, not stale Arcs.
+        index.refresh(&buffer, LevelFilter::Info, "other");
+        assert_eq!(index.ids.len(), 1);
+        assert_eq!(index.copy_snapshot(&buffer).len(), 1);
+        // A level change is a full filter reset as well.
+        index.refresh(&buffer, LevelFilter::Error, "");
+        assert!(index.ids.is_empty());
+    }
+
+    #[test]
+    fn log_index_scans_in_batches_without_duplicates_or_gaps() {
+        let buffer = std::sync::Mutex::new(LogBuffer::new(20_000));
+        {
+            let mut ring = buffer.lock().unwrap();
+            for i in 0..20_000 {
+                let level = if i % 7 == 0 {
+                    Level::Warn
+                } else {
+                    Level::Debug
+                };
+                ring.push(level, "cometty::test", format!("entry {i}"));
+            }
+        }
+        let mut index = LogIndex::default();
+        let mut passes = 0;
+        loop {
+            index.refresh(&buffer, LevelFilter::Debug, "entry");
+            passes += 1;
+            if !index.scanning {
+                break;
+            }
+            assert!(passes < 100, "batch slicing makes progress");
+        }
+        assert!(passes > 1, "large rings are split into bounded slices");
+        assert_eq!(index.ids.len(), 20_000);
+        assert!(index.ids.iter().is_sorted());
+        let duplicate_free: std::collections::HashSet<_> = index.ids.iter().collect();
+        assert_eq!(duplicate_free.len(), 20_000);
+        assert_eq!(index.visible(&buffer, 19_998..20_000).len(), 2);
     }
 
     #[test]

@@ -40,6 +40,12 @@ fn d_window_height() -> u32 {
 fn d_scrollback() -> usize {
     10_000
 }
+fn d_scrollback_bytes() -> usize {
+    128 * 1024 * 1024
+}
+fn d_max_cells() -> usize {
+    1024 * 1024
+}
 fn d_min_dim() -> usize {
     1
 }
@@ -244,6 +250,12 @@ impl Default for WindowConfig {
 pub struct TerminalConfig {
     #[serde(default = "d_scrollback")]
     pub scrollback_lines: usize,
+    /// Per-tab retained history storage, including capacities and cluster tails.
+    #[serde(default = "d_scrollback_bytes")]
+    pub scrollback_bytes: usize,
+    /// Live cells per buffer, in addition to the per-axis and PTY limits.
+    #[serde(default = "d_max_cells")]
+    pub max_cells: usize,
     #[serde(default = "d_min_dim")]
     pub min_dim: usize,
     #[serde(default = "d_max_dim")]
@@ -258,6 +270,8 @@ impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
             scrollback_lines: d_scrollback(),
+            scrollback_bytes: d_scrollback_bytes(),
+            max_cells: d_max_cells(),
             min_dim: d_min_dim(),
             max_dim: d_max_dim(),
             tab_stop: d_tab_stop(),
@@ -710,6 +724,7 @@ impl Config {
     }
 
     /// Persist to the default location (`$HOME/.config/cometty/config.toml`).
+    #[allow(dead_code)]
     pub fn save(&self) -> anyhow::Result<()> {
         let path = Self::default_path()
             .ok_or_else(|| anyhow::anyhow!("no HOME set; cannot resolve config path"))?;
@@ -736,6 +751,9 @@ impl Config {
         if self.terminal.min_dim > self.terminal.max_dim {
             std::mem::swap(&mut self.terminal.min_dim, &mut self.terminal.max_dim);
         }
+        self.terminal.max_cells = self.terminal.max_cells.clamp(1, d_max_cells());
+        self.terminal.max_dim = self.terminal.max_dim.min(u16::MAX as usize);
+        self.terminal.min_dim = self.terminal.min_dim.min(self.terminal.max_dim);
         if self.terminal.tab_stop == 0 {
             self.terminal.tab_stop = d_tab_stop();
         }

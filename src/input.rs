@@ -368,10 +368,11 @@ fn map_key(
     None
 }
 
-/// Wrap pasted text in bracketed-paste sentinels when the mode is enabled.
-/// Future paste paths (OSC 52 / clipboard) should route through here so
-/// `CSI ? 2004 h` apps like vim/zsh get `ESC[200~...ESC[201~`.
+/// Test-only legacy helper for the bracketed sentinel byte layout. Production
+/// paste goes through `app::clipboard::paste_bytes`, which normalizes and
+/// wraps in one allocation.
 #[allow(dead_code)]
+#[cfg(test)]
 pub fn wrap_bracketed_paste(text: &str, enabled: bool) -> Vec<u8> {
     if enabled {
         let mut out = Vec::with_capacity(text.len() + 12);

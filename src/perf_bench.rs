@@ -339,4 +339,58 @@ fn headless_release() {
     measure("expand_word", 100, || {
         black_box(crate::selection::expand_word(&row, 5, &config.selection));
     });
+
+    // Third tranche: lazy history width projection, recycled scroll storage,
+    // one-pass paste construction and incremental log filtering.
+    let mut resize_grid = Grid::new_with_config(200, 60, theme, &config);
+    for _ in 0..10_100 {
+        resize_grid.newline();
+    }
+    measure("resize_lazy_200_201", 5, || {
+        resize_grid.resize(201, 60);
+        resize_grid.resize(200, 60);
+    });
+    let mut scroll_grid = Grid::new_with_config(200, 60, theme, &config);
+    for _ in 0..10_100 {
+        scroll_grid.newline();
+    }
+    measure("scroll_recycle_1000", 1, || {
+        for _ in 0..1000 {
+            scroll_grid.newline();
+        }
+        black_box(scroll_grid.version);
+    });
+    let paste = "a".repeat(1 << 20);
+    measure("paste_build_1m", 5, || {
+        black_box(crate::app::clipboard::paste_bytes(black_box(&paste), true));
+    });
+    let ring = {
+        let mut ring = crate::logbuf::LogBuffer::new(100_000);
+        for i in 0..100_000 {
+            ring.push(log::Level::Debug, "cometty::bench", format!("entry {i}"));
+        }
+        Mutex::new(ring)
+    };
+    let mut index = crate::logbuf::LogIndex::default();
+    index.refresh(&ring, log::LevelFilter::Debug, "");
+    while index.scanning {
+        index.refresh(&ring, log::LevelFilter::Debug, "");
+    }
+    measure("log_index_unchanged", 100, || {
+        index.refresh(&ring, log::LevelFilter::Debug, "");
+        black_box(index.ids.len());
+    });
+    measure("log_index_slice", 5, || {
+        let mut index = crate::logbuf::LogIndex::default();
+        index.refresh(&ring, log::LevelFilter::Debug, "");
+        black_box(index.ids.len());
+    });
+    measure("log_index_full_scan", 5, || {
+        let mut index = crate::logbuf::LogIndex::default();
+        index.refresh(&ring, log::LevelFilter::Debug, "");
+        while index.scanning {
+            index.refresh(&ring, log::LevelFilter::Debug, "");
+        }
+        black_box(index.ids.len());
+    });
 }

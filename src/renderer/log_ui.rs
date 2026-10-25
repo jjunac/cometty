@@ -71,30 +71,31 @@ fn body(ui: &mut egui::Ui, panel: &mut LogsPanel, buffer: &Arc<Mutex<LogBuffer>>
     if clear {
         lock(buffer).clear();
     }
-    // One short lock for the whole frame: filter + counters together.
-    let (entries, total, dropped) = {
-        let buffer = lock(buffer);
-        (
-            buffer.filtered(panel.level, &panel.filter_text),
-            buffer.len(),
-            buffer.dropped(),
-        )
-    };
+    panel.index.refresh(buffer, panel.level, &panel.filter_text);
+    let total = panel.index.bounds.total;
+    let dropped = panel.index.bounds.dropped;
+    let shown = panel.index.ids.len();
+    if panel.index.scanning {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(8));
+    }
     if copy {
-        ui.ctx().copy_text(format_entries(&entries));
+        ui.ctx()
+            .copy_text(format_entries(&panel.index.copy_snapshot(buffer)));
     }
 
     ui.horizontal(|ui| {
         let mut summary = format!(
             "{} shown · {} in buffer · {} dropped",
-            entries.len(),
-            total,
-            dropped
+            shown, total, dropped
         );
         if dropped > 0 {
             summary.push_str(" · oldest evicted first");
         }
         summary.push_str(" · times UTC");
+        if panel.index.scanning {
+            summary.push_str(" · filtering…");
+        }
         ui.label(egui::RichText::new(summary).small().weak());
     });
     if let Some(filter) = crate::logging::record_filter_string() {
@@ -120,8 +121,10 @@ fn body(ui: &mut egui::Ui, panel: &mut LogsPanel, buffer: &Arc<Mutex<LogBuffer>>
     }
     ui.separator();
 
-    if entries.is_empty() {
-        let hint = if total == 0 {
+    if shown == 0 {
+        let hint = if panel.index.scanning {
+            "filtering…"
+        } else if total == 0 {
             "no entries recorded yet (check the record filter in Settings > Logs)"
         } else {
             "no matching entries"
@@ -133,9 +136,9 @@ fn body(ui: &mut egui::Ui, panel: &mut LogsPanel, buffer: &Arc<Mutex<LogBuffer>>
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .stick_to_bottom(panel.following)
-        .show_rows(ui, row_height, entries.len(), |ui, range| {
-            for index in range {
-                row(ui, &entries[index], row_height);
+        .show_rows(ui, row_height, shown, |ui, range| {
+            for entry in panel.index.visible(buffer, range) {
+                row(ui, &entry, row_height);
             }
         });
 }
@@ -226,6 +229,7 @@ mod tests {
 
     fn entry(level: Level, message: &str) -> Arc<LogEntry> {
         Arc::new(LogEntry {
+            id: 0,
             level,
             target: "cometty::test".to_string(),
             message: message.to_string(),

@@ -1,7 +1,5 @@
 //! Keyboard handling (copy/paste shortcuts, new tab, local scroll, PTY send).
 
-use std::time::Instant;
-
 use winit::event::ElementState;
 use winit::keyboard::{Key, NamedKey};
 
@@ -53,11 +51,11 @@ impl App {
         if text.is_empty() || !self.terminal_owns_keyboard() {
             return;
         }
-        if let Some(tab) = self.active_tab() {
-            tab.pty.write(text.as_bytes().to_vec());
-        }
-        if let Some(tab) = self.active_tab_mut() {
-            tab.last_key_write = Some(Instant::now());
+        let accepted = self
+            .active_tab()
+            .is_some_and(|tab| tab.pty.write(text.as_bytes().to_vec()));
+        if accepted {
+            self.accept_input_feedback(true);
         }
     }
 
@@ -275,8 +273,7 @@ impl App {
                 keypad_app,
                 &self.config.input,
             ) {
-                tab.pty.write(bytes);
-                true
+                tab.pty.write(bytes)
             } else {
                 false
             }
@@ -286,9 +283,7 @@ impl App {
         if wrote_to_pty {
             // This is input-to-first-output for THIS tab, not proof that
             // arbitrary shell output is an echo of this particular key.
-            if let Some(tab) = self.active_tab_mut() {
-                tab.last_key_write = Some(Instant::now());
-            }
+            self.accept_input_feedback(true);
         }
         true
     }

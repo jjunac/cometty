@@ -1,25 +1,25 @@
 //! Scrollback storage + view-offset math.
 
-use crate::grid::Cell;
+use crate::grid::{Cell, RowView};
 
 use super::Grid;
 
 impl Grid {
     /// Rows actually on screen, accounting for scrollback viewing.
     /// `scroll_offset == 0` is the live view; `> 0` looks that many lines up.
-    pub fn view_rows(&self) -> Vec<&Vec<Cell>> {
+    pub fn view_rows(&self) -> Vec<RowView<'_>> {
         let off = self.scroll_offset.min(self.scrollback.len());
         if off == 0 || self.rows == 0 {
-            return self.cells.iter().collect();
+            return self.cells.iter().map(Self::live_row_view).collect();
         }
         let sb = self.scrollback.len();
         (0..self.rows)
             .map(|i| {
                 let global = sb - off + i;
                 if global < sb {
-                    &self.scrollback[global]
+                    self.history_row_view(&self.scrollback[global])
                 } else {
-                    &self.cells[global - sb]
+                    Self::live_row_view(&self.cells[global - sb])
                 }
             })
             .collect()
@@ -55,12 +55,14 @@ impl Grid {
 
     /// Borrowed cells of a global line, for hot read-only paths (search)
     /// that must not clone a whole scrollback row per line.
-    pub fn global_line(&self, global: usize) -> Option<&[Cell]> {
+    pub fn global_line(&self, global: usize) -> Option<RowView<'_>> {
         let sb = self.scrollback.len();
         if global < sb {
-            self.scrollback.get(global).map(|row| row.as_slice())
+            self.scrollback
+                .get(global)
+                .map(|row| self.history_row_view(row))
         } else {
-            self.cells.get(global - sb).map(|row| row.as_slice())
+            self.cells.get(global - sb).map(Self::live_row_view)
         }
     }
 
@@ -120,8 +122,7 @@ impl Grid {
         if self.scrollback.is_empty() && self.scroll_offset == 0 {
             return;
         }
-        self.scrollback.clear();
-        self.scroll_offset = 0;
+        self.reset_history();
         self.bump();
     }
 
@@ -244,7 +245,7 @@ impl Grid {
             &mut region[len - n..]
         };
         for row in erased {
-            row.fill(fill.clone());
+            row.recycle(self.cols, &fill);
         }
     }
 
@@ -284,14 +285,8 @@ impl Grid {
                 break;
             }
             let top = self.cells.remove(0);
-            if !self.in_alt {
-                if self.scrollback.len() >= self.max_scrollback {
-                    self.scrollback.pop_front();
-                }
-                // Don't store fully blank default lines to save memory? Keep for simplicity.
-                self.scrollback.push_back(top);
-            }
-            self.cells.push(self.erase_row());
+            let next = self.archive_row(top);
+            self.cells.push(next);
         }
         self.bump();
     }

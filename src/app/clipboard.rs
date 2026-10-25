@@ -3,13 +3,39 @@
 use super::App;
 use crate::term::ClipboardOp;
 
-/// Normalize pasted text to the terminal's Enter byte: CRLF and lone CR
-/// both become CR, then lone LF becomes CR. Pure seam for unit tests; the
-/// bracketed-paste wrap stays in `input::wrap_bracketed_paste`.
+/// Build normalized/wrapped input once. Preflight the source plus framing
+/// before allocating another clipboard-sized buffer; CRLF collapses to CR.
+pub(crate) fn paste_bytes(text: &str, bracketed: bool) -> Option<Vec<u8>> {
+    let capacity = text.len().checked_add(if bracketed { 12 } else { 0 })?;
+    if capacity.checked_add(size_of::<Vec<u8>>())? > crate::pty::input::INPUT_BYTES {
+        return None;
+    }
+    let mut out = Vec::with_capacity(capacity);
+    if bracketed {
+        out.extend_from_slice(b"\x1b[200~");
+    }
+    let mut bytes = text.bytes().peekable();
+    while let Some(b) = bytes.next() {
+        match b {
+            b'\r' => {
+                out.push(b'\r');
+                if bytes.peek() == Some(&b'\n') {
+                    bytes.next();
+                }
+            }
+            b'\n' => out.push(b'\r'),
+            _ => out.push(b),
+        }
+    }
+    if bracketed {
+        out.extend_from_slice(b"\x1b[201~");
+    }
+    Some(out)
+}
+
+#[cfg(test)]
 pub(crate) fn normalize_paste(text: &str) -> String {
-    text.replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .replace('\n', "\r")
+    String::from_utf8(paste_bytes(text, false).unwrap()).unwrap()
 }
 
 impl App {
@@ -140,13 +166,19 @@ impl App {
         let Some(text) = self.clipboard_text() else {
             return;
         };
-        let normalized = normalize_paste(&text);
         let enabled = self
             .active_tab()
             .is_some_and(|t| t.terminal.bracketed_paste());
-        let bytes = crate::input::wrap_bracketed_paste(&normalized, enabled);
-        if let Some(tab) = self.active_tab() {
-            tab.pty.write(bytes);
+        let Some(bytes) = paste_bytes(&text, enabled) else {
+            if let Some(tab) = self.active_tab() {
+                tab.pty.reject_large_paste();
+            }
+            return;
+        };
+        if let Some(tab) = self.active_tab_mut()
+            && tab.pty.paste(bytes)
+        {
+            self.accept_input_feedback(false);
         }
     }
 }
@@ -165,6 +197,16 @@ mod tests {
         assert_eq!(normalize_paste(""), "");
         // CRLF must collapse to one CR, not two.
         assert_eq!(normalize_paste("\r\n").chars().count(), 1);
+    }
+
+    #[test]
+    fn paste_builds_utf8_and_brackets_once_and_rejects_oversize() {
+        assert_eq!(
+            paste_bytes("é\r\n中\n", true).unwrap(),
+            "\x1b[200~é\r中\r\x1b[201~".as_bytes()
+        );
+        assert_eq!(paste_bytes("", true).unwrap(), b"\x1b[200~\x1b[201~");
+        assert!(paste_bytes(&"x".repeat(crate::pty::input::INPUT_BYTES), true).is_none());
     }
 
     #[test]

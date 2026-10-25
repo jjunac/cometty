@@ -140,6 +140,7 @@ pub struct ScrollCtx<'a> {
     pub log_buffer: &'a std::sync::Arc<std::sync::Mutex<crate::logbuf::LogBuffer>>,
     /// Per-tab find bar (query/matches state; drawn by `search_ui`).
     pub search: &'a mut crate::app::search::SearchPanel,
+    pub input_notice: Option<&'a str>,
 }
 
 /// Highlight inputs for [`Renderer::render`]: text selection + find
@@ -458,7 +459,11 @@ impl Renderer {
     /// font metrics from the (possibly new) base size, and force a rebuild.
     /// Theme itself flows through [`Self::set_theme`].
     pub fn apply_config(&mut self, config: &Config) {
+        let metrics_changed = self.user_config.font != config.font;
         self.user_config = config.clone();
+        if !metrics_changed {
+            return;
+        }
         self.base_font_size = config.font.size;
         let (font_size, line_height, cell_width) =
             scaled_metrics(self.base_font_size, self.scale_factor, &config.font);

@@ -276,7 +276,7 @@ impl HintView {
             rows: grid
                 .view_rows()
                 .iter()
-                .map(|row| hint_runs(row, detect_urls))
+                .map(|row| hint_runs(&row.materialize(), detect_urls))
                 .collect(),
         }
     }

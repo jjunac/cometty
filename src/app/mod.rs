@@ -10,6 +10,7 @@ pub mod keyboard;
 pub mod links;
 pub mod logs;
 pub mod mouse;
+pub mod persistence;
 pub mod pty_io;
 pub mod redraw;
 pub mod scheduling;
@@ -42,6 +43,7 @@ pub enum UserEvent {
     /// A record landed in the in-app log ring (only sent while the log
     /// panel is open, see [`crate::logging::set_wake_enabled`]).
     LogAvailable,
+    ConfigSaveAvailable,
 }
 
 pub struct App {
@@ -77,6 +79,7 @@ pub struct App {
     /// zoom. Separate from grid `last_click` (cell-based word select).
     pub(crate) last_titlebar_click: Option<Instant>,
     pub(crate) mouse_pressed: u8,
+    pub(crate) last_mouse_report: Option<mouse::MotionState>,
     /// Last cursor icon pushed to the window (link hover changes it).
     pub(crate) cursor_icon: winit::window::CursorIcon,
     /// A left press opened a link: swallow the matching release so no
@@ -85,6 +88,7 @@ pub struct App {
     pub(crate) clipboard: Option<arboard::Clipboard>,
     pub(crate) window_title: String,
     pub(crate) settings: SettingsPanel,
+    pub(crate) config_saver: persistence::ConfigSaver,
     pub(crate) logs: LogsPanel,
     /// Ring buffer for the log panel; the global logger also holds a clone.
     pub(crate) log_buffer: Arc<Mutex<LogBuffer>>,
@@ -94,6 +98,7 @@ pub struct App {
     pub(crate) snapshot_rows: Vec<Vec<crate::grid::Cell>>,
     pub(crate) snapshot_version: u64,
     pub(crate) snapshot_tab: Option<u64>,
+    pub(crate) snapshot_keys: Vec<(u64, u64, u64)>,
 }
 
 impl App {
@@ -130,17 +135,20 @@ impl App {
             last_click: None,
             last_titlebar_click: None,
             mouse_pressed: 0,
+            last_mouse_report: None,
             cursor_icon: winit::window::CursorIcon::Default,
             link_press: false,
             clipboard: None,
             window_title,
             settings: SettingsPanel::new(startup),
+            config_saver: persistence::ConfigSaver::default(),
             logs: LogsPanel::default(),
             log_buffer,
             menu: None,
             snapshot_rows: Vec::new(),
             snapshot_version: u64::MAX,
             snapshot_tab: None,
+            snapshot_keys: Vec::new(),
         }
     }
 
@@ -156,10 +164,49 @@ impl App {
     /// Persist the live config after a panel edit. Failures stay in the
     /// session with a panel toast; the next change retries.
     pub(crate) fn save_config_from_settings(&mut self) {
-        let result = match self.settings.custom_config_path.clone() {
-            Some(path) => self.config.save_to_path(&path),
-            None => self.config.save(),
-        };
+        self.config_saver.changed(Instant::now());
+    }
+
+    /// Successful input clears a stale backpressure notice. Only a key gets
+    /// a latency stamp; paste is intentionally not treated as an echo probe.
+    pub(crate) fn accept_input_feedback(&mut self, key: bool) {
+        let cleared = self.active_tab_mut().is_some_and(|tab| {
+            if key {
+                tab.last_key_write = Some(Instant::now());
+            }
+            tab.input_notice.take().is_some()
+        });
+        if cleared && let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    pub(crate) fn service_config_saves(&mut self, now: Instant, force: bool) {
+        let proxy = self.proxy.clone();
+        self.config_saver.dispatch(
+            now,
+            force,
+            &self.config,
+            self.settings.effective_save_path(),
+            move || {
+                if let Some(p) = &proxy {
+                    let _ = p.send_event(UserEvent::ConfigSaveAvailable);
+                }
+            },
+        );
+        if let Some(result) = self.config_saver.take_result() {
+            self.report_config_save(result);
+        }
+    }
+
+    pub(crate) fn finish_config_saves(&mut self) {
+        self.service_config_saves(Instant::now(), true);
+        if let Some(result) = self.config_saver.finish() {
+            self.report_config_save(result);
+        }
+    }
+
+    fn report_config_save(&mut self, result: Result<(), String>) {
         match result {
             Ok(()) => {
                 log::debug!("saved config to {}", self.settings.config_path_label());
@@ -193,7 +240,17 @@ impl App {
                 self.theme = theme;
             }
             for tab in &mut self.tabs {
+                let dropped = tab.terminal.grid().history_dropped();
                 tab.terminal.apply_config(theme, &self.config);
+                tab.rebase_selection(
+                    tab.terminal
+                        .grid()
+                        .history_dropped()
+                        .saturating_sub(dropped) as usize,
+                );
+                if actions.terminal {
+                    tab.pty.apply_terminal_config(&self.config.terminal);
+                }
             }
         }
         if (actions.theme || actions.font || actions.chrome)
@@ -204,7 +261,7 @@ impl App {
             }
             r.apply_config(&self.config);
         }
-        if actions.font || actions.terminal {
+        if actions.font || actions.terminal || old.tabbar.height != self.config.tabbar.height {
             self.sync_tab_sizes();
         }
         if actions.window_size {

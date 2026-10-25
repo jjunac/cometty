@@ -61,16 +61,15 @@ impl App {
         let (col, view_row) = self.cell_under_cursor()?;
         let tab = self.active_tab()?;
         let grid = tab.terminal.grid();
-        let rows = grid.view_rows();
-        let row = rows.get(view_row)?;
         let global = self.view_to_global(view_row)?;
+        let row = grid.global_line(global)?;
         if let Some(id) = grid.hyperlink_id_at(global, col)
             && let Some(uri) = grid.hyperlink_uri(id)
         {
             return Some(uri.to_string());
         }
         if self.config.links.detect_urls {
-            return crate::links::detected_url_at(row, col);
+            return crate::links::detected_url_at(&row.materialize(), col);
         }
         None
     }
@@ -92,7 +91,15 @@ impl App {
     /// Pointer cursor over a clickable link, default everywhere else.
     /// Cheap no-op while the icon is unchanged (called on every move).
     pub(crate) fn update_link_cursor(&mut self) {
-        let pointer = self.hints_active() && self.link_under_cursor().is_some();
+        let cell = self
+            .hints_active()
+            .then(|| self.cell_under_cursor())
+            .flatten();
+        let detect_urls = self.config.links.detect_urls;
+        let pointer = cell.is_some_and(|(col, row)| {
+            self.active_tab_mut()
+                .is_some_and(|tab| tab.link_hints(detect_urls).hit(row, col, 1))
+        });
         let desired = if pointer {
             CursorIcon::Pointer
         } else {

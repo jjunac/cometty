@@ -379,13 +379,13 @@ pub(crate) fn row_text_hash(row: &[Cell]) -> u64 {
 /// changed and the caller must fully rebuild; otherwise the indices of
 /// rows whose shaped text differs (hashes updated in place, so repeating
 /// the call with the same rows yields an empty vec).
-pub(crate) fn diff_rows(hashes: &mut [u64], rows: &[Vec<Cell>]) -> Option<Vec<usize>> {
+pub(crate) fn diff_rows(hashes: &mut [u64], rows: &[impl AsRef<[Cell]>]) -> Option<Vec<usize>> {
     if hashes.len() != rows.len() {
         return None;
     }
     let mut changed = Vec::new();
     for (i, row) in rows.iter().enumerate() {
-        let h = row_text_hash(row);
+        let h = row_text_hash(row.as_ref());
         if h != hashes[i] {
             hashes[i] = h;
             changed.push(i);

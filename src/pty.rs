@@ -1,12 +1,13 @@
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::config::Config;
+pub(crate) mod input;
 
 #[cfg(test)]
 #[path = "pty_test_support.rs"]
@@ -15,8 +16,8 @@ pub(crate) mod test_support;
 /// Pending PTY-output chunks buffered between the reader thread and the UI
 /// drain. The reader blocks past this (~1MB at 8KB chunks), which applies
 /// backpressure through the kernel PTY buffer to the child — correct
-/// terminal semantics. The UI→PTY direction stays unbounded (`tx_to_pty`):
-/// input volume is user-driven and the UI thread must never block on send.
+/// terminal semantics. UI→PTY admission is separately byte-bounded and
+/// nonblocking, with explicit rejection rather than silent input loss.
 pub(crate) const FROM_PTY_CHANNEL_BOUND: usize = 128;
 /// Reader chunk size; also the unit for the bound above.
 pub(crate) const PTY_READ_CHUNK: usize = 8192;
@@ -119,7 +120,7 @@ impl OutputReceiver {
 }
 
 pub struct PtySession {
-    pub tx_to_pty: Sender<Vec<u8>>,
+    tx_to_pty: input::InputSender,
     output: OutputReceiver,
     master: Box<dyn MasterPty + Send>,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -128,21 +129,29 @@ pub struct PtySession {
     shell_pid: Option<i32>,
     min_dim: usize,
     max_dim: usize,
+    max_cells: usize,
 }
 
 impl PtySession {
     pub fn spawn_with_size(
         cols: usize,
         rows: usize,
-        waker: impl Fn() + Send + 'static,
+        waker: impl Fn() + Send + Sync + 'static,
         config: &Config,
     ) -> anyhow::Result<Self> {
         let min_dim = config.terminal.min_dim.max(1);
         let max_dim = config.terminal.max_dim.max(min_dim);
+        let (cols, rows) = crate::app::geometry::clamp_grid_size(
+            cols,
+            rows,
+            min_dim,
+            max_dim,
+            config.terminal.max_cells,
+        );
         let pty_system = native_pty_system();
         let size = PtySize {
-            rows: rows.clamp(min_dim, max_dim) as u16,
-            cols: cols.clamp(min_dim, max_dim) as u16,
+            rows: rows as u16,
+            cols: cols as u16,
             pixel_width: 0,
             pixel_height: 0,
         };
@@ -189,10 +198,11 @@ impl PtySession {
 
         // PTY→UI is bounded (see `FROM_PTY_CHANNEL_BOUND`): the `send`
         // below blocks when the UI falls behind, pushing backpressure to
-        // the child. UI→PTY stays unbounded: input is user-driven and the
-        // UI thread must never block.
-        let (tx_from_pty, output) = output_channel(waker);
-        let (tx_to_pty, rx_to_pty) = mpsc::channel::<Vec<u8>>();
+        // the child. The opposite direction uses nonblocking admission.
+        let waker = Arc::new(waker);
+        let output_wake = waker.clone();
+        let (tx_from_pty, output) = output_channel(move || output_wake());
+        let (tx_to_pty, rx_to_pty) = input::channel(move || waker());
 
         // Detached threads: they exit on their own when the PTY closes or the
         // session's channels are dropped.
@@ -217,15 +227,7 @@ impl PtySession {
             }
         });
 
-        std::thread::spawn(move || {
-            let mut w = writer;
-            while let Ok(data) = rx_to_pty.recv() {
-                if w.write_all(&data).is_err() {
-                    break;
-                }
-                let _ = w.flush();
-            }
-        });
+        std::thread::spawn(move || rx_to_pty.run(writer));
 
         Ok(Self {
             tx_to_pty,
@@ -235,11 +237,38 @@ impl PtySession {
             shell_pid,
             min_dim,
             max_dim,
+            max_cells: config.terminal.max_cells,
         })
     }
 
-    pub fn write(&self, data: Vec<u8>) {
-        let _ = self.tx_to_pty.send(data);
+    pub fn write(&self, data: Vec<u8>) -> bool {
+        self.tx_to_pty.send(data, false).is_ok()
+    }
+
+    pub fn paste(&self, data: Vec<u8>) -> bool {
+        self.tx_to_pty.send(data, true).is_ok()
+    }
+
+    pub fn reject_large_paste(&self) {
+        self.tx_to_pty.reject_large_paste();
+    }
+
+    pub fn take_input_notice(&self) -> Option<String> {
+        self.tx_to_pty.take_notice()
+    }
+
+    pub fn reply(&self, data: Vec<u8>) -> Option<Vec<u8>> {
+        self.tx_to_pty.reply(data)
+    }
+
+    pub fn reply_blocked(&self) -> bool {
+        self.tx_to_pty.reply_blocked()
+    }
+
+    pub fn apply_terminal_config(&mut self, config: &crate::config::TerminalConfig) {
+        self.min_dim = config.min_dim;
+        self.max_dim = config.max_dim;
+        self.max_cells = config.max_cells;
     }
 
     pub fn try_recv(&self) -> Option<PtyEvent> {
@@ -272,9 +301,16 @@ impl PtySession {
     }
 
     pub fn resize(&self, cols: usize, rows: usize) {
+        let (cols, rows) = crate::app::geometry::clamp_grid_size(
+            cols,
+            rows,
+            self.min_dim,
+            self.max_dim,
+            self.max_cells,
+        );
         let _ = self.master.resize(portable_pty::PtySize {
-            rows: rows.clamp(self.min_dim, self.max_dim) as u16,
-            cols: cols.clamp(self.min_dim, self.max_dim) as u16,
+            rows: rows as u16,
+            cols: cols as u16,
             pixel_width: 0,
             pixel_height: 0,
         });

@@ -17,6 +17,7 @@ pub struct LogsPanel {
     pub filter_text: String,
     /// Stick to the newest entry as records arrive.
     pub following: bool,
+    pub index: crate::logbuf::LogIndex,
 }
 
 impl Default for LogsPanel {
@@ -26,6 +27,7 @@ impl Default for LogsPanel {
             level: LevelFilter::Debug,
             filter_text: String::new(),
             following: true,
+            index: crate::logbuf::LogIndex::default(),
         }
     }
 }
@@ -46,6 +48,9 @@ impl LogsPanel {
 
     fn set_open(&mut self, open: bool) {
         self.open = open;
+        if !open {
+            self.index = crate::logbuf::LogIndex::default();
+        }
         // Only wake the event loop for records that change what's on
         // screen; with the panel closed, logging stays wake-free.
         crate::logging::set_wake_enabled(open);

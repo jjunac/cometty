@@ -115,7 +115,14 @@ pub(crate) fn show_settings(
                                     changed: &mut changed,
                                     notice: &mut settings.notice,
                                 };
-                                show_section(ui, section, cli_override, config, &mut ed);
+                                show_section(
+                                    ui,
+                                    section,
+                                    cli_override,
+                                    config,
+                                    settings.history_usage,
+                                    &mut ed,
+                                );
                             }
                         });
                     });
@@ -142,7 +149,7 @@ pub(crate) fn show_settings(
             ui.horizontal(|ui| {
                 if ui
                     .button("Reset all to defaults")
-                    .on_hover_text("Reset every section and save immediately")
+                    .on_hover_text("Reset every section and auto-save")
                     .clicked()
                 {
                     reset_all(config);
@@ -432,6 +439,7 @@ fn show_section(
     section: SettingsSection,
     cli_override: bool,
     config: &mut Config,
+    history_usage: Option<(usize, usize, u64)>,
     ed: &mut Edit,
 ) {
     let d = Config::default();
@@ -558,6 +566,13 @@ fn show_section(
         }
         SettingsSection::Terminal => {
             ui.label("Scrollback and dimensions apply live; running shells keep going.");
+            ui.label("Oldest history is evicted at either cap; wide tabs may retain fewer lines. Zero disables history.");
+            if let Some((lines, bytes, dropped)) = history_usage {
+                ui.label(format!(
+                    "Active tab: {lines} history rows · {:.1} MiB retained · {dropped} evicted",
+                    bytes as f64 / (1024.0 * 1024.0)
+                ));
+            }
             ed.usize(
                 ui,
                 "Scrollback lines",
@@ -565,6 +580,22 @@ fn show_section(
                 0..=1_000_000,
                 0,
                 d.terminal.scrollback_lines,
+            );
+            ed.usize(
+                ui,
+                "History bytes / tab",
+                &mut config.terminal.scrollback_bytes,
+                0..=1024 * 1024 * 1024,
+                0,
+                d.terminal.scrollback_bytes,
+            );
+            ed.usize(
+                ui,
+                "Max cells / live buffer",
+                &mut config.terminal.max_cells,
+                1..=1024 * 1024,
+                1,
+                d.terminal.max_cells,
             );
             ui.horizontal(|ui| {
                 let slot = begin_reset_slot(ui);

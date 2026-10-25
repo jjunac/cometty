@@ -207,7 +207,16 @@ impl ApplicationHandler<UserEvent> for App {
             // A record landed in the log ring: repaint only if the panel
             // is on screen (the logger doesn't wake us otherwise).
             UserEvent::LogAvailable => {
+                logging::acknowledge_wake();
                 if self.logs.open
+                    && let Some(w) = self.window.as_ref()
+                {
+                    w.request_redraw();
+                }
+            }
+            UserEvent::ConfigSaveAvailable => {
+                self.service_config_saves(Instant::now(), false);
+                if self.settings.open
                     && let Some(w) = self.window.as_ref()
                 {
                     w.request_redraw();
@@ -375,6 +384,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         let now = Instant::now();
+        self.service_config_saves(now, !self.settings.open);
         let suspended = self.visuals_suspended();
         let (sync_repaint, sync_at) = self.active_tab_mut().map_or((false, None), |tab| {
             let repaint = tab.sync.release_due(now);
@@ -429,6 +439,7 @@ impl ApplicationHandler<UserEvent> for App {
         if self.pty_pending {
             next = app::scheduling::earlier(next, Some(now));
         }
+        next = app::scheduling::earlier(next, self.config_saver.deadline());
         perf::report_due(now);
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
@@ -505,7 +516,9 @@ fn main() -> anyhow::Result<()> {
         },
         log_buffer,
     );
-    event_loop.run_app(&mut app)?;
+    let result = event_loop.run_app(&mut app);
+    app.finish_config_saves();
+    result?;
     Ok(())
 }
 

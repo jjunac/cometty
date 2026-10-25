@@ -214,10 +214,7 @@ impl Grid {
         {
             let (cx, cy) = (self.cursor.x, self.cursor.y);
             let shift = w;
-            for i in (cx..self.cols.saturating_sub(shift)).rev() {
-                let v = self.cells[cy][i].clone();
-                self.cells[cy][i + shift] = v;
-            }
+            self.cells[cy][cx..].rotate_right(shift);
             let fill = self.erase_cell();
             for i in cx..(cx + shift).min(self.cols) {
                 self.cells[cy][i] = fill.clone();
@@ -285,13 +282,14 @@ impl Grid {
                 if top == 0 && bottom == max {
                     // Full-screen scroll keeps history.
                     let cur_top = self.cells.remove(0);
-                    if !self.in_alt {
-                        if self.scrollback.len() >= self.max_scrollback {
-                            self.scrollback.pop_front();
-                        }
-                        self.scrollback.push_back(cur_top);
-                    }
-                    self.cells.push(self.erase_row());
+                    let next = if self.in_alt {
+                        let mut row = cur_top;
+                        row.recycle(self.cols, &self.erase_cell());
+                        row
+                    } else {
+                        self.archive_row(cur_top)
+                    };
+                    self.cells.push(next);
                 } else {
                     self.scroll_region_up_inner(1);
                 }
@@ -535,10 +533,7 @@ impl Grid {
             self.bump();
             return;
         }
-        for i in (x..self.cols - n).rev() {
-            let v = self.cells[y][i].clone();
-            self.cells[y][i + n] = v;
-        }
+        self.cells[y][x..].rotate_right(n);
         let fill = self.erase_cell();
         for i in x..(x + n).min(self.cols) {
             self.cells[y][i] = fill.clone();
@@ -568,10 +563,7 @@ impl Grid {
             self.bump();
             return;
         }
-        for i in x..self.cols - n {
-            let v = self.cells[y][i + n].clone();
-            self.cells[y][i] = v;
-        }
+        self.cells[y][x..].rotate_left(n);
         let fill = self.erase_cell();
         for i in (self.cols - n)..self.cols {
             self.cells[y][i] = fill.clone();

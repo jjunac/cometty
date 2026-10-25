@@ -294,7 +294,7 @@ impl Grid {
         self.saved_main_origin = Some(self.origin_mode);
         self.saved_main_insert = Some(self.insert_mode);
         self.saved_main_wrap = Some(self.auto_wrap);
-        self.cells = vec![self.blank_row(); self.rows];
+        self.cells = (0..self.rows).map(|_| self.blank_row()).collect();
         self.cursor = Cursor { x: 0, y: 0 };
         self.saved_cursor = None;
         self.saved_pen = None;
@@ -315,7 +315,7 @@ impl Grid {
         if let Some(main) = self.saved_main_cells.take() {
             self.cells = main;
         } else {
-            self.cells = vec![self.blank_row(); self.rows];
+            self.cells = (0..self.rows).map(|_| self.blank_row()).collect();
         }
         if let Some(c) = self.saved_main_cursor.take() {
             self.cursor = Cursor {

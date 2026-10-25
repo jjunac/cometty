@@ -62,6 +62,8 @@ pub struct SearchPanel {
     searched_at: Option<Instant>,
     matches_generation: u64,
     projection: Option<(ProjectionKey, Arc<SearchView>)>,
+    row_ids: Vec<(u64, u64, u64)>,
+    searched_dropped: u64,
 }
 
 impl Default for SearchPanel {
@@ -77,6 +79,8 @@ impl Default for SearchPanel {
             searched_at: None,
             matches_generation: 0,
             projection: None,
+            row_ids: Vec::new(),
+            searched_dropped: 0,
         }
     }
 }
@@ -103,6 +107,7 @@ impl SearchPanel {
             self.matches = Vec::new();
         }
         self.projection = None;
+        self.row_ids = Vec::new();
         self.current = None;
         self.needs_pick = false;
         self.searched_at = None;
@@ -143,6 +148,10 @@ impl SearchPanel {
         {
             let _timing = crate::perf::measure(crate::perf::Metric::Search);
             self.matches = search::find_matches(grid, &self.query);
+            self.row_ids = (0..grid.total_lines())
+                .map(|line| grid.global_line(line).unwrap().identity())
+                .collect();
+            self.searched_dropped = grid.history_dropped();
         }
         self.matches_generation = self.matches_generation.wrapping_add(1);
         self.projection = None;
@@ -179,6 +188,19 @@ impl SearchPanel {
 
     pub fn current_match(&self) -> Option<Match> {
         self.current.and_then(|i| self.matches.get(i)).copied()
+    }
+
+    fn current_match_in(&self, grid: &Grid) -> Option<Match> {
+        let mut hit = self.current_match()?;
+        let Some(&(id, _, _)) = self.row_ids.get(hit.line) else {
+            return Some(hit);
+        };
+        let delta = grid.history_dropped().saturating_sub(self.searched_dropped) as usize;
+        hit.line = hit.line.checked_sub(delta)?;
+        // Reveal follows row identity even if another cell on the line
+        // changed: scroll the right line, then let the debounced rescan
+        // refresh the stale columns.
+        (grid.global_line(hit.line)?.identity().0 == id).then_some(hit)
     }
 
     /// 1-based `(current, total)` for the counter; `(0, 0)` without matches.
@@ -221,16 +243,30 @@ impl SearchPanel {
             .is_none_or(|(cached, _)| *cached != key)
         {
             let _timing = crate::perf::measure(crate::perf::Metric::Projection);
-            self.projection = Some((
-                key,
-                Arc::new(SearchView::build(
-                    &self.matches,
-                    self.current,
-                    grid.scrollback_len(),
-                    grid.scroll_offset(),
-                    grid.rows(),
-                )),
-            ));
+            let delta = grid.history_dropped().saturating_sub(self.searched_dropped) as usize;
+            let mut view = SearchView::build(
+                &self.matches,
+                self.current,
+                grid.scrollback_len().saturating_add(delta),
+                grid.scroll_offset(),
+                grid.rows(),
+            );
+            // A hand-built panel (tests/future imports) has no identity map;
+            // only a complete map may suppress hits after eviction.
+            if self.row_ids.len() == grid.total_lines().saturating_add(delta) {
+                for (row, ranges) in view.rows.iter_mut().enumerate() {
+                    let line = key.base + row;
+                    let expected = self.row_ids.get(line.saturating_add(delta)).copied();
+                    let actual = grid.global_line(line).map(|r| r.identity());
+                    if actual != expected {
+                        ranges.clear();
+                        if view.active.is_some_and(|(y, _, _)| y == row) {
+                            view.active = None;
+                        }
+                    }
+                }
+            }
+            self.projection = Some((key, Arc::new(view)));
         }
         self.projection.as_ref().map(|(_, view)| Arc::clone(view))
     }
@@ -344,10 +380,10 @@ impl App {
 
 /// Scroll the current match on screen with the least movement.
 fn reveal_search_match(tab: &mut Tab) -> bool {
-    let Some(m) = tab.search.current_match() else {
+    let grid = tab.terminal.grid();
+    let Some(m) = tab.search.current_match_in(grid) else {
         return false;
     };
-    let grid = tab.terminal.grid();
     let Some(offset) = search::reveal_offset(
         m.line,
         grid.rows(),
@@ -591,5 +627,39 @@ mod tests {
         panel.searched_at = None;
         assert!(!panel.refresh(&g), "background refresh must never scroll");
         assert_eq!(panel.counter(), (1, 1));
+    }
+
+    #[test]
+    fn evicted_history_shifts_cached_matches_by_surviving_row_identity() {
+        let mut cfg = crate::config::Config::default();
+        cfg.terminal.scrollback_lines = 4;
+        let mut g = Grid::new_with_config(5, 2, Theme::default(), &cfg);
+        for line in ["aaaa", "bbbb", "cccc", "dddd"] {
+            for ch in line.chars() {
+                g.put_char(ch);
+            }
+            g.newline();
+        }
+        for ch in "neee".chars() {
+            g.put_char(ch);
+        }
+        let mut panel = SearchPanel::default();
+        panel.focus_or_open();
+        panel.query = "neee".into();
+        panel.refresh(&g);
+        assert_eq!(panel.current_match().unwrap().line, 4);
+        assert_eq!(panel.view(&g).unwrap().rows[1], vec![(0, 3)]);
+
+        // Growing history below its cap keeps global IDs stable.
+        g.newline();
+        assert_eq!(panel.view(&g).unwrap().rows[0], vec![(0, 3)]);
+        // At the cap one row is evicted: every surviving line shifts down.
+        g.newline();
+        assert_eq!(g.history_dropped(), 1);
+        assert!(g.scroll_to_offset(1));
+        let view = panel.view(&g).unwrap();
+        assert_eq!(view.rows[0], vec![(0, 3)], "same row, shifted global line");
+        assert!(view.rows[1].is_empty(), "recycled rows inherit no old hits");
+        assert_eq!(panel.current_match_in(&g).unwrap().line, 3);
     }
 }

@@ -3,7 +3,6 @@
 use std::time::{Duration, Instant};
 
 use super::App;
-use crate::grid;
 use crate::renderer;
 
 /// Resolve egui's requested next-frame delay into an absolute deadline.
@@ -82,18 +81,29 @@ impl App {
         // rebuild (their content differs).
         if self.snapshot_tab != Some(tab_id) || self.snapshot_version != version {
             let _timing = crate::perf::measure(crate::perf::Metric::Snapshot);
-            let rows: Vec<Vec<grid::Cell>> = self.tabs[active]
-                .terminal
-                .grid()
-                .view_rows()
-                .into_iter()
-                .cloned()
-                .collect();
-            self.snapshot_rows = rows;
-            crate::perf::add(
-                crate::perf::Metric::SnapshotCells,
-                self.snapshot_rows.iter().map(Vec::len).sum(),
-            );
+            let rows = self.tabs[active].terminal.grid().view_rows();
+            self.snapshot_rows.resize_with(rows.len(), Vec::new);
+            self.snapshot_keys.truncate(rows.len());
+            for (i, row) in rows.iter().enumerate() {
+                let key = row.identity();
+                if self.snapshot_tab == Some(tab_id) && self.snapshot_keys.get(i) == Some(&key) {
+                    continue;
+                }
+                let dst = &mut self.snapshot_rows[i];
+                let cells = row.materialize();
+                dst.truncate(cells.len());
+                let existing = dst.len();
+                for (d, s) in dst.iter_mut().zip(cells.iter()) {
+                    d.clone_from(s);
+                }
+                dst.extend_from_slice(&cells[existing..]);
+                crate::perf::add(crate::perf::Metric::SnapshotCells, row.len());
+                if i < self.snapshot_keys.len() {
+                    self.snapshot_keys[i] = key;
+                } else {
+                    self.snapshot_keys.push(key);
+                }
+            }
             self.snapshot_version = version;
             self.snapshot_tab = Some(tab_id);
         }
@@ -149,6 +159,14 @@ impl App {
         // Owned: the overlay borrows titles while also taking
         // `&mut` to the active tab's scrollbar.
         let titles = self.tab_titles();
+        self.settings.history_usage = self.tabs.get(active).map(|tab| {
+            let grid = tab.terminal.grid();
+            (
+                grid.scrollback_len(),
+                grid.history_bytes(),
+                grid.history_dropped(),
+            )
+        });
 
         // Snapshot for settings change detection: the overlay mutates
         // `self.config` in place during `render`; any diff is live-applied
@@ -204,6 +222,7 @@ impl App {
                     logs: &mut self.logs,
                     log_buffer: &self.log_buffer,
                     search: &mut tab.search,
+                    input_notice: tab.input_notice.as_deref(),
                 },
             ) {
                 Ok(o) => o,

@@ -83,6 +83,7 @@ pub struct SettingsPanel {
     /// Transient inline hint (e.g. "font size reset to default").
     /// Set on clamp/repair, cleared on section switch or close.
     pub notice: Option<String>,
+    pub history_usage: Option<(usize, usize, u64)>,
 }
 
 impl SettingsPanel {
@@ -95,6 +96,7 @@ impl SettingsPanel {
             corrupt_at_startup: startup.config_corrupt,
             last_error: None,
             notice: None,
+            history_usage: None,
         }
     }
 

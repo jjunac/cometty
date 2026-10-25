@@ -64,6 +64,14 @@ Tranche two adds `advance_miss`, `prepare_reuse`, `coalesced_wake`, `drain_yield
 reader's one in-flight send). Queue wait starts before the bounded send, so it
 includes reader backpressure as well as time in the channel.
 
+Tranche three adds no steady-state wake: history width projection, row recycling,
+config-save coalescing and the bounded input queue are event/test driven; only
+an in-progress incremental log filter requests a bounded follow-up frame. These
+paths are covered by deterministic tests plus the headless cases below.
+`snapshot_cells` now counts cells actually refreshed in the per-row snapshot
+cache (unchanged rows are reused), so compare it with `render`/`present` counts
+rather than treating it as viewport area.
+
 Timed phases report `p99_us_le`, an approximate percentile **upper bound** from
 fixed log2-microsecond buckets, not an exact p99. Counters have zero timing fields;
 `max_value` is used for high-water values. At most 64 stable tab IDs per reporting
@@ -98,3 +106,26 @@ Dense search still stores all matches; this tranche does not change result
 counts or make scans incremental. Projection storage is restricted to visible
 hits and reused via a per-tab shared handle. Closing search releases match
 allocations larger than 1 MiB; small capacities may be reused.
+
+## Third tranche: scalability and lifecycle probes
+
+Use the same release harness for the added cases:
+
+- `resize_lazy_200_201`, `scroll_recycle_1000` — 10,100-row history; resize
+  storage must not be rewritten, and steady scroll must recycle evicted rows
+  under the byte budget.
+- `paste_build_1m` — one-pass CRLF normalization + bracketed wrapping, no
+  intermediate `String` replacements.
+- `log_index_slice`, `log_index_unchanged`, `log_index_full_scan` — 100,000-entry
+  ring. A slice is the bounded incremental unit; an unchanged level/query
+  generation only reads ring metadata. Full log filtering remains explicit
+  (Copy, or the sum of progressive slices) and is intentionally not a per-frame
+  timer.
+
+Deterministic gates cover lazy-width equivalence across shrink/regrow and theme
+changes, no resurrection of clipped text, row-ID changes on recycled storage,
+history byte caps (including extras/capacity), search alignment after eviction,
+selection rebase/cancel, ignored-versus-queued input admission, parser-reply
+headroom, bracketed-paste transaction integrity, debounced/ordered config saves,
+and log-ID eviction. Wall-clock thresholds remain manual, same-machine A/B
+checks rather than CI gates.

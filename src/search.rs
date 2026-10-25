@@ -78,17 +78,37 @@ pub fn find_matches(grid: &Grid, query: &str) -> Vec<Match> {
     // Reused across rows so a full-buffer scan doesn't allocate per cell.
     let mut hay = String::new();
     let mut spans: Vec<Span> = Vec::new();
+    // A lazily projected history row materializes through this buffer, so a
+    // full scan after a width step still allocates at most one row.
+    let mut scratch: Vec<Cell> = Vec::new();
     for line in first..grid.total_lines() {
-        let Some(row) = grid.global_line(line) else {
+        let Some(view) = grid.global_line(line) else {
             continue;
         };
+        let row: &[Cell] = match view.as_slice() {
+            Some(row) => row,
+            None => {
+                scratch.clear();
+                scratch.extend(view.iter().cloned());
+                &scratch
+            }
+        };
+        if row.is_empty() {
+            continue;
+        }
         hay.clear();
         spans.clear();
         let mut end = row.len();
         while end > 0 && is_blank(&row[end - 1]) {
             end -= 1;
         }
-        let mode = fold_mode(&row[..end], sensitive);
+        let mode = if sensitive {
+            FoldMode::Raw
+        } else if row[..end].iter().all(cell_is_ascii) {
+            FoldMode::AsciiFold
+        } else {
+            FoldMode::UnicodeFold
+        };
         for (col, cell) in row[..end].iter().enumerate() {
             // Continuations carry no text of their own; their lead's span
             // covers the extra column.
@@ -269,18 +289,6 @@ pub fn reveal_offset(
 /// True for a narrow, unstyled blank cell (trailing-blank trimming).
 fn is_blank(cell: &Cell) -> bool {
     cell.width == 1 && cell.ch == ' ' && cell.extra.is_none()
-}
-
-/// Fold mode for one row: ASCII-only rows take the in-place fast path.
-fn fold_mode(row: &[Cell], sensitive: bool) -> FoldMode {
-    if sensitive {
-        return FoldMode::Raw;
-    }
-    if row.iter().all(cell_is_ascii) {
-        FoldMode::AsciiFold
-    } else {
-        FoldMode::UnicodeFold
-    }
 }
 
 /// True when the cell's cluster folds with plain ASCII byte mapping.

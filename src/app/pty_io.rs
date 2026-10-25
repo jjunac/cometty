@@ -25,7 +25,25 @@ impl App {
     /// Returns true when no tabs remain (shell of the last tab exited)
     /// and the caller should exit the event loop.
     pub(crate) fn drain_pty(&mut self) -> bool {
-        self.pty_pending = self.tabs.iter().any(|tab| tab.pty.output_pending());
+        let mut notice_changed = false;
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            if let Some(notice) = tab.pty.take_input_notice() {
+                if tab.input_notice.as_ref() != Some(&notice) {
+                    log::warn!("tab {}: {notice}", tab.id);
+                }
+                tab.input_notice = Some(notice);
+                notice_changed |= i == self.active;
+            }
+        }
+        if notice_changed
+            && !self.visuals_suspended()
+            && let Some(w) = self.window.as_ref()
+        {
+            w.request_redraw();
+        }
+        self.pty_pending = self.tabs.iter().any(|tab| {
+            !tab.pty.reply_blocked() && (tab.pty.output_pending() || tab.pending_reply.is_some())
+        });
         if !self.pty_pending || self.pty_schedule.exhausted(Duration::ZERO) {
             return self.tabs.is_empty();
         }
@@ -45,10 +63,16 @@ impl App {
             let Some(i) = self.pty_schedule.next_tab(self.tabs.len(), self.active) else {
                 break;
             };
-            let event = if exited.contains(&i) {
+            let tab = &mut self.tabs[i];
+            if !tab.pty.reply_blocked()
+                && let Some(reply) = tab.pending_reply.take()
+            {
+                tab.pending_reply = tab.pty.reply(reply);
+            }
+            let event = if exited.contains(&i) || tab.pty.reply_blocked() {
                 None
             } else {
-                self.tabs[i].pty.try_recv()
+                tab.pty.try_recv()
             };
             match event {
                 Some(PtyEvent::Data(bytes)) => {
@@ -81,15 +105,22 @@ impl App {
                     drained_bytes = drained_bytes.saturating_add(bytes.len());
                     self.pty_schedule.add_bytes(bytes.len());
                     let before = tab.terminal.grid().version;
+                    let evicted_before = tab.terminal.grid().history_dropped();
                     {
                         let _timing = crate::perf::measure(crate::perf::Metric::Parse);
                         tab.terminal.feed(&bytes);
                     }
+                    let evicted = tab
+                        .terminal
+                        .grid()
+                        .history_dropped()
+                        .saturating_sub(evicted_before);
+                    tab.rebase_selection(evicted as usize);
                     crate::perf::add(crate::perf::Metric::ParsedBytes, bytes.len());
                     // Query replies (DA / CPR / DSR / DECRQM) flow back.
                     let reply = tab.terminal.take_response();
                     if !reply.is_empty() {
-                        tab.pty.write(reply);
+                        tab.pending_reply = tab.pty.reply(reply);
                     }
                     clipboard_ops
                         .extend(tab.terminal.take_clipboard().into_iter().map(|op| (i, op)));
@@ -172,7 +203,9 @@ impl App {
             // Dropping to 1 tab hides the bar and hands space back.
             self.sync_tab_sizes();
         }
-        self.pty_pending = self.tabs.iter().any(|tab| tab.pty.output_pending());
+        self.pty_pending = self.tabs.iter().any(|tab| {
+            !tab.pty.reply_blocked() && (tab.pty.output_pending() || tab.pending_reply.is_some())
+        });
         let drain_elapsed = start.elapsed();
         self.pty_schedule.finish_call(drain_elapsed);
         if self.pty_pending && self.pty_schedule.exhausted(Duration::ZERO) {
@@ -274,12 +307,7 @@ mod tests {
         )
     }
 
-    fn add_tab(
-        app: &mut App,
-    ) -> (
-        impl Fn(PtyEvent) + use<>,
-        std::sync::mpsc::Receiver<Vec<u8>>,
-    ) {
+    fn add_tab(app: &mut App) -> (impl Fn(PtyEvent) + use<>, crate::pty::input::InputReceiver) {
         let (pty, output, input) = crate::pty::test_support::session();
         let terminal = crate::term::Terminal::new(20, 2, crate::theme::Theme::default());
         let mut tab = crate::app::Tab::new(app.next_tab_id, terminal, pty);

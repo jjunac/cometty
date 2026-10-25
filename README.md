@@ -44,6 +44,8 @@ height = 600
 
 [terminal]
 scrollback_lines = 10000
+scrollback_bytes = 134217728  # 128 MiB retained history per tab (cells + extras + capacity)
+max_cells = 1048576         # live cells per buffer; also capped by max_dim / PTY u16
 min_dim = 1
 max_dim = 1024
 tab_stop = 8
@@ -113,7 +115,7 @@ buffer_lines = 1000    # ring capacity; stderr output still follows RUST_LOG
 - [x] Text / control handling: print with pending-wrap, `\n` / `\r` / `\b` / `\t`
 - [x] CSI `A/B/C/D/E/F/G/H/J/K/L/M/S/T/d/s/u`, ESC `M/7/8/c`
 - [x] SGR: bold, 16 + bright colors, `38;5` / `48;5`, `38;2` / `48;2` truecolor
-- [x] Grid: scrollback buffer (10k lines, stored), insert/delete lines, erase display/line
+- [x] Grid: scrollback buffer (10k lines, stored), insert/delete lines, erase display/line; per-tab history byte budget, lazy width projection, recycled row storage
 - [x] Input: text passthrough, Enter → `\r`, Backspace → `0x7F`, Esc, arrows, Home/End/PgUp/PgDn/Ins/Del, Ctrl+letter, Ctrl+Space
 - [x] Rendering: per-cell fg/bold/underline + bg quads, cursor shapes (block/underline/bar) + blink, version-cache to skip rebuild, surface-loss recovery
 - [x] Themes (`tokyo-night` default, `vscode`, `tomorrow-night`) via `--theme NAME` / `--list-themes`
@@ -129,13 +131,13 @@ buffer_lines = 1000    # ring capacity; stderr output still follows RUST_LOG
 - [x] Scroll regions (`CSI r`), origin / insert / auto-wrap modes
 - [x] Exit behavior: last shell exit closes the window, other exits close just that tab
 - [x] User config: TOML file (`$HOME/.config/cometty/config.toml`) for theme/font/window/terminal/shell/cursor/scrollbar/tabbar/selection/input/log (see `src/config.rs`); CLI `--theme` / `--config` override file
-- [x] Settings UI (`Ctrl+,` / `Cmd+,` or the Settings button: sidebar panel, live-apply, auto-save to `config.toml`, per-field/section/global reset)
-- [x] Log viewer (`Ctrl+Shift+L` / `Cmd+Shift+L` or Cometty > Logs…: in-memory ring, level + text filter, follow, clear/copy; every detected OSC sequence is logged — handled or not — with a compact payload summary; records by target so dependency debug spam stays out while their warnings still show, bounded by `[log] filter`/`level`/`buffer_lines`; stderr keeps following `RUST_LOG`)
+- [x] Settings UI (`Ctrl+,` / `Cmd+,` or the Settings button: sidebar panel, live-apply, debounced auto-save to `config.toml` via an ordered worker with flush on shutdown, per-field/section/global reset)
+- [x] Log viewer (`Ctrl+Shift+L` / `Cmd+Shift+L` or Cometty > Logs…: in-memory ring, level + text filter, follow, clear/copy; every detected OSC sequence is logged — handled or not — with a compact payload summary; records by target so dependency debug spam stays out while their warnings still show, bounded by `[log] filter`/`level`/`buffer_lines`; incremental visible-only filtering and coalesced wakeups; stderr keeps following `RUST_LOG`)
 - [x] Mouse reporting (`1000/1002/1003/1006-SGR`) + focus (`1004`) + synced output (`2026`); `Shift`-override keeps local selection
 - [x] Char ops + queries: `ICH/DCH/ECH` (`@/P/X`), `REP`, `DA`/`CPR`, `DECRQM` stub
 - [x] Full SGR: dim / italic / inverse / strike / overline, underline styles + `58/59` colors, colon `38:2:r:g:b` form
 - [x] Tab switching: `Ctrl+Tab` / `Ctrl+Shift+Tab` + `Cmd+1-9` wired to tab switch
 - [x] Search: `Cmd+F` on macOS / `Ctrl+F` on Linux/Windows (override with `[input] search_key`/`search_ctrl`/`search_super`) overlay (top-right find bar), smart-case match highlight over scrollback + screen (current match brighter), `Enter`/`Shift+Enter` (or `F3`/`Shift+F3`) next/prev with wrap-around, `Esc` close
 - [x] Hyperlinks: `OSC 8` runs stored per cell; hold the open modifier (`Cmd` on macOS, `Ctrl` elsewhere; `[links] open_modifier`) to underline every link — plus detected plain-text URLs — and click to open in the OS browser (scheme allowlist `http/https/ftp/mailto` — `file` is refused so untrusted output can't open local paths; no shell involved on macOS/Linux, and URIs with `cmd` metacharacters are refused on Windows); `[links] underline` (`always`/`hover`/`never`) and `detect_urls` tune the hints
-- [x] Clipboard: `OSC 52` writes from tmux/nvim/… gated by `[clipboard] osc52` (`off`/`write`/`read-write`); reads are opt-in because a `?` request can exfiltrate the clipboard; payloads are capped at 1 MiB and redacted in the log panel
+- [x] Clipboard: `OSC 52` writes from tmux/nvim/… gated by `[clipboard] osc52` (`off`/`write`/`read-write`); reads are opt-in because a `?` request can exfiltrate the clipboard; payloads are capped at 1 MiB and redacted in the log panel; paste is normalized/wrapped in one pass and admitted through a byte-bounded, nonblocking input queue (explicit notice on overflow, never a silent drop)
 - [ ] Bell (visual flash; currently ignored) + font zoom (`Ctrl +/-/0`) + confirm-close on dirty foreground process

@@ -9,6 +9,16 @@ use super::App;
 use crate::grid::MouseMode;
 use crate::selection::{CellPos, Selection};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MotionState {
+    tab: u64,
+    cell: (usize, usize),
+    button: Option<u8>,
+    modifiers: winit::keyboard::ModifiersState,
+    mode: MouseMode,
+    sgr: bool,
+}
+
 /// True when a titlebar press at `now` completes a double-click: a previous
 /// press exists and falls within `threshold_ms`. Pure for headless testing.
 pub(crate) fn is_titlebar_double_click(
@@ -148,9 +158,11 @@ impl App {
         Some((mode, tab.terminal.mouse_sgr()))
     }
 
-    fn send_to_active_pty(&self, bytes: Option<Vec<u8>>) {
+    fn send_to_active_pty(&self, bytes: Option<Vec<u8>>) -> bool {
         if let (Some(data), Some(tab)) = (bytes, self.active_tab()) {
-            tab.pty.write(data);
+            tab.pty.write(data)
+        } else {
+            false
         }
     }
 
@@ -173,20 +185,35 @@ impl App {
         if let Some((mode, sgr)) = self.mouse_report_state() {
             let button_held = self.mouse_pressed != 0;
             if !mode.reports_motion(button_held) {
+                self.last_mouse_report = None;
                 return;
             }
             let Some((col, view_row)) = self.cell_under_cursor() else {
                 return;
             };
+            let state = MotionState {
+                tab: self.active_tab().unwrap().id,
+                cell: (col, view_row),
+                button: self.held_button_base(),
+                modifiers: self.modifiers,
+                mode,
+                sgr,
+            };
+            if self.last_mouse_report == Some(state) {
+                return;
+            }
             let bytes = match self.held_button_base() {
                 Some(base) => {
                     crate::input::encode_mouse_drag(base, col, view_row, &self.modifiers, sgr)
                 }
                 None => crate::input::encode_mouse_hover(col, view_row, &self.modifiers, sgr),
             };
-            self.send_to_active_pty(bytes);
+            if self.send_to_active_pty(bytes) {
+                self.last_mouse_report = Some(state);
+            }
             return;
         }
+        self.last_mouse_report = None;
         let selecting = self.active_tab().is_some_and(|t| t.selecting);
         if !selecting {
             return;
@@ -277,12 +304,14 @@ impl App {
     }
 
     pub(crate) fn on_cursor_left(&mut self) {
+        self.last_mouse_report = None;
         self.cursor_pos = None;
         self.set_link_cursor_icon(winit::window::CursorIcon::Default);
     }
 
     pub(crate) fn on_focused(&mut self, focused: bool) {
         if !focused {
+            self.last_mouse_report = None;
             self.mouse_pressed = 0;
             self.link_press = false;
         }
@@ -305,6 +334,7 @@ impl App {
         state: ElementState,
         egui_consumed: bool,
     ) {
+        self.last_mouse_report = None;
         // While the settings panel is open, presses over egui chrome belong
         // to the panel (window drag, widget clicks), not to
         // terminal selection. Releases always flow through so a drag started

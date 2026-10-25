@@ -242,12 +242,8 @@ impl Grid {
         }
     }
 
-    pub fn blank_row(&self) -> Vec<Cell> {
-        vec![self.blank_cell(); self.cols]
-    }
-
-    pub(crate) fn erase_row(&self) -> Vec<Cell> {
-        vec![self.erase_cell(); self.cols]
+    pub fn blank_row(&self) -> super::Row {
+        super::Row::new(vec![self.blank_cell(); self.cols])
     }
 
     pub(crate) fn default_pen(&self) -> Pen {

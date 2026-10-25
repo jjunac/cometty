@@ -1,5 +1,6 @@
 //! In-memory production transport for app tests: no shell, tty, window or GPU.
 use super::*;
+use std::io::Write;
 
 #[derive(Debug)]
 struct Stub;
@@ -56,9 +57,9 @@ impl portable_pty::Child for Stub {
     }
 }
 
-pub(crate) fn session() -> (PtySession, impl Fn(PtyEvent), Receiver<Vec<u8>>) {
+pub(crate) fn session() -> (PtySession, impl Fn(PtyEvent), input::InputReceiver) {
     let (output_tx, output) = output_channel(|| {});
-    let (tx_to_pty, input) = mpsc::channel();
+    let (tx_to_pty, input) = input::channel(|| {});
     let session = PtySession {
         tx_to_pty,
         output,
@@ -67,6 +68,7 @@ pub(crate) fn session() -> (PtySession, impl Fn(PtyEvent), Receiver<Vec<u8>>) {
         shell_pid: None,
         min_dim: 1,
         max_dim: 1024,
+        max_cells: 1024 * 1024,
     };
     (session, move |event| assert!(output_tx.send(event)), input)
 }

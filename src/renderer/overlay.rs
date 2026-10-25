@@ -52,6 +52,7 @@ impl Renderer {
             logs,
             log_buffer,
             search,
+            input_notice,
         } = scroll;
         let scale = self.scale_factor.max(1.0);
         let screen_w_pts = self.width as f32 / scale;
@@ -79,7 +80,8 @@ impl Renderer {
             is_alt,
             opacity,
             scrollbar.is_dragging(),
-        ) {
+        ) && input_notice.is_none()
+        {
             let _ = self.egui_state.take_egui_input(window);
             self.search_bar_rect = None;
             // No chrome is visible, so any egui focus left over from a panel
@@ -112,6 +114,20 @@ impl Renderer {
         let egui_input = self.egui_state.take_egui_input(window);
         let ctx = self.egui_ctx.clone();
         ctx.begin_pass(egui_input);
+        if let Some(notice) = input_notice {
+            // Passive status, not a focusable control: terminal-owned Tab
+            // and IME keep their normal route while input is backpressured.
+            egui::Area::new(egui::Id::new("input-notice"))
+                .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -12.0))
+                .interactable(false)
+                .order(egui::Order::Foreground)
+                .show(&ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_max_width((screen_w_pts - 24.0).clamp(1.0, 520.0));
+                        ui.label(egui::RichText::new(notice).color(egui::Color32::YELLOW));
+                    });
+                });
+        }
         // Tab strip along the top. Hidden for a single tab (except on
         // macOS, where it lives in the OS titlebar and is always shown);
         // a lone tab renders as a plain title next to the `+` button.

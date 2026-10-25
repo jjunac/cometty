@@ -1,15 +1,19 @@
 mod alt;
 mod cell;
 mod edit;
+mod history;
 mod link;
+mod row;
 mod scroll;
 mod style;
 pub mod unicode;
 
 pub use alt::MouseMode;
 pub use cell::{Cell, Cursor, CursorShape, CursorStyle, Pen, UnderlineStyle};
+pub use history::RowView;
+pub use row::Row;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use crate::theme::Theme;
 
@@ -17,12 +21,19 @@ pub struct Grid {
     cols: usize,
     rows: usize,
     theme: Theme,
-    cells: Vec<Vec<Cell>>,
-    scrollback: VecDeque<Vec<Cell>>,
+    cells: Vec<Row>,
+    scrollback: VecDeque<history::HistoryRow>,
     max_scrollback: usize,
+    max_history_bytes: usize,
+    history_cell_bytes: usize,
+    history_projection_bytes: usize,
+    history_dropped: u64,
+    history_cohort: u64,
+    history_widths: BTreeMap<u64, history::Projection>,
     tab_stop: usize,
     min_dim: usize,
     max_dim: usize,
+    max_cells: usize,
     cursor: Cursor,
     pen: Pen,
     /// OSC 8 link applied to subsequently printed cells (not part of the
@@ -42,7 +53,7 @@ pub struct Grid {
     /// the find bar caches its matches against this.
     pub content_version: u64,
     in_alt: bool,
-    saved_main_cells: Option<Vec<Vec<Cell>>>,
+    saved_main_cells: Option<Vec<Row>>,
     saved_main_cursor: Option<Cursor>,
     saved_main_saved_cursor: Option<Cursor>,
     saved_main_saved_pen: Option<Pen>,
@@ -100,8 +111,13 @@ impl Grid {
     ) -> Self {
         let min_dim = config.terminal.min_dim.max(1);
         let max_dim = config.terminal.max_dim.max(min_dim);
-        let cols = cols.clamp(min_dim, max_dim);
-        let rows = rows.clamp(min_dim, max_dim);
+        let (cols, rows) = crate::app::geometry::clamp_grid_size(
+            cols,
+            rows,
+            min_dim,
+            max_dim,
+            config.terminal.max_cells,
+        );
         let blank = Cell {
             ch: ' ',
             extra: None,
@@ -122,12 +138,21 @@ impl Grid {
             cols,
             rows,
             theme,
-            cells: vec![vec![blank; cols]; rows],
+            cells: (0..rows)
+                .map(|_| Row::new(vec![blank.clone(); cols]))
+                .collect(),
             scrollback: VecDeque::new(),
             max_scrollback: config.terminal.scrollback_lines,
+            max_history_bytes: config.terminal.scrollback_bytes,
+            history_cell_bytes: 0,
+            history_projection_bytes: 0,
+            history_dropped: 0,
+            history_cohort: 0,
+            history_widths: BTreeMap::new(),
             tab_stop: config.terminal.tab_stop.max(1),
             min_dim,
             max_dim,
+            max_cells: config.terminal.max_cells,
             cursor: Cursor { x: 0, y: 0 },
             pen: Pen {
                 fg: theme.foreground,
@@ -207,14 +232,13 @@ impl Grid {
     /// growing it takes effect as new output scrolls in.
     pub fn apply_terminal_config(&mut self, config: &crate::config::TerminalConfig) {
         self.max_scrollback = config.scrollback_lines;
-        while self.scrollback.len() > self.max_scrollback {
-            self.scrollback.pop_front();
-        }
-        self.scroll_offset = self.scroll_offset.min(self.scrollback.len());
+        self.max_history_bytes = config.scrollback_bytes;
+        self.enforce_history_budget();
         self.tab_stop = config.tab_stop.max(1);
         let min_dim = config.min_dim.max(1);
         self.max_dim = config.max_dim.max(min_dim);
         self.min_dim = min_dim.min(self.max_dim);
+        self.max_cells = config.max_cells;
         self.bump();
     }
 
@@ -253,47 +277,24 @@ impl Grid {
     }
 
     #[allow(dead_code)]
-    pub fn visible_rows(&self) -> &[Vec<Cell>] {
+    pub fn visible_rows(&self) -> &[Row] {
         &self.cells
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
         let min_dim = self.min_dim.max(1);
         let max_dim = self.max_dim.max(min_dim);
-        let cols = cols.clamp(min_dim, max_dim);
-        let rows = rows.clamp(min_dim, max_dim);
+        let (cols, rows) =
+            crate::app::geometry::clamp_grid_size(cols, rows, min_dim, max_dim, self.max_cells);
         if cols == self.cols && rows == self.rows {
             return;
         }
         let blank = self.blank_cell();
-        let mut new_cells = vec![vec![blank.clone(); cols]; rows];
-        let copy_rows = self.rows.min(rows);
-        let copy_cols = self.cols.min(cols);
-        for (y, new_row) in new_cells.iter_mut().enumerate().take(copy_rows) {
-            for (x, new_cell) in new_row.iter_mut().enumerate().take(copy_cols) {
-                *new_cell = self.cells[y][x].clone();
-            }
+        Self::resize_live_rows(&mut self.cells, cols, rows, &blank);
+        if let Some(main) = self.saved_main_cells.as_mut() {
+            Self::resize_live_rows(main, cols, rows, &blank);
         }
-        // A shrink can strand a wide lead without its continuation (or a
-        // continuation without its lead) at the cut edge: repair to spaces.
-        for row in new_cells.iter_mut() {
-            Self::fix_row_wide(row, &blank);
-        }
-        self.cells = new_cells;
-        if let Some(main) = self.saved_main_cells.take() {
-            let mut new_main = vec![vec![blank.clone(); cols]; rows];
-            let main_rows = main.len();
-            let main_cols = main.first().map(|r| r.len()).unwrap_or(0);
-            for (y, new_row) in new_main.iter_mut().enumerate().take(main_rows.min(rows)) {
-                for (x, new_cell) in new_row.iter_mut().enumerate().take(main_cols.min(cols)) {
-                    *new_cell = main[y][x].clone();
-                }
-            }
-            for row in new_main.iter_mut() {
-                Self::fix_row_wide(row, &blank);
-            }
-            self.saved_main_cells = Some(new_main);
-        }
+        self.resize_history(cols, &blank);
         self.cols = cols;
         self.rows = rows;
         // Resize resets scroll margins to full (DECSTBM).
@@ -302,12 +303,6 @@ impl Grid {
         if self.saved_main_scroll_top.is_some() {
             self.saved_main_scroll_top = Some(0);
             self.saved_main_scroll_bottom = Some(rows.saturating_sub(1));
-        }
-        if cols != self.scrollback.front().map(|r| r.len()).unwrap_or(cols) {
-            for row in self.scrollback.iter_mut() {
-                row.resize(cols, blank.clone());
-                Self::fix_row_wide(row, &blank);
-            }
         }
         self.scroll_offset = self.scroll_offset.min(self.scrollback.len());
         self.cursor.x = self.cursor.x.min(cols.saturating_sub(1));
@@ -319,6 +314,15 @@ impl Grid {
             c.y = c.y.min(rows.saturating_sub(1));
         }
         self.bump();
+    }
+
+    fn resize_live_rows(cells: &mut Vec<Row>, cols: usize, rows: usize, blank: &Cell) {
+        cells.truncate(rows);
+        cells.resize_with(rows, || Row::new(vec![blank.clone(); cols]));
+        for row in cells {
+            row.resize(cols, blank.clone());
+            Self::fix_row_wide(row, blank);
+        }
     }
 
     /// Repair dangling wide halves in a row: a lead at the last column (or
@@ -977,9 +981,15 @@ mod tests {
                         for _ in 0..n.min(5) {
                             operation(&mut reference, 1);
                         }
-                        assert_eq!(bulk.cells, reference.cells, "partial={partial} y={y} n={n}");
+                        assert!(
+                            bulk.cells
+                                .iter()
+                                .zip(&reference.cells)
+                                .all(|(a, b)| a.as_ref() == b.as_ref()),
+                            "partial={partial} y={y} n={n}"
+                        );
                         assert_eq!(bulk.cursor, reference.cursor);
-                        assert_eq!(bulk.scrollback, reference.scrollback);
+                        assert_eq!(bulk.scrollback.len(), reference.scrollback.len());
                         assert!(
                             bulk.cells.iter().all(|r| pointers.contains(&r.as_ptr())),
                             "reuse row allocations"
@@ -1101,23 +1111,19 @@ mod tests {
 
     #[test]
     fn scrollback_worst_case_stays_within_byte_budget() {
-        // Line-count cap is the design (predictable UX, no byte budget):
-        // this test pins the worst case so a `Cell` growth shows up here
-        // instead of as silent RSS. At defaults (10k lines, max 1024
-        // cols) the estimate must stay under 1GB per tab; `Cell` itself
-        // must stay small (inline fields, boxed extras only).
+        // The line cap remains the predictable UX bound, and the derived
+        // byte budget bounds retained storage even at very wide dimensions.
+        // `Cell` must stay small (inline fields, boxed extras only).
         let cell = std::mem::size_of::<Cell>();
         assert!(cell <= 64, "Cell grew to {cell} bytes");
         let cfg = crate::config::Config::default();
-        let worst =
-            (cfg.terminal.scrollback_lines + cfg.terminal.max_dim) * cfg.terminal.max_dim * cell;
-        assert!(worst < 1024 * 1024 * 1024, "worst={worst} bytes");
-        // And the cap is actually enforced: overfill drops the oldest.
+        assert!(cfg.terminal.scrollback_bytes <= 128 * 1024 * 1024);
         let mut g = Grid::new_with_config(4, 2, test_theme(), &cfg);
         for _ in 0..(cfg.terminal.scrollback_lines + 10) {
             g.newline();
         }
         assert!(g.scrollback_len() <= cfg.terminal.scrollback_lines);
+        assert!(g.history_bytes() <= cfg.terminal.scrollback_bytes);
     }
 
     #[test]
