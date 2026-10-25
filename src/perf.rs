@@ -35,9 +35,10 @@ pub(crate) enum Metric {
     QueuedBytes,
     CoalescedWake,
     DrainYield,
+    UploadFlush,
 }
 
-const NAMES: [&str; 25] = [
+const NAMES: [&str; 26] = [
     "drain",
     "parse",
     "search",
@@ -63,6 +64,7 @@ const NAMES: [&str; 25] = [
     "queued_bytes",
     "coalesced_wake",
     "drain_yield",
+    "upload_flush",
 ];
 
 #[derive(Clone, Copy, Default)]

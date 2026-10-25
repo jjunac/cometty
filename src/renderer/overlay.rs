@@ -11,6 +11,9 @@ pub(crate) struct OverlayOutput {
     pub(crate) search: SearchUiOutput,
     pub(crate) paint_jobs: Vec<egui::ClippedPrimitive>,
     pub(crate) screen_descriptor: egui_wgpu::ScreenDescriptor,
+    /// Consumed by the frame boundary: sets before acquisition, frees only
+    /// after the normal or upload-only submission (also on skipped frames).
+    pub(crate) textures_delta: egui::TexturesDelta,
     /// Earliest delay egui wants the next frame after (animations, hover
     /// fades, smooth scrolling, tooltips); `Duration::MAX` = none pending.
     pub(crate) egui_repaint_delay: std::time::Duration,
@@ -107,6 +110,7 @@ impl Renderer {
                 search: super::search_ui::SearchUiOutput::default(),
                 paint_jobs: Vec::new(),
                 screen_descriptor,
+                textures_delta: egui::TexturesDelta::default(),
                 egui_repaint_delay,
             };
         }
@@ -567,18 +571,6 @@ impl Renderer {
             size_in_pixels: [self.width, self.height],
             pixels_per_point: scale,
         };
-        // Drain (not just borrow): egui panics on drop with unapplied deltas,
-        // and our early surface-loss returns below must not leak them either.
-        for (id, deltas) in full_output.textures_delta.set.drain() {
-            for delta in &deltas {
-                self.egui_renderer
-                    .update_texture(&self.device, &self.queue, id, delta);
-            }
-        }
-        for id in full_output.textures_delta.free.drain() {
-            self.egui_renderer.free_texture(&id);
-        }
-
         OverlayOutput {
             scroll_to,
             selected_tab,
@@ -587,6 +579,7 @@ impl Renderer {
             search: search_actions,
             paint_jobs,
             screen_descriptor,
+            textures_delta: std::mem::take(&mut full_output.textures_delta),
             egui_repaint_delay,
         }
     }

@@ -1,5 +1,6 @@
 mod background;
 mod blocks;
+mod frame;
 #[cfg(test)]
 mod gpu_tests;
 mod log_ui;
@@ -10,6 +11,10 @@ pub(crate) mod text;
 
 use background::{BG_SHADER, BgVertex};
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use cosmic_text::{Buffer, Metrics, Wrap};
@@ -248,6 +253,30 @@ pub struct Renderer {
     /// debug probes so a sustained slowdown can't flood the log panel.
     last_slow_log: Option<Instant>,
     surface_failures: u8,
+    /// Surface loss can be retried; confirmed device loss cannot. Stop new
+    /// uploads until restart rather than growing work against a dead queue.
+    device_lost: Arc<AtomicBool>,
+}
+
+impl frame::Backend for Renderer {
+    type CommandBuffer = wgpu::CommandBuffer;
+
+    fn is_device_lost(&self) -> bool {
+        self.device_lost.load(Ordering::Relaxed)
+    }
+
+    fn submit(&mut self, commands: impl IntoIterator<Item = wgpu::CommandBuffer>) {
+        self.queue.submit(commands);
+    }
+
+    fn update_texture(&mut self, id: egui::TextureId, delta: &egui::epaint::ImageDelta) {
+        self.egui_renderer
+            .update_texture(&self.device, &self.queue, id, delta);
+    }
+
+    fn free_texture(&mut self, id: egui::TextureId) {
+        self.egui_renderer.free_texture(&id);
+    }
 }
 
 impl Renderer {
@@ -292,6 +321,13 @@ impl Renderer {
                 ..Default::default()
             }))?,
         };
+        let device_lost = Arc::new(AtomicBool::new(false));
+        let lost = Arc::clone(&device_lost);
+        device.set_device_lost_callback(move |reason, message| {
+            if !lost.swap(true, Ordering::Relaxed) && reason == wgpu::DeviceLostReason::Unknown {
+                log::error!("graphics device lost: {message}; rendering disabled until restart");
+            }
+        });
         let max_surface_dim = device
             .limits()
             .max_texture_dimension_2d
@@ -428,6 +464,7 @@ impl Renderer {
             prepared_text: None,
             last_slow_log: None,
             surface_failures: 0,
+            device_lost,
         };
         r.update_viewport(clamped_w, clamped_h);
         log::debug!(
@@ -561,13 +598,9 @@ impl Renderer {
     fn update_viewport(&mut self, width: u32, height: u32) {
         self.width = width.max(1);
         self.height = height.max(1);
-        self.viewport.update(
-            &self.queue,
-            Resolution {
-                width: self.width,
-                height: self.height,
-            },
-        );
+        // CPU layout changes immediately. The glyphon uniform upload waits
+        // until acquisition succeeds, so resize/restore failures cannot queue
+        // unsubmitted writes outside the frame cleanup boundary.
         self.buffer
             .set_size(Some(self.width as f32), Some(self.height as f32));
         // A new size can reflow layout: hashes would falsely hit.
@@ -604,7 +637,9 @@ impl Renderer {
         self.fullscreen = fullscreen;
         self.config.width = surf_w;
         self.config.height = surf_h;
-        self.surface.configure(&self.device, &self.config);
+        if !self.device_lost.load(Ordering::Relaxed) {
+            self.surface.configure(&self.device, &self.config);
+        }
         self.update_viewport(surf_w, surf_h);
     }
 
@@ -695,6 +730,35 @@ impl Renderer {
         highlights: HighlightCtx<'_>,
         scroll: ScrollCtx<'_>,
     ) -> anyhow::Result<RenderOutput> {
+        let mut result = frame::run(self, |renderer, frame| {
+            let result =
+                renderer.render_frame(grid_rows, cursor, grid_version, highlights, scroll, frame);
+            if result.is_err() {
+                // An error can leave atlas/instance state partially replaced.
+                renderer.prepared_text = None;
+            }
+            result
+        });
+        // Loss may also be reported by the upload-only cleanup submission.
+        if self.device_lost.load(Ordering::Relaxed) {
+            self.prepared_text = None;
+            if let Ok(out) = &mut result {
+                out.retry_after = None;
+                out.egui_repaint_delay = Duration::MAX;
+            }
+        }
+        result
+    }
+
+    fn render_frame(
+        &mut self,
+        grid_rows: &[Vec<Cell>],
+        cursor: CursorCtx,
+        grid_version: u64,
+        highlights: HighlightCtx<'_>,
+        scroll: ScrollCtx<'_>,
+        frame_uploads: &mut frame::Frame,
+    ) -> anyhow::Result<RenderOutput> {
         // Latency probe: per-keystroke reshape + submit cost. Slow-only,
         // rate-limited debug logs; the fast path stays silent.
         let render_start = Instant::now();
@@ -717,11 +781,6 @@ impl Renderer {
         };
 
         let tab_count = scroll.tab_titles.len();
-        let bg_start = Instant::now();
-        let bg_timing = crate::perf::measure(crate::perf::Metric::Background);
-        let vert_count = self.paint_bg(grid_rows, &cursor, &highlights, tab_count);
-        drop(bg_timing);
-        let bg_elapsed = bg_start.elapsed();
         let overlay_start = Instant::now();
         let overlay_timing = crate::perf::measure(crate::perf::Metric::Overlay);
         let overlay::OverlayOutput {
@@ -732,6 +791,7 @@ impl Renderer {
             search,
             paint_jobs,
             screen_descriptor,
+            textures_delta,
             egui_repaint_delay,
         } = self.paint_overlay(scroll);
         drop(overlay_timing);
@@ -747,6 +807,14 @@ impl Renderer {
             search,
             egui_repaint_delay,
         };
+
+        // egui input/actions/platform output still progress on skipped frames.
+        // Apply deltas now; the common boundary flushes them on every returned
+        // failure and frees textures only after that submission.
+        if !frame_uploads.update_textures(self, textures_delta) {
+            out.egui_repaint_delay = Duration::MAX;
+            return Ok(out);
+        }
 
         let acquire_start = Instant::now();
         let acquire_timing = crate::perf::measure(crate::perf::Metric::Acquire);
@@ -766,8 +834,12 @@ impl Renderer {
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.prepared_text = None;
-                self.surface.configure(&self.device, &self.config);
-                out.retry_after = Some(surface_retry_delay(&mut self.surface_failures));
+                if !self.device_lost.load(Ordering::Relaxed) {
+                    self.surface.configure(&self.device, &self.config);
+                    out.retry_after = Some(surface_retry_delay(&mut self.surface_failures));
+                } else {
+                    out.egui_repaint_delay = Duration::MAX;
+                }
                 crate::perf::add(crate::perf::Metric::Skipped, 1);
                 return Ok(out);
             }
@@ -784,6 +856,24 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let bg_start = Instant::now();
+        let bg_timing = crate::perf::measure(crate::perf::Metric::Background);
+        let Some(vert_count) = frame_uploads.upload(self, |renderer| {
+            renderer.viewport.update(
+                &renderer.queue,
+                Resolution {
+                    width: renderer.width,
+                    height: renderer.height,
+                },
+            );
+            renderer.paint_bg(grid_rows, &cursor, &highlights, tab_count)
+        }) else {
+            out.egui_repaint_delay = Duration::MAX;
+            return Ok(out);
+        };
+        drop(bg_timing);
+        let bg_elapsed = bg_start.elapsed();
 
         let top = self.tab_bar_px(tab_count);
         let key = PreparedTextKey {
@@ -805,28 +895,34 @@ impl Renderer {
             self.atlas.trim();
             let prepare_start = Instant::now();
             let _timing = crate::perf::measure(crate::perf::Metric::Prepare);
-            self.text_renderer.prepare(
-                &self.device,
-                &self.queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                [TextArea {
-                    buffer: &self.buffer,
-                    left: 0.0,
-                    top,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.width as i32,
-                        bottom: self.height as i32,
-                    },
-                    default_color: key.default_color,
-                    custom_glyphs: &[],
-                }],
-                &mut self.swash_cache,
-            )?;
+            let Some(prepared) = frame_uploads.upload(self, |renderer| {
+                renderer.text_renderer.prepare(
+                    &renderer.device,
+                    &renderer.queue,
+                    &mut renderer.font_system,
+                    &mut renderer.atlas,
+                    &renderer.viewport,
+                    [TextArea {
+                        buffer: &renderer.buffer,
+                        left: 0.0,
+                        top,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: 0,
+                            right: renderer.width as i32,
+                            bottom: renderer.height as i32,
+                        },
+                        default_color: key.default_color,
+                        custom_glyphs: &[],
+                    }],
+                    &mut renderer.swash_cache,
+                )
+            }) else {
+                out.egui_repaint_delay = Duration::MAX;
+                return Ok(out);
+            };
+            prepared?;
             self.prepared_text = Some(key);
             prepare_start.elapsed()
         } else {
@@ -841,13 +937,18 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("cometty encoder"),
             });
-        self.egui_renderer.update_buffers(
-            &self.device,
-            &self.queue,
-            &mut encoder,
-            &paint_jobs,
-            &screen_descriptor,
-        );
+        let Some(callback_commands) = frame_uploads.upload(self, |renderer| {
+            renderer.egui_renderer.update_buffers(
+                &renderer.device,
+                &renderer.queue,
+                &mut encoder,
+                &paint_jobs,
+                &screen_descriptor,
+            )
+        }) else {
+            out.egui_repaint_delay = Duration::MAX;
+            return Ok(out);
+        };
         {
             let bg = self.theme.background.as_linear_f32_array();
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -881,7 +982,13 @@ impl Renderer {
             self.egui_renderer
                 .render(&mut pass.forget_lifetime(), &paint_jobs, &screen_descriptor);
         }
-        self.queue.submit(Some(encoder.finish()));
+        if !frame_uploads.submit(
+            self,
+            callback_commands.into_iter().chain([encoder.finish()]),
+        ) {
+            out.egui_repaint_delay = Duration::MAX;
+            return Ok(out);
+        }
         drop(encode_timing);
         let encode_elapsed = encode_start.elapsed();
         // Timed before `present`: presenting blocks on vsync by design

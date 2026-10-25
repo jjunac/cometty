@@ -9,8 +9,10 @@
 > `e06f621` baseline, not the current implementation. Batch 1 repaired PTY lifecycle
 > ownership in `9c097cd`. Batch 2 addresses Finding B with bounded OSC parsing and
 > handler-side allocation limits; see [the follow-up results](#14-follow-up-batch-2-osc-bounds).
-> GPU staging, whole-application budgets, search, cluster tails, and renderer
-> high-water storage are deliberately not changed by batch 2.
+> [Batch 3](#15-follow-up-batch-3-failed-frame-uploads) repairs failed-frame upload
+> submission; native GPU verification is still blocked by device creation here.
+> Whole-application budgets, search, cluster tails, and renderer high-water
+> storage remain separate follow-ups.
 
 ## Executive summary
 
@@ -647,8 +649,117 @@ Validation:
 
 Reproduce the committed headless checks with `cargo test --locked term::` (or
 add `--release`). No disposable external probe or display/GPU is required.
-Finding C (failed-frame uploads) remains the next graphics-side repair to verify;
-this batch does **not** impose a process-wide RAM ceiling.
+Finding C (failed-frame uploads) was left for batch 3 below; batch 2 does **not**
+impose a process-wide RAM ceiling.
+
+## 15. Follow-up: batch 3 (failed-frame uploads)
+
+Implemented on 2026-10-25, separately from the baseline audit above.
+
+### Policy and implementation
+
+- [`src/renderer/frame.rs`](../src/renderer/frame.rs) supplies one common
+  submission/texture-release boundary around every returned render outcome.
+  Upload-capable calls are marked **before** execution, including glyphon
+  preparation, which can queue partial atlas writes before returning an error.
+  If no normal submission occurred, queued uploads are submitted with
+  `queue.submit([])` before returning. A successful frame submits only once;
+  a skipped frame with no uploads does not submit. Incomplete draw command
+  buffers are dropped, not submitted as part of error cleanup.
+- [`src/renderer/mod.rs`](../src/renderer/mod.rs) now builds/uploads background
+  geometry and updates the glyphon viewport **after successful acquisition**.
+  Startup and resize update CPU dimensions/layout immediately but no longer
+  queue viewport writes outside the frame boundary. The fullscreen one-pixel
+  workaround and existing surface retry/backoff policy are unchanged.
+- [`src/renderer/overlay.rs`](../src/renderer/overlay.rs) returns owned egui
+  texture deltas instead of uploading/destroying textures itself. Input, UI
+  actions, platform output, focus/IME, and repaint requests still advance before
+  acquisition. Texture sets are applied on each attempt, including skipped
+  frames, rather than accumulating deferred patches on the CPU. Texture frees
+  follow the normal or upload-only submission: egui-wgpu's `free_texture`
+  destroys the resource, so destroying it before submission would invalidate
+  commands/writes still referring to it. All partial updates for an ID retain
+  their order; they are not reduced to just the last patch.
+- Returned rendering errors invalidate prepared text. Retained-text reuse still
+  does not trim/reprepare the atlas, and glyph pinning is unchanged. Normal
+  submission also includes any command buffers returned by egui paint callbacks.
+- A device-loss callback marks confirmed loss separately from surface loss.
+  Further uploads, submissions, and surface reconfiguration stop; unappliable
+  egui deltas are explicitly consumed and animation/surface retry deadlines are
+  suppressed. Unknown device loss is logged once. **Automatic device/resource
+  recreation is not implemented; rendering requires a restart after device
+  loss.** Empty submission is not claimed to recover a lost device.
+- `COMETTY_PERF=1` adds an aggregate `upload_flush` counter for fallback
+  submissions. Production cleanup introduces no GPU waits or new wake timers.
+  The locked dependency versions are unchanged; a dev-only wgpu dependency
+  enables native allocation counters for the opt-in probe, not normal builds.
+
+This removes the source-confirmed **never-submitted upload** growth path on a
+live device. Submission is not completion or a process-memory budget: a stalled
+GPU can still retain in-flight work, and atlas/geometry high-water allocations,
+allocator retention, and native driver memory remain distinct concerns.
+
+### Regression evidence and limits
+
+Headless tests exercise the **same frame boundary used by production**, with a
+fake backend that records upload/submit/free order and modeled pending bytes:
+
+- 10,000 skipped attempts each submit their updates before destroying textures;
+  modeled pending bytes return to zero after every attempt.
+- Injected preparation and encoding errors after partial uploads still flush;
+  no incomplete draw commands are submitted.
+- Successful frames submit once (including callback commands), recovery after
+  repeated failures has no stale pending uploads, and upload-free skips do no
+  queue work. Full/partial texture update order and same-frame frees are checked.
+- Confirmed loss before/during uploads or reported during submission stops new
+  GPU work, without trying to flush a dead queue.
+
+These are **control-flow/ownership tests, not measured native allocations**.
+They do not instantiate a window/surface or force a real glyphon `AtlasFull`.
+The acquisition/resize ordering is additionally checked in production source;
+the full windowed path still needs display-backed verification.
+
+The new ignored offscreen probe in
+[`src/renderer/gpu_tests.rs`](../src/renderer/gpu_tests.rs) is designed to:
+
+1. Establish a positive control: eight unsubmitted 1.37 MiB geometry uploads
+   must increase native buffer counters, even after a nonblocking poll; empty
+   submission plus completion must release them.
+2. Inject 4,096 skipped/error outcomes through the production boundary, with
+   real egui texture updates and reusable colored-geometry-sized uploads after
+   modeled successful acquisition. At every 64-attempt **test-only completion
+   wait**, native buffer/texture counts and attributed bytes must return to the
+   warmed baseline, before any readback mapping can implicitly flush writes.
+3. Recover with a successful offscreen egui render, compare red/green pixels
+   and uploaded geometry bytes, and destroy a texture only after submission.
+
+**Attempted here: blocked before the probe workload.** The Intel Iris Plus Metal
+adapter was found, but both default and downlevel device requests returned
+`RequestDeviceError { inner: Core(Device(Lost)) }`, as in the original audit.
+No native-counter plateau, recovery-pixel success, physical-footprint change,
+or GUI latency improvement is reported. Even on a working device this probe
+injects failure points without a real surface and measures attributed native
+resource bytes, not complete process RAM or an indefinitely stalled GPU.
+
+Validation:
+
+- `cargo test --locked --offline`: **412 passed, 4 opt-in probes ignored**.
+- `cargo test --release --locked --offline renderer::`: **46 passed, 2 GPU probes ignored**.
+- `cargo check --locked --offline`: passed (normal, non-test build).
+- `cargo clippy --locked --offline --all-targets -- -D warnings`: passed.
+- `cargo fmt --check` and `git diff --check`: passed.
+- Explicit native staging probe: blocked by device creation as described above;
+  its post-initialization assertions have **not** been executed here.
+
+Reproduce the headless tests with `cargo test --locked --offline renderer::`.
+On a working GPU, explicitly opt into the offscreen probe with:
+
+```sh
+cargo test --locked --offline renderer::gpu_tests::failed_frame_uploads_are_reclaimed_and_recover -- --ignored --exact --nocapture
+```
+
+The next action-plan item is whole-application memory telemetry/accounting and
+a documented budget policy, not a claim that this batch bounds total RAM.
 
 ## Bottom line (audited revision)
 

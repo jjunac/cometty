@@ -41,6 +41,11 @@ base64 = "0.22"
 # Word selection pattern (`[selection] word_regex`, match-words semantics).
 regex = "1"
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+[dev-dependencies]
+# Native allocation counters for the opt-in offscreen staging regression only.
+# Normal builds keep wgpu's counter instrumentation disabled.
+wgpu = { version = "30", features = ["counters"] }
+
 [target.'cfg(unix)'.dependencies]
 # Foreground-process `$command`/`$cwd` tab-label sources (`tcgetpgrp` +
 # `proc_pidpath`/`proc_pidinfo` on macOS; `/proc` on Linux).
