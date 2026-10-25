@@ -32,6 +32,8 @@ impl App {
     /// Returns true when no tabs remain (shell of the last tab exited)
     /// and the caller should exit the event loop.
     pub(crate) fn drain_pty(&mut self) -> bool {
+        let _timing = crate::perf::measure(crate::perf::Metric::Drain);
+        self.pty_pending = false;
         let mut got_data = false;
         let mut exited: Vec<usize> = Vec::new();
         // OSC 52 requests leave the terminal (which owns no clipboard), but
@@ -47,7 +49,11 @@ impl App {
                 match tab.pty.try_recv() {
                     Some(PtyEvent::Data(bytes)) => {
                         drained_bytes = drained_bytes.saturating_add(bytes.len());
-                        tab.terminal.feed(&bytes);
+                        {
+                            let _timing = crate::perf::measure(crate::perf::Metric::Parse);
+                            tab.terminal.feed(&bytes);
+                        }
+                        crate::perf::add(crate::perf::Metric::ParsedBytes, bytes.len());
                         // Query replies (DA / CPR / DSR / DECRQM) flow back.
                         let reply = tab.terminal.take_response();
                         if !reply.is_empty() {
@@ -81,6 +87,7 @@ impl App {
                 break;
             }
         }
+        self.pty_pending = budget_hit;
         // Apply OSC 52 requests while tab indices still match (a tab
         // removed below could shift another tab's reply target).
         if !clipboard_ops.is_empty() {

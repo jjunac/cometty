@@ -91,13 +91,8 @@ impl Renderer {
             // IME on so dead keys reach `App::on_ime` (egui leaves it off).
             self.ensure_terminal_ime(window, false);
             let now = std::time::Instant::now();
-            let animating =
+            let egui_repaint_delay =
                 scrollbar.update(now, total, visible, offset, is_alt, false, &scrollbar_cfg);
-            let egui_repaint_delay = if animating {
-                std::time::Duration::ZERO
-            } else {
-                std::time::Duration::MAX
-            };
             let screen_descriptor = egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [self.width, self.height],
                 pixels_per_point: scale,
@@ -521,8 +516,9 @@ impl Renderer {
         // request (while still animating) is part of the frame's
         // `repaint_delay` below instead of being dropped after `end_pass`.
         let now = std::time::Instant::now();
-        if scrollbar.update(now, total, visible, offset, is_alt, hovered, &scrollbar_cfg) {
-            ctx.request_repaint();
+        let delay = scrollbar.update(now, total, visible, offset, is_alt, hovered, &scrollbar_cfg);
+        if delay != std::time::Duration::MAX {
+            ctx.request_repaint_after(delay);
         }
         let mut full_output = {
             // Settings overlay (sidebar window when open; the entry point

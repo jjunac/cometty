@@ -746,7 +746,7 @@ fn show_section(
                 &mut config.selection.word_regex,
                 &d.selection.word_regex,
             );
-            if regex::Regex::new(&config.selection.word_regex).is_err() {
+            if !config.selection.word_regex_valid() {
                 ui.colored_label(
                     egui::Color32::YELLOW,
                     format!(

@@ -7,6 +7,9 @@ mod links;
 mod logbuf;
 mod logging;
 mod menu;
+mod perf;
+#[cfg(test)]
+mod perf_bench;
 mod procinfo;
 mod pty;
 mod renderer;
@@ -192,6 +195,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PtyAvailable => {
+                perf::add(perf::Metric::Wake, 1);
                 if self.drain_pty() {
                     event_loop.exit();
                 }
@@ -274,6 +278,7 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
+                self.zero_sized = size.width == 0 || size.height == 0;
                 let scale = self
                     .window
                     .as_ref()
@@ -344,6 +349,15 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Focused(focused) => {
                 self.on_focused(focused);
             }
+            WindowEvent::Occluded(occluded) => {
+                self.occluded = occluded;
+                if !occluded && let Some(w) = self.window.as_ref() {
+                    let size = w.inner_size();
+                    self.zero_sized = size.width == 0 || size.height == 0;
+                    self.pending_resize = Some((size.width, size.height));
+                    w.request_redraw();
+                }
+            }
             _ => {}
         }
     }
@@ -356,30 +370,50 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
-        let blink_ms = self.config.cursor.blink_ms;
         let now = Instant::now();
-        if now.duration_since(self.last_blink) >= Duration::from_millis(blink_ms) {
-            self.cursor_visible = !self.cursor_visible;
-            self.last_blink = now;
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
+        let suspended = self.visuals_suspended();
+        let blinking = self.active_tab().is_some_and(|tab| {
+            app::scheduling::cursor_blinks(
+                suspended,
+                tab.terminal.cursor_visible(),
+                tab.terminal.cursor_style().blinking,
+                tab.terminal.scroll_offset(),
+            )
+        });
+        let (repaint, mut next) = app::scheduling::blink_step(
+            now,
+            &mut self.last_blink,
+            &mut self.cursor_visible,
+            blinking,
+            Duration::from_millis(self.config.cursor.blink_ms.max(1)),
+        );
+        if repaint && let Some(w) = self.window.as_ref() {
+            w.request_redraw();
         }
-        // Wake for the next blink toggle, or earlier when egui asked for a
-        // frame (hover fades, panel animations, tooltips). A due deadline
-        // repaints now and lets that frame schedule the next one.
-        let mut next = self.last_blink + Duration::from_millis(blink_ms);
-        if let Some(deadline) = self.egui_repaint_at {
-            if deadline <= now {
-                self.egui_repaint_at = None;
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
+        if !suspended {
+            let search_at = self
+                .active_tab()
+                .and_then(|t| t.search.rescan_at(t.terminal.grid(), now));
+            for deadline in [self.egui_repaint_at, search_at].into_iter().flatten() {
+                if deadline <= now {
+                    if self.egui_repaint_at == Some(deadline) {
+                        self.egui_repaint_at = None;
+                    }
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                } else {
+                    next = app::scheduling::earlier(next, Some(deadline));
                 }
-            } else {
-                next = next.min(deadline);
             }
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+        // Parsing progress must not depend on visual frames, selection
+        // state, cursor blinks, or whether the window is visible.
+        if self.pty_pending {
+            next = app::scheduling::earlier(next, Some(now));
+        }
+        perf::report_due(now);
+        event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 }
 

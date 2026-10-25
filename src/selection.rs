@@ -205,39 +205,40 @@ pub fn expand_word(
     }
     let pos = lead_cols.iter().position(|&c| c == x).unwrap_or(0);
     let x_byte = starts[pos];
-    let re = config.word_regex_compiled();
-    for mat in re.find_iter(&text) {
-        let (s, e) = (mat.start(), mat.end());
-        if e <= s || x_byte < s || x_byte >= e {
-            continue;
+    config.with_word_regex(|re, _| {
+        for mat in re.find_iter(&text) {
+            let (s, e) = (mat.start(), mat.end());
+            if e <= s || x_byte < s || x_byte >= e {
+                continue;
+            }
+            // Boundaries must align to clusters so a match can never split a
+            // multi-byte grapheme (e.g. `e` + combining mark).
+            if !starts.contains(&s) || (e != text.len() && !starts.contains(&e)) {
+                continue;
+            }
+            let si = starts.iter().position(|&b| b == s).unwrap_or(0);
+            let ei = if e == text.len() {
+                lead_cols.len().saturating_sub(1)
+            } else {
+                starts
+                    .iter()
+                    .position(|&b| b == e)
+                    .map(|i| i.saturating_sub(1))
+                    .unwrap_or(0)
+            };
+            let mut start_col = lead_cols[si.min(lead_cols.len() - 1)];
+            let mut end_col = lead_cols[ei.min(lead_cols.len() - 1)];
+            if start_col > end_col {
+                std::mem::swap(&mut start_col, &mut end_col);
+            }
+            // A trailing wide lead inside the match takes its continuation.
+            if row[end_col].width == 2 {
+                end_col = (end_col + 1).min(row.len().saturating_sub(1));
+            }
+            return (start_col, end_col);
         }
-        // Boundaries must align to clusters so a match can never split a
-        // multi-byte grapheme (e.g. `e` + combining mark).
-        if !starts.contains(&s) || (e != text.len() && !starts.contains(&e)) {
-            continue;
-        }
-        let si = starts.iter().position(|&b| b == s).unwrap_or(0);
-        let ei = if e == text.len() {
-            lead_cols.len().saturating_sub(1)
-        } else {
-            starts
-                .iter()
-                .position(|&b| b == e)
-                .map(|i| i.saturating_sub(1))
-                .unwrap_or(0)
-        };
-        let mut start_col = lead_cols[si.min(lead_cols.len() - 1)];
-        let mut end_col = lead_cols[ei.min(lead_cols.len() - 1)];
-        if start_col > end_col {
-            std::mem::swap(&mut start_col, &mut end_col);
-        }
-        // A trailing wide lead inside the match takes its continuation.
-        if row[end_col].width == 2 {
-            end_col = (end_col + 1).min(row.len().saturating_sub(1));
-        }
-        return (start_col, end_col);
-    }
-    (x, x)
+        (x, x)
+    })
 }
 
 /// Expand a visual row to its full line for triple-click: column `0`

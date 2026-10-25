@@ -295,6 +295,7 @@ impl Renderer {
         // frame, resize, scrollback growth) takes the full path below.
         if let Some(changed) = diff_rows(&mut self.shaped_hashes, rows) {
             if !changed.is_empty() {
+                crate::perf::add(crate::perf::Metric::ShapedRows, changed.len());
                 // Shared shaping inputs (family/features resolved once).
                 let family = font_family(&self.user_config.font.family);
                 let features = terminal_font_features();
@@ -322,6 +323,7 @@ impl Renderer {
             return;
         }
         // Full path: reshape every line and re-sync the hash cache.
+        crate::perf::add(crate::perf::Metric::ShapedRows, rows.len());
         let metrics = Metrics::new(self.font_size, self.line_height);
         self.buffer.set_metrics(metrics);
         // Fixed-cell advances come from per-span `letter_spacing` (see

@@ -207,20 +207,7 @@ impl Grid {
         if top >= bottom && n > 0 {
             return;
         }
-        for _ in 0..n {
-            if top >= self.cells.len() || bottom >= self.cells.len() {
-                break;
-            }
-            self.cells.remove(top);
-            // After removal the region shrank by one; re-insert fill at
-            // `bottom` so only `[top..=bottom]` rotates.
-            let fill = self.erase_row();
-            if bottom <= self.cells.len() {
-                self.cells.insert(bottom, fill);
-            } else {
-                self.cells.push(fill);
-            }
-        }
+        self.rotate_region(top, bottom, n, false);
     }
 
     pub(crate) fn scroll_region_down_inner(&mut self, n: usize) {
@@ -233,13 +220,31 @@ impl Grid {
         if top >= bottom && n > 0 {
             return;
         }
-        for _ in 0..n {
-            if top >= self.cells.len() || bottom >= self.cells.len() {
-                break;
-            }
-            self.cells.remove(bottom);
-            let fill = self.erase_row();
-            self.cells.insert(top, fill);
+        self.rotate_region(top, bottom, n, true);
+    }
+
+    /// No-history shift: once every affected row is erased, larger counts
+    /// have no additional effect. Rotate row headers once and reuse storage.
+    pub(crate) fn rotate_region(&mut self, top: usize, bottom: usize, n: usize, down: bool) {
+        if top > bottom || bottom >= self.cells.len() {
+            return;
+        }
+        let n = n.min(bottom - top + 1);
+        if n == 0 {
+            return;
+        }
+        let fill = self.erase_cell();
+        let region = &mut self.cells[top..=bottom];
+        let erased = if down {
+            region.rotate_right(n);
+            &mut region[..n]
+        } else {
+            region.rotate_left(n);
+            let len = region.len();
+            &mut region[len - n..]
+        };
+        for row in erased {
+            row.fill(fill.clone());
         }
     }
 
@@ -267,6 +272,13 @@ impl Grid {
             self.bump();
             return;
         }
+        if self.in_alt {
+            self.rotate_region(0, self.rows.saturating_sub(1), n, false);
+            self.bump();
+            return;
+        }
+        // Full-screen main-buffer SU intentionally creates history: do not
+        // clamp it to the viewport height like the no-history operations.
         for _ in 0..n {
             if self.rows == 0 {
                 break;
@@ -291,13 +303,7 @@ impl Grid {
             self.bump();
             return;
         }
-        for _ in 0..n {
-            if self.cells.is_empty() {
-                break;
-            }
-            self.cells.pop();
-            self.cells.insert(0, self.erase_row());
-        }
+        self.rotate_region(0, self.rows.saturating_sub(1), n, true);
         self.bump();
     }
 }

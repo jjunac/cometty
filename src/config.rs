@@ -417,6 +417,22 @@ pub struct SelectionConfig {
 /// Default match-words pattern (also the pre-regex alphanumeric + `_` behavior).
 pub const DEFAULT_WORD_REGEX: &str = "[A-Za-z0-9_]+";
 
+struct CachedWordRegex {
+    pattern: String,
+    compiled: Option<regex::Regex>,
+}
+
+thread_local! {
+    // One entry per calling thread, not an ever-growing cache of edits.
+    // Shared by word selection and the settings validation indicator.
+    static WORD_REGEX: std::cell::RefCell<Option<CachedWordRegex>> = const { std::cell::RefCell::new(None) };
+}
+
+static DEFAULT_COMPILED_WORD_REGEX: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| {
+        regex::Regex::new(DEFAULT_WORD_REGEX).expect("default word regex compiles")
+    });
+
 impl SelectionConfig {
     /// Effective pattern: `word_regex` when non-empty, else the default.
     pub fn word_pattern(&self) -> &str {
@@ -427,13 +443,31 @@ impl SelectionConfig {
         }
     }
 
-    /// Compile the effective pattern, falling back to the default when
-    /// invalid. Never fails on the compiled default.
-    pub fn word_regex_compiled(&self) -> regex::Regex {
-        if let Ok(re) = regex::Regex::new(self.word_pattern()) {
-            return re;
-        }
-        regex::Regex::new(DEFAULT_WORD_REGEX).expect("default word regex compiles")
+    /// Borrow the compiled effective pattern and its validation result.
+    /// Failed in-progress edits are cached too, and use the default matcher.
+    pub fn with_word_regex<T>(&self, use_regex: impl FnOnce(&regex::Regex, bool) -> T) -> T {
+        WORD_REGEX.with(|slot| {
+            let mut cache = slot.borrow_mut();
+            let pattern = self.word_pattern();
+            if cache.as_ref().is_none_or(|entry| entry.pattern != pattern) {
+                *cache = Some(CachedWordRegex {
+                    pattern: pattern.to_owned(),
+                    compiled: regex::Regex::new(pattern).ok(),
+                });
+            }
+            let entry = cache.as_ref().unwrap();
+            use_regex(
+                entry
+                    .compiled
+                    .as_ref()
+                    .unwrap_or(&DEFAULT_COMPILED_WORD_REGEX),
+                entry.compiled.is_some(),
+            )
+        })
+    }
+
+    pub fn word_regex_valid(&self) -> bool {
+        self.with_word_regex(|_, valid| valid)
     }
 }
 

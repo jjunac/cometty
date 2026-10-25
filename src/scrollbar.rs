@@ -76,6 +76,9 @@ pub fn hit_test(x_pts: f32, screen_w_pts: f32, config: &ScrollbarConfig) -> bool
 pub struct ScrollbarUi {
     pub opacity: f32,
     last_active: Instant,
+    last_update: Instant,
+    was_active: bool,
+    repaint_needed: bool,
     drag_grab: Option<f32>,
 }
 
@@ -84,6 +87,9 @@ impl ScrollbarUi {
         Self {
             opacity: 0.0,
             last_active: now,
+            last_update: now,
+            was_active: false,
+            repaint_needed: false,
             drag_grab: None,
         }
     }
@@ -95,6 +101,7 @@ impl ScrollbarUi {
     pub fn begin_drag(&mut self, grab_offset: f32) {
         self.drag_grab = Some(grab_offset);
         self.last_active = Instant::now();
+        self.repaint_needed |= self.opacity != 1.0;
         self.opacity = 1.0;
     }
 
@@ -107,8 +114,9 @@ impl ScrollbarUi {
         self.drag_grab
     }
 
-    /// Advance opacity toward its target. Returns true while animating
-    /// (caller should `request_redraw` / `request_repaint`).
+    /// Advance using wall-clock time. ZERO requests a frame (including the
+    /// final changed opacity, since callers paint before updating); a finite
+    /// delay wakes at the fade deadline, MAX means no repaint is needed.
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
@@ -119,62 +127,64 @@ impl ScrollbarUi {
         is_alt: bool,
         hovered: bool,
         config: &ScrollbarConfig,
-    ) -> bool {
+    ) -> Duration {
+        let previous = self.last_update;
+        self.last_update = now;
+        let repaint_needed = std::mem::take(&mut self.repaint_needed);
         let fade_delay = Duration::from_millis(config.fade_delay_ms);
-        let fade_speed = config.fade_speed;
+        let fade_speed = if config.fade_speed.is_finite() && config.fade_speed > 0.0 {
+            config.fade_speed
+        } else {
+            ScrollbarConfig::default().fade_speed
+        };
         let can_scroll = !is_alt && total > visible;
         if !can_scroll {
             self.drag_grab = None;
+            self.was_active = false;
             if self.opacity != 0.0 {
                 self.opacity = 0.0;
-                return true;
+                return Duration::ZERO;
             }
-            return false;
+            return Duration::MAX;
         }
-        let want_visible = can_scroll
-            && (self.drag_grab.is_some()
-                || hovered
-                || offset > 0
-                || self.opacity > 0.0 && now.duration_since(self.last_active) < fade_delay);
-        // Mark active whenever the user is scrolled up or interacting.
-        if can_scroll && (self.drag_grab.is_some() || hovered || offset > 0) {
+        let active = self.drag_grab.is_some() || hovered || offset > 0;
+        // A stationary hover need not render for minutes. Start the delay
+        // on departure, not at its last rendered frame.
+        if active || self.was_active {
             self.last_active = now;
         }
-        let target = if want_visible
-            && (self.drag_grab.is_some()
-                || hovered
-                || offset > 0
-                || now.duration_since(self.last_active) < fade_delay)
-        {
-            1.0
+        self.was_active = active;
+        let fade_at = self.last_active.checked_add(fade_delay).unwrap_or(now);
+        let before = self.opacity;
+        if active || (self.opacity > 0.0 && now < fade_at) {
+            if active && self.opacity == 0.0 {
+                self.opacity = 0.35;
+            }
+            self.opacity = (self.opacity
+                + fade_speed * now.saturating_duration_since(previous).as_secs_f32())
+            .min(1.0);
         } else {
-            0.0
-        };
-        // Snap when freshly activated so the bar appears immediately.
-        if target > self.opacity && (self.drag_grab.is_some() || hovered || offset > 0) {
-            // Appear fast, fade slow: jump partway then ease.
-            self.opacity = (self.opacity + fade_speed * 0.08).clamp(0.35, 1.0);
-            return true;
+            // Only count elapsed fade time, not time spent asleep waiting
+            // for the deadline. Late frames catch up rather than slow down.
+            let dt = now.saturating_duration_since(previous.max(fade_at));
+            self.opacity = (self.opacity - fade_speed * dt.as_secs_f32()).max(0.0);
         }
-        let dt = 1.0 / 60.0;
-        let step = fade_speed * dt;
-        let next = if (target - self.opacity).abs() <= step {
-            target
-        } else if target > self.opacity {
-            self.opacity + step
+        if repaint_needed || self.opacity != before || (self.opacity > 0.0 && self.opacity < 1.0) {
+            Duration::ZERO
+        } else if !active && self.opacity > 0.0 {
+            // At the exact deadline opacity has not changed yet; begin
+            // the animation now rather than losing its first frame.
+            fade_at.saturating_duration_since(now)
         } else {
-            self.opacity - step
-        };
-        let animating = (next - self.opacity).abs() > f32::EPSILON;
-        self.opacity = next;
-        // Keep fading after reaching bottom until the delay expires.
-        animating || (target > 0.0 && self.opacity > 0.0)
+            Duration::MAX
+        }
     }
 
     #[cfg(test)]
     fn set_opacity_for_test(&mut self, v: f32, at: Instant) {
         self.opacity = v;
         self.last_active = at;
+        self.last_update = at;
     }
 }
 
@@ -236,15 +246,18 @@ mod tests {
         let mut ui = ScrollbarUi::new(t0);
         ui.set_opacity_for_test(1.0, t0);
         // At bottom, not hovered: still visible during delay, then fades.
-        assert!(ui.update(
-            t0 + Duration::from_millis(100),
-            100,
-            40,
-            0,
-            false,
-            false,
-            &cfg
-        ));
+        assert_eq!(
+            ui.update(
+                t0 + Duration::from_millis(100),
+                100,
+                40,
+                0,
+                false,
+                false,
+                &cfg
+            ),
+            Duration::from_millis(cfg.fade_delay_ms - 100)
+        );
         assert!(ui.opacity > 0.0);
         let mut now = t0 + Duration::from_millis(cfg.fade_delay_ms + 100);
         for _ in 0..120 {
@@ -265,6 +278,125 @@ mod tests {
         ui.set_opacity_for_test(1.0, t0);
         ui.update(t0, 100, 40, 10, true, false, &cfg);
         assert_eq!(ui.opacity, 0.0);
+    }
+
+    #[test]
+    fn settled_history_hover_and_drag_do_not_request_frames() {
+        let cfg = cfg();
+        let t0 = Instant::now();
+        for (offset, hover, drag) in [(10, false, false), (0, true, false), (0, false, true)] {
+            let mut ui = ScrollbarUi::new(t0);
+            ui.set_opacity_for_test(1.0, t0);
+            if drag {
+                ui.begin_drag(0.0);
+            }
+            for frame in 0..600 {
+                assert_eq!(
+                    ui.update(
+                        t0 + Duration::from_millis(frame * 16),
+                        100,
+                        40,
+                        offset,
+                        false,
+                        hover,
+                        &cfg
+                    ),
+                    Duration::MAX
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn leaving_settled_hover_schedules_one_fade_deadline() {
+        let cfg = cfg();
+        let t0 = Instant::now();
+        let mut ui = ScrollbarUi::new(t0);
+        ui.set_opacity_for_test(1.0, t0);
+        assert_eq!(ui.update(t0, 100, 40, 0, false, true, &cfg), Duration::MAX);
+        let leave = t0 + Duration::from_secs(60);
+        assert_eq!(
+            ui.update(leave, 100, 40, 0, false, false, &cfg),
+            Duration::from_millis(cfg.fade_delay_ms)
+        );
+        let deadline = leave + Duration::from_millis(cfg.fade_delay_ms);
+        assert_eq!(
+            ui.update(deadline, 100, 40, 0, false, false, &cfg),
+            Duration::ZERO
+        );
+        ui.update(
+            deadline + Duration::from_secs(1),
+            100,
+            40,
+            0,
+            false,
+            false,
+            &cfg,
+        );
+        assert_eq!(ui.opacity, 0.0);
+        assert_eq!(
+            ui.update(
+                deadline + Duration::from_secs(2),
+                100,
+                40,
+                0,
+                false,
+                false,
+                &cfg
+            ),
+            Duration::MAX
+        );
+    }
+
+    #[test]
+    fn drag_activation_requests_only_the_changed_opacity_frame() {
+        let cfg = cfg();
+        let t0 = Instant::now();
+        let mut ui = ScrollbarUi::new(t0);
+        ui.set_opacity_for_test(0.5, t0);
+        ui.begin_drag(0.0);
+        let now = t0 + Duration::from_secs(1);
+        assert_eq!(
+            ui.update(now, 100, 40, 0, false, false, &cfg),
+            Duration::ZERO
+        );
+        assert_eq!(
+            ui.update(now, 100, 40, 0, false, false, &cfg),
+            Duration::MAX
+        );
+    }
+
+    #[test]
+    fn fade_progress_depends_on_elapsed_time_not_frame_count() {
+        let cfg = cfg();
+        let t0 = Instant::now();
+        let start = t0 + Duration::from_millis(cfg.fade_delay_ms);
+        let mut one = ScrollbarUi::new(t0);
+        let mut many = ScrollbarUi::new(t0);
+        one.set_opacity_for_test(1.0, t0);
+        many.set_opacity_for_test(1.0, t0);
+        one.update(
+            start + Duration::from_millis(100),
+            100,
+            40,
+            0,
+            false,
+            false,
+            &cfg,
+        );
+        for i in 1..=10 {
+            many.update(
+                start + Duration::from_millis(i * 10),
+                100,
+                40,
+                0,
+                false,
+                false,
+                &cfg,
+            );
+        }
+        assert!((one.opacity - many.opacity).abs() < 0.0001);
+        assert!((one.opacity - 0.5).abs() < 0.0001);
     }
 
     #[test]

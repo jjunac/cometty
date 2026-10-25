@@ -1,4 +1,5 @@
 use base64::Engine as _;
+use std::borrow::Cow;
 use vte::{Params, Parser};
 
 use crate::grid::{CursorShape, CursorStyle, Grid, MouseMode};
@@ -54,37 +55,64 @@ const HANDLED_OSC: [&[u8]; 6] = [b"0", b"1", b"2", b"7", b"8", b"52"];
 /// base64 blobs and OSC 8 URLs can be kilobytes long.
 const OSC_SUMMARY_CHARS: usize = 120;
 
-/// Split vte's OSC params into `(number, payload)`.
-///
-/// vte splits OSC content on `;`, so `ESC ] 0 ; foo BEL` arrives as
-/// `[b"0", b"foo"]` and a title containing `;` arrives as extra pieces
-/// (`[b"0", b"a", b"b"]` for `a;b`). A single unsplit param (`[b"0;foo"]`)
-/// is handled too for robustness. The payload is `None` when the sequence
-/// carried no `;` at all (`ESC ] 0 BEL`), which callers treat as absent.
-fn osc_parts(params: &[&[u8]]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
-    let (num, payload): (&[u8], Option<Vec<u8>>) = match params {
-        [] => return None,
-        [single] => {
-            let single: &[u8] = single;
-            match single.iter().position(|&b| b == b';') {
-                Some(i) => (&single[..i], Some(single[i + 1..].to_vec())),
-                None => (single, None),
-            }
+/// Borrow the OSC number and split payload. Only the selected handler joins
+/// fragments; ignored sequences never materialize their payload. Preserve
+/// the distinction between a bare number and an explicitly empty payload.
+struct Osc<'a> {
+    number: &'a [u8],
+    payload: Option<OscPayload<'a>>,
+}
+
+#[derive(Clone, Copy)]
+struct OscPayload<'a> {
+    first: &'a [u8],
+    rest: &'a [&'a [u8]],
+}
+
+impl<'a> Osc<'a> {
+    fn parse(params: &'a [&'a [u8]]) -> Option<Self> {
+        let (number, payload) = match params {
+            [] => return None,
+            [single] => match single.iter().position(|&b| b == b';') {
+                Some(i) => (
+                    &single[..i],
+                    Some(OscPayload {
+                        first: &single[i + 1..],
+                        rest: &[],
+                    }),
+                ),
+                None => (*single, None),
+            },
+            [number, first, rest @ ..] => (*number, Some(OscPayload { first, rest })),
+        };
+        Some(Self { number, payload })
+    }
+}
+
+impl<'a> OscPayload<'a> {
+    fn bytes(&self) -> impl Iterator<Item = u8> + '_ {
+        self.first.iter().copied().chain(
+            self.rest
+                .iter()
+                .flat_map(|piece| std::iter::once(b';').chain(piece.iter().copied())),
+        )
+    }
+
+    fn len(&self) -> usize {
+        self.rest
+            .iter()
+            .fold(self.first.len(), |len, piece| len + 1 + piece.len())
+    }
+
+    fn joined(self) -> Cow<'a, [u8]> {
+        if self.rest.is_empty() {
+            Cow::Borrowed(self.first)
+        } else {
+            let mut bytes = Vec::with_capacity(self.len());
+            bytes.extend(self.bytes());
+            Cow::Owned(bytes)
         }
-        [first, rest @ ..] => {
-            let first: &[u8] = first;
-            // Rejoin the pieces the parser split on `;`.
-            let mut bytes = Vec::new();
-            for (i, piece) in rest.iter().enumerate() {
-                if i > 0 {
-                    bytes.push(b';');
-                }
-                bytes.extend_from_slice(piece);
-            }
-            (first, Some(bytes))
-        }
-    };
-    Some((num.to_vec(), payload))
+    }
 }
 
 /// Extract an `OSC 0/1/2` window-title update from vte's split params.
@@ -92,19 +120,13 @@ fn osc_parts(params: &[&[u8]]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
 /// Embedded control characters (newline, BEL, ESC, …) are stripped: titles
 /// flow into the tab bar and the OS window title, where controls could break
 /// layout or smuggle sequences.
-fn osc_title(params: &[&[u8]], max_chars: usize) -> Option<String> {
-    let (num, payload) = osc_parts(params)?;
-    if !TITLE_OSC.contains(&num.as_slice()) {
-        return None;
-    }
-    // A bare `ESC ] 0 BEL` carries no payload: ignore it instead of
-    // clearing the title.
-    let payload = payload?;
+fn title_payload(payload: OscPayload<'_>, max_chars: usize) -> String {
+    let payload = payload.joined();
     let raw = String::from_utf8_lossy(&payload);
     let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
     let s = cleaned.trim().to_string();
     let max_chars = max_chars.max(1);
-    Some(s.chars().take(max_chars).collect())
+    s.chars().take(max_chars).collect()
 }
 
 /// Extract an `OSC 7` working-directory update (`file://host/path`).
@@ -112,12 +134,8 @@ fn osc_title(params: &[&[u8]], max_chars: usize) -> Option<String> {
 /// The authority is ignored (empty, `localhost`, or a remote host name —
 /// cometty only ever shows a local shell's directory). Non-`file` schemes
 /// and relative paths are rejected.
-fn osc_cwd(params: &[&[u8]], max_chars: usize) -> Option<String> {
-    let (num, payload) = osc_parts(params)?;
-    if num.as_slice() != b"7" {
-        return None;
-    }
-    let payload = payload?;
+fn cwd_payload(payload: OscPayload<'_>, max_chars: usize) -> Option<String> {
+    let payload = payload.joined();
     let uri = String::from_utf8_lossy(&payload);
     let rest = uri.strip_prefix("file://")?;
     let path = &rest[rest.find('/')?..];
@@ -157,12 +175,8 @@ fn percent_decode(s: &str) -> String {
 /// or restarts one; `None` means the sequence is not an OSC 8 (or carries no
 /// `;` separator, which is malformed and ignored). The `id=` params before
 /// the separator are not interpreted: the URI alone identifies a link.
-fn osc_hyperlink(params: &[&[u8]]) -> Option<Option<String>> {
-    let (num, payload) = osc_parts(params)?;
-    if num.as_slice() != b"8" {
-        return None;
-    }
-    let payload = payload?;
+fn hyperlink_payload(payload: OscPayload<'_>) -> Option<Option<String>> {
+    let payload = payload.joined();
     let sep = payload.iter().position(|&b| b == b';')?;
     let uri = &payload[sep + 1..];
     if uri.is_empty() {
@@ -178,12 +192,8 @@ fn osc_hyperlink(params: &[&[u8]]) -> Option<Option<String>> {
 /// ignored. `?` is a read request; anything else must be base64 text.
 /// Payloads over `max_bytes` decoded, invalid base64, and non-`?` binary
 /// data are dropped with a debug log.
-fn osc_clipboard(params: &[&[u8]], max_bytes: usize) -> Option<ClipboardOp> {
-    let (num, payload) = osc_parts(params)?;
-    if num.as_slice() != b"52" {
-        return None;
-    }
-    let payload = payload?;
+fn clipboard_payload(payload: OscPayload<'_>, max_bytes: usize) -> Option<ClipboardOp> {
+    let payload = payload.joined();
     let sep = payload.iter().position(|&b| b == b';')?;
     let target = &payload[..sep];
     let known_target = target.is_empty()
@@ -203,22 +213,23 @@ fn osc_clipboard(params: &[&[u8]], max_bytes: usize) -> Option<ClipboardOp> {
         return Some(ClipboardOp::Query);
     }
     // tmux wraps long base64 payloads with newlines; whitespace is not data.
+    let encoded_len = data.iter().filter(|b| !b.is_ascii_whitespace()).count();
+    if encoded_len == 0 {
+        return Some(ClipboardOp::Set(String::new()));
+    }
+    // Bound the decode: 4 base64 chars per 3 bytes (plus padding).
+    if encoded_len > max_bytes.div_ceil(3) * 4 {
+        log::warn!(
+            "OSC 52 payload ignored: {} bytes encoded (limit {max_bytes})",
+            encoded_len
+        );
+        return None;
+    }
     let filtered: Vec<u8> = data
         .iter()
         .copied()
         .filter(|b| !b.is_ascii_whitespace())
         .collect();
-    if filtered.is_empty() {
-        return Some(ClipboardOp::Set(String::new()));
-    }
-    // Bound the decode: 4 base64 chars per 3 bytes (plus padding).
-    if filtered.len() > max_bytes.div_ceil(3) * 4 {
-        log::warn!(
-            "OSC 52 payload ignored: {} bytes encoded (limit {max_bytes})",
-            filtered.len()
-        );
-        return None;
-    }
     let engine = base64::engine::general_purpose::STANDARD;
     let decoded = match engine
         .decode(&filtered)
@@ -274,30 +285,38 @@ fn osc_name(num: &[u8]) -> Option<&'static str> {
 /// `2 (title): nvim | ~/dev` or `133 (prompt marks, unhandled): A`.
 /// Long payloads are truncated and control bytes escaped so a record stays
 /// a single, readable line.
-fn osc_summary(params: &[&[u8]]) -> String {
-    let Some((num, payload)) = osc_parts(params) else {
-        return "no parameters".to_string();
-    };
-    let mut summary = String::from_utf8_lossy(&num).into_owned();
+fn decoded_osc_summary(osc: &Osc<'_>) -> String {
+    let num = osc.number;
+    let mut summary = String::new();
+    // Even a malformed, megabyte-long OSC number must have a bounded log.
+    append_osc_preview(&mut summary, num.iter().copied(), num.len());
     summary.push_str(" (");
-    summary.push_str(osc_name(&num).unwrap_or("unknown"));
-    if !HANDLED_OSC.contains(&num.as_slice()) {
+    summary.push_str(osc_name(num).unwrap_or("unknown"));
+    if !HANDLED_OSC.contains(&num) {
         summary.push_str(", unhandled");
     }
     summary.push(')');
-    let Some(payload) = payload else {
+    let Some(payload) = osc.payload else {
         return summary;
     };
     summary.push_str(": ");
     // Clipboard payloads are private: never echo their contents.
-    if num.as_slice() == b"52" {
+    if num == b"52" {
         summary.push_str(&format!("<redacted, {} bytes>", payload.len()));
         return summary;
     }
-    let text = String::from_utf8_lossy(&payload);
+    append_osc_preview(&mut summary, payload.bytes(), payload.len());
+    summary
+}
+
+fn append_osc_preview(summary: &mut String, bytes: impl Iterator<Item = u8>, len: usize) {
+    // Four bytes per scalar, plus one scalar to detect truncation. UTF-8
+    // split across vte fragments remains intact in this bounded prefix.
+    let prefix: Vec<u8> = bytes.take((OSC_SUMMARY_CHARS + 1) * 4).collect();
+    let text = String::from_utf8_lossy(&prefix);
     for (shown, ch) in text.chars().enumerate() {
         if shown == OSC_SUMMARY_CHARS {
-            summary.push_str(&format!("… ({} bytes)", payload.len()));
+            summary.push_str(&format!("… ({len} bytes)"));
             break;
         }
         // Keep one line: control bytes (BEL, ESC, CR) become escapes.
@@ -307,7 +326,6 @@ fn osc_summary(params: &[&[u8]]) -> String {
             summary.push(ch);
         }
     }
-    summary
 }
 
 impl Terminal {
@@ -633,8 +651,7 @@ impl vte::Perform for Terminal {
         }
         // Combining / ZWJ / flag continuations attach to the previous
         // cluster without wrapping or moving the cursor.
-        if self.grid.is_append_continuation(c) {
-            self.grid.append_to_prev(c);
+        if self.grid.append_to_prev(c) {
             return;
         }
         if c != '\0' && !crate::grid::unicode::is_joining_modifier(c) {
@@ -646,7 +663,7 @@ impl vte::Perform for Terminal {
             self.grid.handle_wrap_if_needed();
         }
         // After newline, cursor.x is 0.
-        self.grid.put_char(c);
+        self.grid.put_fresh_char(c);
         if self.grid.auto_wrap() && self.grid.cursor().x >= self.grid.cols() {
             self.pending_wrap = true;
             // Clamp visual cursor to last column until wrap resolves.
@@ -906,28 +923,47 @@ impl vte::Perform for Terminal {
     fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        let Some(osc) = Osc::parse(params) else {
+            log::debug!(
+                "OSC no parameters [{}]",
+                if bell_terminated { "BEL" } else { "ST" }
+            );
+            return;
+        };
         // Log every OSC at debug, handled or not: shells emit plenty that
         // cometty ignores today (hyperlinks, prompt marks, clipboard, …)
         // and the panel should answer "did the app even see it?".
         log::debug!(
             "OSC {} [{}]",
-            osc_summary(params),
+            decoded_osc_summary(&osc),
             if bell_terminated { "BEL" } else { "ST" }
         );
         // Tracked OSC numbers: titles (0/1/2) feed tab labels, cwd (7) the
         // `$cwd` fallback, 8 the per-cell hyperlink state, 52 clipboard.
-        if let Some(title) = osc_title(params, self.max_title_chars) {
-            self.title = title;
-        }
-        if let Some(cwd) = osc_cwd(params, self.max_title_chars) {
-            self.cwd = Some(cwd);
-            self.cwd_version += 1;
-        }
-        if let Some(link) = osc_hyperlink(params) {
-            self.grid.set_hyperlink(link.as_deref());
-        }
-        if let Some(op) = osc_clipboard(params, MAX_CLIPBOARD_BYTES) {
-            self.pending_clipboard.push(op);
+        let Some(payload) = osc.payload else {
+            return;
+        };
+        match osc.number {
+            num if TITLE_OSC.contains(&num) => {
+                self.title = title_payload(payload, self.max_title_chars)
+            }
+            b"7" => {
+                if let Some(cwd) = cwd_payload(payload, self.max_title_chars) {
+                    self.cwd = Some(cwd);
+                    self.cwd_version += 1;
+                }
+            }
+            b"8" => {
+                if let Some(link) = hyperlink_payload(payload) {
+                    self.grid.set_hyperlink(link.as_deref());
+                }
+            }
+            b"52" => {
+                if let Some(op) = clipboard_payload(payload, MAX_CLIPBOARD_BYTES) {
+                    self.pending_clipboard.push(op);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -937,12 +973,185 @@ mod tests {
     use super::*;
     use crate::theme::Theme;
 
+    // Keep the parser-shape tests readable while production routes once.
+    fn osc_title(params: &[&[u8]], max: usize) -> Option<String> {
+        let osc = Osc::parse(params)?;
+        TITLE_OSC.contains(&osc.number).then_some(())?;
+        Some(title_payload(osc.payload?, max))
+    }
+    fn osc_cwd(params: &[&[u8]], max: usize) -> Option<String> {
+        let osc = Osc::parse(params)?;
+        (osc.number == b"7").then_some(())?;
+        cwd_payload(osc.payload?, max)
+    }
+    fn osc_hyperlink(params: &[&[u8]]) -> Option<Option<String>> {
+        let osc = Osc::parse(params)?;
+        (osc.number == b"8").then_some(())?;
+        hyperlink_payload(osc.payload?)
+    }
+    fn osc_clipboard(params: &[&[u8]], max: usize) -> Option<ClipboardOp> {
+        let osc = Osc::parse(params)?;
+        (osc.number == b"52").then_some(())?;
+        clipboard_payload(osc.payload?, max)
+    }
+    fn osc_summary(params: &[&[u8]]) -> String {
+        Osc::parse(params).map_or_else(|| "no parameters".into(), |osc| decoded_osc_summary(&osc))
+    }
+
+    #[test]
+    fn ignored_osc_dispatch_does_not_copy_payloads() {
+        let long = vec![b'x'; 1 << 20];
+        let params: [&[u8]; 2] = [b"999", &long];
+        let osc = Osc::parse(&params).unwrap();
+        let (calls, _, bytes) = crate::perf_bench::allocation_counts(|| {
+            let summary = decoded_osc_summary(&osc);
+            assert!(summary.len() < 250);
+        });
+        assert!(
+            calls < 20 && bytes < 4096,
+            "summary must not copy a megabyte"
+        );
+    }
+
+    #[test]
+    fn decoded_osc_preserves_fragment_boundaries_and_bounded_private_summaries() {
+        assert_eq!(
+            osc_clipboard(&[b"52", b"c", b"aG k=\n"], 10),
+            Some(ClipboardOp::Set("hi".into()))
+        );
+        assert_eq!(osc_clipboard(&[b"52;c;?"], 10), Some(ClipboardOp::Query));
+        assert_eq!(osc_clipboard(&[b"52", b"unknown", b"aGk="], 10), None);
+        assert_eq!(osc_clipboard(&[b"52", b"c", b"aGk="], 1), None);
+        assert_eq!(osc_clipboard(&[b"52"], 10), None);
+        assert_eq!(
+            osc_hyperlink(&[b"8", b"id=1", b"https://host/a", b"b"]),
+            Some(Some("https://host/a;b".into()))
+        );
+        let payload = "中".repeat(200);
+        let summary = osc_summary(&[b"999", payload.as_bytes()]);
+        assert!(summary.ends_with("… (600 bytes)"));
+        assert!(!summary.contains('\u{fffd}'));
+        let number = vec![b'9'; 1 << 20];
+        assert!(osc_summary(&[&number]).len() < 200);
+        assert!(!osc_summary(&[b"52", b"c", b"secret"]).contains("secret"));
+    }
+
     fn feed_str(t: &mut Terminal, s: &str) {
         t.feed(s.as_bytes());
     }
 
     fn test_terminal(cols: usize, rows: usize) -> Terminal {
         Terminal::new(cols, rows, Theme::default())
+    }
+
+    /// Reference dispatcher retains the old append-aware grid write after
+    /// Terminal's own continuation check. Compare against the new single
+    /// decision/fresh-write path, including wrap-driven cursor changes.
+    struct Reference<'a>(&'a mut Terminal);
+
+    impl vte::Perform for Reference<'_> {
+        fn print(&mut self, c: char) {
+            let t = &mut self.0;
+            if !t.grid.auto_wrap() {
+                t.pending_wrap = false;
+            }
+            if t.pending_wrap {
+                let cur = t.grid.cursor();
+                if t.grid.append_to_cell(cur.x, cur.y, c) {
+                    return;
+                }
+                t.grid.newline();
+                t.pending_wrap = false;
+            }
+            if t.grid.append_to_prev(c) {
+                return;
+            }
+            if c != '\0' && !crate::grid::unicode::is_joining_modifier(c) {
+                t.last_graphic = Some(c);
+            }
+            t.grid.handle_wrap_if_needed();
+            t.grid.put_char(c);
+            if t.grid.auto_wrap() && t.grid.cursor().x >= t.grid.cols() {
+                t.pending_wrap = true;
+                let y = t.grid.cursor().y;
+                t.grid.set_cursor(t.grid.cols().saturating_sub(1), y);
+            } else if !t.grid.auto_wrap() {
+                t.pending_wrap = false;
+            }
+        }
+        fn execute(&mut self, byte: u8) {
+            self.0.execute(byte);
+        }
+        fn csi_dispatch(
+            &mut self,
+            params: &Params,
+            intermediates: &[u8],
+            ignore: bool,
+            action: char,
+        ) {
+            self.0.csi_dispatch(params, intermediates, ignore, action);
+        }
+        fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
+            self.0.esc_dispatch(intermediates, ignore, byte);
+        }
+        fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+            self.0.osc_dispatch(params, bell_terminated);
+        }
+    }
+
+    fn assert_same_terminal(actual: &Terminal, expected: &Terminal) {
+        assert_eq!(actual.grid.cursor(), expected.grid.cursor());
+        assert_eq!(actual.grid.pen(), expected.grid.pen());
+        assert_eq!(actual.grid.total_lines(), expected.grid.total_lines());
+        for line in 0..expected.grid.total_lines() {
+            assert_eq!(
+                actual.grid.global_line(line),
+                expected.grid.global_line(line)
+            );
+        }
+        assert_eq!(actual.grid.scroll_region(), expected.grid.scroll_region());
+        assert_eq!(actual.grid.cursor_style(), expected.grid.cursor_style());
+        assert_eq!(actual.grid.version, expected.grid.version);
+        assert_eq!(actual.grid.content_version, expected.grid.content_version);
+        assert_eq!(actual.pending_wrap, expected.pending_wrap);
+        assert_eq!(actual.last_graphic, expected.last_graphic);
+        assert_eq!(actual.pending_response, expected.pending_response);
+        assert_eq!(actual.pending_clipboard, expected.pending_clipboard);
+        assert_eq!(actual.title, expected.title);
+        assert_eq!(actual.cwd, expected.cwd);
+    }
+
+    #[test]
+    fn mixed_unicode_and_controls_match_reference_at_every_byte_split() {
+        let corpora = [
+            "abcdefghijk\r\nxyz\t!\x08?",
+            "abce\u{301}\u{301}X 中\u{301}Y\r\n \u{301}Z",
+            "\u{600}ab\u{600}cde\r\n\u{600}xyz",
+            "👨\u{200d}👩\u{200d}👧 🇺🇸🇨🇦 #\u{fe0f}\u{20e3}👍🏽xyz",
+            "abcd\x1b[2D\x1b[4h中\u{301}Z\x1b[4l\x1b[?7labcdef\x1b[?7hX",
+            "top\r\nmain\x1b[?1049h中abc\u{301}\x1b[2Jx\x1b[?1049lZ\x1b[2;3r\x1b[3;1Hx\r\ny",
+            "\x1b]2;a;b\x07\x1b]7;file:///tmp/a%20b\x1b\\\x1b]8;;https://a/b;c\x07中e\u{301}\x1b]8;;\x07X\x1b]52;c;aGk=\x1b\\\x1b[6n",
+        ];
+        for cols in [1, 2, 5, 9] {
+            for corpus in corpora {
+                let bytes = corpus.as_bytes();
+                let mut reference = test_terminal(cols, 3);
+                let mut parser = std::mem::replace(&mut reference.parser, Parser::new());
+                parser.advance(&mut Reference(&mut reference), bytes);
+                reference.parser = parser;
+                for split in 0..=bytes.len() {
+                    let mut actual = test_terminal(cols, 3);
+                    actual.feed(&bytes[..split]);
+                    actual.feed(&bytes[split..]);
+                    assert_same_terminal(&actual, &reference);
+                }
+                let mut bytewise = test_terminal(cols, 3);
+                for byte in bytes {
+                    bytewise.feed(std::slice::from_ref(byte));
+                }
+                assert_same_terminal(&bytewise, &reference);
+            }
+        }
     }
 
     #[test]

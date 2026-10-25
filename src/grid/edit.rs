@@ -1,6 +1,6 @@
 //! Content mutation: cursor motion, write, erase, insert/delete.
 
-use crate::grid::unicode::{char_width, continues_cluster, is_joining_modifier};
+use crate::grid::unicode::{char_width, continues_cell, is_joining_modifier};
 
 use super::Grid;
 
@@ -46,7 +46,6 @@ impl Grid {
         // (A real base such as `e` or `👨` always appends, including the
         // ZWJ-continuation case where `c` itself is wide.)
         let lead = &self.cells[py][lx];
-        let prev_text = lead.cluster();
         let is_blank_filler = lead.ch == ' ' && lead.extra.is_none();
         if joining {
             if is_blank_filler {
@@ -63,17 +62,10 @@ impl Grid {
         if is_blank_filler {
             return None;
         }
-        if continues_cluster(&prev_text, c) {
+        if continues_cell(lead, c) {
             return Some((lx, py));
         }
         None
-    }
-
-    /// True when `c` would append to the previous cluster instead of
-    /// starting a new cell. `Terminal` checks this before pending-wrap
-    /// handling so combining marks never trigger a wrap.
-    pub fn is_append_continuation(&self, c: char) -> bool {
-        self.append_target(c).is_some()
     }
 
     /// Append `c` to the cluster at `(x, y)` (resolving a continuation to
@@ -97,9 +89,7 @@ impl Grid {
         if lead.width != 1 && lead.width != 2 {
             return false;
         }
-        let prev_text = lead.cluster();
-        let is_blank = lead.ch == ' ' && lead.extra.is_none();
-        if !is_joining_modifier(c) && (is_blank || !continues_cluster(&prev_text, c)) {
+        if !continues_cell(lead, c) {
             return false;
         }
         // Joining modifiers attach even to blanks (lone mark fallback).
@@ -168,6 +158,9 @@ impl Grid {
         }
     }
 
+    // Append-aware entry point for tests/headless clients. Terminal already
+    // resolves continuation once and uses `put_fresh_char` below.
+    #[allow(dead_code)]
     pub fn put_char(&mut self, ch: char) {
         if ch == '\0' {
             return;
@@ -175,6 +168,15 @@ impl Grid {
         // Combining / ZWJ / flag continuations attach to the previous
         // cluster without moving the cursor.
         if self.append_to_prev(ch) {
+            return;
+        }
+        self.put_fresh_char(ch);
+    }
+
+    /// Write after the caller has already ruled out a cluster append.
+    /// Keep `put_char` as the append-aware entry point for direct grid users.
+    pub(crate) fn put_fresh_char(&mut self, ch: char) {
+        if ch == '\0' {
             return;
         }
         let mut w = char_width(ch).clamp(1, 2);
@@ -490,18 +492,7 @@ impl Grid {
             self.bump();
             return;
         }
-        for _ in 0..n {
-            if y > bottom || y >= self.cells.len() {
-                break;
-            }
-            self.cells.insert(y, self.erase_row());
-            // Drop the overflow inside the region, not at screen bottom.
-            if bottom + 1 < self.cells.len() {
-                self.cells.remove(bottom + 1);
-            } else {
-                self.cells.pop();
-            }
-        }
+        self.rotate_region(y, bottom, n, true);
         self.bump();
     }
 
@@ -520,18 +511,7 @@ impl Grid {
             self.bump();
             return;
         }
-        for _ in 0..n {
-            if y > bottom || y >= self.cells.len() {
-                break;
-            }
-            self.cells.remove(y);
-            let fill = self.erase_row();
-            if bottom <= self.cells.len() {
-                self.cells.insert(bottom, fill);
-            } else {
-                self.cells.push(fill);
-            }
-        }
+        self.rotate_region(y, bottom, n, false);
         self.bump();
     }
 

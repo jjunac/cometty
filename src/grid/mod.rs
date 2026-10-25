@@ -451,10 +451,12 @@ mod tests {
     #[test]
     fn apply_terminal_config_repairs_dims() {
         let mut g = Grid::new(4, 2, test_theme());
-        let mut t = crate::config::TerminalConfig::default();
-        t.min_dim = 9999;
-        t.max_dim = 10;
-        t.tab_stop = 0;
+        let t = crate::config::TerminalConfig {
+            min_dim: 9999,
+            max_dim: 10,
+            tab_stop: 0,
+            ..Default::default()
+        };
         g.apply_terminal_config(&t);
         g.resize(100_000, 100_000);
         assert!(g.cols() <= 9999);
@@ -938,6 +940,69 @@ mod tests {
         assert_eq!(g.cell(0, 0).unwrap().ch, 'a');
         g.delete_lines(1);
         assert_eq!(g.cell(0, 0).unwrap().ch, 'a');
+    }
+
+    #[test]
+    fn bulk_bounded_row_operations_match_repeated_steps() {
+        let operations: [fn(&mut Grid, usize); 5] = [
+            Grid::insert_lines,
+            Grid::delete_lines,
+            Grid::scroll_region_up,
+            Grid::scroll_region_down,
+            Grid::scroll_down,
+        ];
+        for operation in operations {
+            for partial in [false, true] {
+                for y in 0..5 {
+                    for n in [0, 1, 2, 4, 5, 6, 65535, usize::MAX] {
+                        let make = || {
+                            let mut g = Grid::new(5, 5, test_theme());
+                            for row in 0..5 {
+                                g.set_cursor(0, row);
+                                g.put_char(char::from(b'a' + row as u8));
+                                g.put_char('中');
+                                g.put_char('\u{301}');
+                            }
+                            if partial {
+                                g.set_scroll_region(1, 3);
+                            }
+                            g.set_cursor(0, y);
+                            g.sgr(&[44]);
+                            g
+                        };
+                        let mut bulk = make();
+                        let mut reference = make();
+                        let pointers: Vec<_> = bulk.cells.iter().map(|r| r.as_ptr()).collect();
+                        operation(&mut bulk, n);
+                        for _ in 0..n.min(5) {
+                            operation(&mut reference, 1);
+                        }
+                        assert_eq!(bulk.cells, reference.cells, "partial={partial} y={y} n={n}");
+                        assert_eq!(bulk.cursor, reference.cursor);
+                        assert_eq!(bulk.scrollback, reference.scrollback);
+                        assert!(
+                            bulk.cells.iter().all(|r| pointers.contains(&r.as_ptr())),
+                            "reuse row allocations"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn full_screen_up_preserves_history_beyond_viewport_height() {
+        let mut g = Grid::new(2, 2, test_theme());
+        g.put_char('a');
+        g.newline();
+        g.put_char('b');
+        g.scroll_up(7);
+        assert_eq!(g.scrollback_len(), 7);
+        assert_eq!(g.global_line(0).unwrap()[0].ch, 'a');
+        assert_eq!(g.global_line(1).unwrap()[0].ch, 'b');
+        g.enter_alt(true);
+        g.scroll_up(usize::MAX);
+        assert_eq!(g.scrollback_len(), 7, "alt scrolling never adds history");
     }
 
     #[test]

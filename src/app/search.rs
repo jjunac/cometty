@@ -6,6 +6,7 @@
 
 use winit::keyboard::{Key, ModifiersState};
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::App;
@@ -18,6 +19,19 @@ use crate::search::{self, Match, SearchView};
 /// per burst is `O(scrollback)` per frame; query edits still re-pick
 /// immediately.
 pub(crate) const RESCAN_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// Small searches may retain their allocation on close; exceptionally dense
+/// queries must not pin tens of MiB for the rest of a tab's lifetime.
+const RETAINED_MATCH_BYTES: usize = 1 << 20;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ProjectionKey {
+    generation: u64,
+    current: Option<usize>,
+    base: usize,
+    rows: usize,
+    cols: usize,
+}
 
 pub(crate) fn should_skip_rescan(
     needs_pick: bool,
@@ -35,8 +49,8 @@ pub(crate) fn should_skip_rescan(
 pub struct SearchPanel {
     pub open: bool,
     pub query: String,
-    pub matches: Vec<Match>,
-    pub current: Option<usize>,
+    matches: Vec<Match>,
+    current: Option<usize>,
     /// Grid content version the matches were computed from
     /// (`u64::MAX` = stale). View-only scrolling does not bump it.
     searched_version: u64,
@@ -46,6 +60,8 @@ pub struct SearchPanel {
     needs_pick: bool,
     /// Last full scan time, for [`RESCAN_DEBOUNCE`] throttling.
     searched_at: Option<Instant>,
+    matches_generation: u64,
+    projection: Option<(ProjectionKey, Arc<SearchView>)>,
 }
 
 impl Default for SearchPanel {
@@ -59,6 +75,8 @@ impl Default for SearchPanel {
             focus_requested: false,
             needs_pick: false,
             searched_at: None,
+            matches_generation: 0,
+            projection: None,
         }
     }
 }
@@ -81,6 +99,10 @@ impl SearchPanel {
     pub fn close(&mut self) {
         self.open = false;
         self.matches.clear();
+        if self.matches.capacity() > RETAINED_MATCH_BYTES / size_of::<Match>() {
+            self.matches = Vec::new();
+        }
+        self.projection = None;
         self.current = None;
         self.needs_pick = false;
         self.searched_at = None;
@@ -90,6 +112,7 @@ impl SearchPanel {
     pub fn invalidate(&mut self) {
         self.searched_version = u64::MAX;
         self.searched_at = None;
+        self.projection = None;
     }
 
     /// Query was edited in the bar: re-match and re-anchor `current`.
@@ -117,16 +140,22 @@ impl SearchPanel {
         ) {
             return false;
         }
-        self.matches = search::find_matches(grid, &self.query);
+        {
+            let _timing = crate::perf::measure(crate::perf::Metric::Search);
+            self.matches = search::find_matches(grid, &self.query);
+        }
+        self.matches_generation = self.matches_generation.wrapping_add(1);
+        self.projection = None;
         let picked = if self.matches.is_empty() {
             self.current = None;
             self.needs_pick = false;
             false
         } else if self.needs_pick || self.current.is_none() {
+            let reveal = self.needs_pick;
             self.needs_pick = false;
             self.current =
                 search::pick_initial(&self.matches, grid.scrollback_len(), grid.scroll_offset());
-            true
+            reveal
         } else {
             // Live output shifts the list; keep the index, stay in range.
             self.current = self.current.map(|i| i.min(self.matches.len() - 1));
@@ -157,18 +186,53 @@ impl SearchPanel {
         (self.current.map(|i| i + 1).unwrap_or(0), self.matches.len())
     }
 
-    /// Highlight for the current frame, if any.
-    pub fn view(&self, grid: &Grid) -> Option<SearchView> {
+    /// Explicit trailing refresh deadline: stopping cursor blinks must not
+    /// strand a final throttled scan until some unrelated input arrives.
+    pub(crate) fn rescan_at(&self, grid: &Grid, now: Instant) -> Option<Instant> {
+        if !self.open || self.searched_version == grid.content_version {
+            return None;
+        }
+        if self.needs_pick || self.query.is_empty() {
+            return Some(now);
+        }
+        Some(
+            self.searched_at
+                .and_then(|at| at.checked_add(RESCAN_DEBOUNCE))
+                .unwrap_or(now),
+        )
+    }
+
+    /// Cheap owned handle lets the renderer borrow this projection while
+    /// the overlay mutates the same tab's find-bar state. No per-frame copy.
+    pub fn view(&mut self, grid: &Grid) -> Option<Arc<SearchView>> {
         if !self.open || self.matches.is_empty() {
             return None;
         }
-        Some(SearchView::build(
-            &self.matches,
-            self.current,
-            grid.scrollback_len(),
-            grid.scroll_offset(),
-            grid.rows(),
-        ))
+        let key = ProjectionKey {
+            generation: self.matches_generation,
+            current: self.current,
+            base: grid.scrollback_len().saturating_sub(grid.scroll_offset()),
+            rows: grid.rows(),
+            cols: grid.cols(),
+        };
+        if self
+            .projection
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != key)
+        {
+            let _timing = crate::perf::measure(crate::perf::Metric::Projection);
+            self.projection = Some((
+                key,
+                Arc::new(SearchView::build(
+                    &self.matches,
+                    self.current,
+                    grid.scrollback_len(),
+                    grid.scroll_offset(),
+                    grid.rows(),
+                )),
+            ));
+        }
+        self.projection.as_ref().map(|(_, view)| Arc::clone(view))
     }
 }
 
@@ -262,8 +326,8 @@ impl App {
     }
 
     /// The active tab's highlight snapshot for the renderer.
-    pub(crate) fn search_view(&self) -> Option<SearchView> {
-        let tab = self.active_tab()?;
+    pub(crate) fn search_view(&mut self) -> Option<Arc<SearchView>> {
+        let tab = self.active_tab_mut()?;
         tab.search.view(tab.terminal.grid())
     }
 
@@ -427,5 +491,105 @@ mod tests {
         // Outside the window it rescans.
         let old = now - RESCAN_DEBOUNCE - std::time::Duration::from_millis(1);
         assert!(!should_skip_rescan(false, false, Some(old), now));
+    }
+
+    #[test]
+    fn projection_cache_tracks_results_current_viewport_and_dimensions() {
+        let mut g = Grid::new(5, 2, Theme::default());
+        for _ in 0..5 {
+            g.put_char('a');
+            g.newline();
+        }
+        let mut panel = SearchPanel::default();
+        panel.focus_or_open();
+        panel.query = "a".into();
+        panel.query_changed();
+        panel.refresh(&g);
+        let first = panel.view(&g).unwrap();
+        assert!(Arc::ptr_eq(&first, &panel.view(&g).unwrap()));
+        assert_eq!(
+            crate::perf_bench::allocation_counts(|| {
+                panel.view(&g);
+            }),
+            (0, 0, 0)
+        );
+        panel.step(true);
+        let stepped = panel.view(&g).unwrap();
+        assert!(!Arc::ptr_eq(&first, &stepped));
+        g.scroll_by(1);
+        let scrolled = panel.view(&g).unwrap();
+        assert!(!Arc::ptr_eq(&stepped, &scrolled));
+        g.resize(6, 2);
+        let resized = panel.view(&g).unwrap();
+        assert!(!Arc::ptr_eq(&scrolled, &resized));
+        panel.searched_at = None;
+        panel.refresh(&g);
+        assert!(!Arc::ptr_eq(&resized, &panel.view(&g).unwrap()));
+        panel.close();
+        assert!(panel.projection.is_none());
+        assert!(panel.view(&g).is_none());
+    }
+
+    #[test]
+    fn dense_query_memory_is_visible_only_and_large_capacity_is_released_on_close() {
+        let g = Grid::new(200, 60, Theme::default());
+        let matches = (0..10_059)
+            .flat_map(|line| {
+                (0..199).map(move |col| Match {
+                    line,
+                    start: col,
+                    end: col,
+                })
+            })
+            .collect();
+        let mut panel = SearchPanel {
+            open: true,
+            matches,
+            ..Default::default()
+        };
+        assert_eq!(panel.matches.len(), 2_001_741);
+        assert!(panel.matches.capacity() * size_of::<Match>() >= 48_000_000);
+        let view = panel.view(&g).unwrap();
+        assert_eq!(view.rows.iter().map(Vec::len).sum::<usize>(), 60 * 199);
+        assert!(
+            view.rows
+                .iter()
+                .map(|r| r.capacity() * size_of::<(usize, usize)>())
+                .sum::<usize>()
+                < 256 * 1024
+        );
+        panel.close();
+        assert_eq!(panel.matches.capacity(), 0);
+        assert!(panel.projection.is_none());
+    }
+
+    #[test]
+    fn stale_search_has_its_own_deadline_without_cursor_blinks() {
+        let mut g = Grid::new(10, 2, Theme::default());
+        let mut panel = SearchPanel::default();
+        panel.focus_or_open();
+        panel.query = "a".into();
+        panel.refresh(&g);
+        let at = panel.searched_at.unwrap();
+        assert!(panel.rescan_at(&g, at).is_none());
+        g.put_char('a');
+        assert_eq!(panel.rescan_at(&g, at), Some(at + RESCAN_DEBOUNCE));
+        panel.query_changed();
+        assert_eq!(panel.rescan_at(&g, at), Some(at));
+        panel.close();
+        assert!(panel.rescan_at(&g, at).is_none());
+    }
+
+    #[test]
+    fn first_background_hit_does_not_request_reveal() {
+        let mut g = Grid::new(10, 2, Theme::default());
+        let mut panel = SearchPanel::default();
+        panel.focus_or_open();
+        panel.query = "a".into();
+        assert!(!panel.refresh(&g));
+        g.put_char('a');
+        panel.searched_at = None;
+        assert!(!panel.refresh(&g), "background refresh must never scroll");
+        assert_eq!(panel.counter(), (1, 1));
     }
 }

@@ -12,6 +12,7 @@ pub mod logs;
 pub mod mouse;
 pub mod pty_io;
 pub mod redraw;
+pub mod scheduling;
 pub mod search;
 pub mod selection_view;
 pub mod settings;
@@ -54,9 +55,13 @@ pub struct App {
     pub(crate) modifiers: ModifiersState,
     pub(crate) cursor_visible: bool,
     pub(crate) last_blink: Instant,
-    /// Next frame egui asked for (hover fade / animation / tooltip), if
-    /// any; `about_to_wait` wakes for it instead of waiting for a blink.
+    /// Next egui frame or transient surface retry, if any; independent of
+    /// whether the cursor needs a blink timer.
     pub(crate) egui_repaint_at: Option<Instant>,
+    pub(crate) occluded: bool,
+    pub(crate) zero_sized: bool,
+    /// Work left after a bounded drain, independent of presentation.
+    pub(crate) pty_pending: bool,
     pub(crate) pending_resize: Option<(u32, u32)>,
     pub(crate) pending_scale: Option<f32>,
     pub(crate) wheel_accum: f64,
@@ -115,6 +120,9 @@ impl App {
             cursor_visible: true,
             last_blink: Instant::now(),
             egui_repaint_at: None,
+            occluded: false,
+            zero_sized: false,
+            pty_pending: false,
             pending_resize: None,
             pending_scale: None,
             wheel_accum: 0.0,
@@ -136,6 +144,15 @@ impl App {
             last_key_write: None,
             last_echo: None,
         }
+    }
+
+    pub(crate) fn visuals_suspended(&self) -> bool {
+        self.occluded
+            || self.zero_sized
+            || self
+                .window
+                .as_ref()
+                .is_some_and(|w| w.is_minimized() == Some(true))
     }
 
     /// Persist the live config after a panel edit. Failures stay in the

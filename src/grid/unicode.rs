@@ -60,6 +60,24 @@ pub fn continues_cluster(prev: &str, next: char) -> bool {
     combined.graphemes(true).count() == 1
 }
 
+/// Grid-specific continuation rules without materializing the old cluster
+/// for explicit modifiers, blanks, or the common printable ASCII pair.
+pub(crate) fn continues_cell(lead: &super::Cell, next: char) -> bool {
+    if is_joining_modifier(next) {
+        return true;
+    }
+    if lead.extra.is_none()
+        && (lead.ch == ' '
+            || (lead.ch.is_ascii()
+                && !lead.ch.is_ascii_control()
+                && next.is_ascii()
+                && !next.is_ascii_control()))
+    {
+        return false;
+    }
+    continues_cluster(&lead.cluster(), next)
+}
+
 /// Display width of a full cluster: 2 when it contains anything wide,
 /// otherwise 1. Never 0 so a lone combining mark still occupies a cell.
 /// Used by tests and future width-promotion work; the grid itself keeps
@@ -153,5 +171,27 @@ mod tests {
     fn distinct_chars_break() {
         assert!(!continues_cluster("a", 'b'));
         assert!(!continues_cluster("👨", '👩'));
+    }
+
+    #[test]
+    fn ascii_fast_path_matches_grapheme_segmentation() {
+        for previous in ' '..='~' {
+            let lead = super::super::Cell {
+                ch: previous,
+                ..Default::default()
+            };
+            for next in ' '..='~' {
+                assert_eq!(
+                    continues_cell(&lead, next),
+                    continues_cluster(&previous.to_string(), next)
+                );
+            }
+        }
+        // An incoming ASCII character can join a non-ASCII prepend char.
+        let lead = super::super::Cell {
+            ch: '\u{600}',
+            ..Default::default()
+        };
+        assert!(continues_cell(&lead, 'a'));
     }
 }

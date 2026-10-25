@@ -133,7 +133,6 @@ pub(crate) fn show_search(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::Match;
 
     fn input() -> egui::RawInput {
         egui::RawInput {
@@ -155,12 +154,11 @@ mod tests {
         let mut panel = SearchPanel::default();
         panel.focus_or_open();
         panel.query = "needle".to_string();
-        panel.matches = vec![Match {
-            line: 0,
-            start: 0,
-            end: 5,
-        }];
-        panel.current = Some(0);
+        let mut grid = crate::grid::Grid::new(20, 2, crate::theme::Theme::default());
+        for ch in "needle".chars() {
+            grid.put_char(ch);
+        }
+        panel.refresh(&grid);
         // First frame lays the area out, second paints and applies focus.
         let mut output = ctx.run_ui(input(), |ui| {
             let _ = show_search(ui.ctx(), &mut panel, 38.0);

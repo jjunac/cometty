@@ -174,13 +174,14 @@ impl SearchView {
             rows: vec![Vec::new(); rows],
             active: None,
         };
-        for (index, m) in matches.iter().enumerate() {
-            if m.line < base || m.line - base >= rows {
-                continue;
-            }
+        // Matches are sorted by (line, column). Projection must be
+        // proportional to visible hits, not millions of off-screen ones.
+        let first = matches.partition_point(|m| m.line < base);
+        let end = first + matches[first..].partition_point(|m| m.line - base < rows);
+        for (relative, m) in matches[first..end].iter().enumerate() {
             let view_row = m.line - base;
             view.rows[view_row].push((m.start, m.end));
-            if Some(index) == current {
+            if Some(first + relative) == current {
                 view.active = Some((view_row, m.start, m.end));
             }
         }
@@ -531,6 +532,43 @@ mod tests {
         assert_eq!(view.hit(0, 2, 2), Hit::Match);
         assert_eq!(view.hit(0, 3, 1), Hit::Match);
         assert_eq!(view.hit(0, 1, 1), Hit::None);
+    }
+
+    #[test]
+    fn sliced_projection_matches_linear_reference_at_viewport_edges() {
+        let matches: Vec<_> = (0..100)
+            .flat_map(|line| {
+                (0..4).map(move |col| Match {
+                    line,
+                    start: col * 2,
+                    end: col * 2 + 1,
+                })
+            })
+            .collect();
+        for offset in [0, 1, 20, 90, 100, usize::MAX] {
+            for rows in [0, 1, 10, 100] {
+                for current in [None, Some(0), Some(100), Some(399), Some(400)] {
+                    let base = 90_usize.saturating_sub(offset.min(90));
+                    let mut reference = SearchView {
+                        rows: vec![Vec::new(); rows],
+                        active: None,
+                    };
+                    for (index, m) in matches.iter().enumerate() {
+                        if m.line >= base && m.line - base < rows {
+                            let row = m.line - base;
+                            reference.rows[row].push((m.start, m.end));
+                            if current == Some(index) {
+                                reference.active = Some((row, m.start, m.end));
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        SearchView::build(&matches, current, 90, offset, rows),
+                        reference
+                    );
+                }
+            }
+        }
     }
 
     #[test]

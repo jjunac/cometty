@@ -372,9 +372,9 @@ mod tests {
         let h1 = underline_thickness(17.5, &font);
         let ch1 = cursor_underline_thickness(17.5, &cursor);
         let b1 = bar_cursor_width(8.4, &cursor);
-        assert!(h1 >= 1.0 && h1 < 3.0, "h1={h1}");
+        assert!((1.0..3.0).contains(&h1), "h1={h1}");
         assert!(ch1 >= h1, "cursor underline thicker than text");
-        assert!(b1 >= 1.0 && b1 < 8.4, "b1={b1}");
+        assert!((1.0..8.4).contains(&b1), "b1={b1}");
         // 2x scales proportionally.
         let h2 = underline_thickness(35.0, &font);
         let b2 = bar_cursor_width(16.8, &cursor);

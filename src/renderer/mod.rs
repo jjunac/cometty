@@ -4,7 +4,7 @@ mod log_ui;
 mod overlay;
 mod search_ui;
 mod settings_ui;
-mod text;
+pub(crate) mod text;
 
 use background::{BG_SHADER, BgVertex};
 
@@ -73,6 +73,14 @@ fn slow_log_due(last: &mut Option<Instant>, now: Instant) -> bool {
     } else {
         false
     }
+}
+
+/// Surface recovery must not depend on a cursor blink. Back off persistent
+/// failures so an unavailable surface cannot create another repaint loop.
+fn surface_retry_delay(failures: &mut u8) -> Duration {
+    let delay = Duration::from_millis((16_u64 << (*failures).min(6)).min(1000));
+    *failures = failures.saturating_add(1);
+    delay
 }
 
 /// Pick the lowest-latency vsync present mode the surface supports:
@@ -153,6 +161,8 @@ pub struct CursorCtx {
 /// [`Renderer::render`] output: scrollbar scrolling plus tab-strip actions
 /// the app applies after the frame (switch/close/new).
 pub struct RenderOutput {
+    /// True only after a frame was actually submitted and presented.
+    pub presented: bool,
     pub scroll_to: Option<usize>,
     pub selected_tab: Option<usize>,
     pub close_tab: Option<usize>,
@@ -162,6 +172,8 @@ pub struct RenderOutput {
     /// Earliest delay egui wants the next frame after (`Duration::MAX` =
     /// idle); see [`OverlayOutput::egui_repaint_delay`].
     pub egui_repaint_delay: std::time::Duration,
+    /// Transient surface recovery, independent of cursor/egui animation.
+    pub retry_after: Option<Duration>,
 }
 
 pub struct Renderer {
@@ -219,6 +231,7 @@ pub struct Renderer {
     /// Last slow-frame log (see `slow_log_due`): rate-limits the
     /// debug probes so a sustained slowdown can't flood the log panel.
     last_slow_log: Option<Instant>,
+    surface_failures: u8,
 }
 
 impl Renderer {
@@ -396,6 +409,7 @@ impl Renderer {
             // fills it; every config change clears it for the same reason.
             shaped_hashes: Vec::new(),
             last_slow_log: None,
+            surface_failures: 0,
         };
         r.update_viewport(clamped_w, clamped_h);
         log::debug!(
@@ -663,6 +677,7 @@ impl Renderer {
         // rate-limited debug logs; the fast path stays silent.
         let render_start = Instant::now();
         let rebuild_elapsed = if grid_version != self.last_grid_version {
+            let _timing = crate::perf::measure(crate::perf::Metric::Rebuild);
             let rebuild_start = Instant::now();
             self.rebuild_buffer(grid_rows);
             let rebuild_elapsed = rebuild_start.elapsed();
@@ -679,9 +694,12 @@ impl Renderer {
 
         let tab_count = scroll.tab_titles.len();
         let bg_start = Instant::now();
+        let bg_timing = crate::perf::measure(crate::perf::Metric::Background);
         let vert_count = self.paint_bg(grid_rows, &cursor, &highlights, tab_count);
+        drop(bg_timing);
         let bg_elapsed = bg_start.elapsed();
         let overlay_start = Instant::now();
+        let overlay_timing = crate::perf::measure(crate::perf::Metric::Overlay);
         let overlay::OverlayOutput {
             scroll_to,
             selected_tab,
@@ -692,9 +710,12 @@ impl Renderer {
             screen_descriptor,
             egui_repaint_delay,
         } = self.paint_overlay(scroll);
+        drop(overlay_timing);
         let overlay_elapsed = overlay_start.elapsed();
 
-        let out = RenderOutput {
+        let mut out = RenderOutput {
+            presented: false,
+            retry_after: None,
             scroll_to,
             selected_tab,
             close_tab,
@@ -704,20 +725,34 @@ impl Renderer {
         };
 
         let acquire_start = Instant::now();
+        let acquire_timing = crate::perf::measure(crate::perf::Metric::Acquire);
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                out.retry_after = Some(surface_retry_delay(&mut self.surface_failures));
+                crate::perf::add(crate::perf::Metric::Skipped, 1);
+                return Ok(out);
+            }
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                // Visibility/restoration events wake us; do not poll an
+                // explicitly occluded surface with an animation timer.
+                crate::perf::add(crate::perf::Metric::Skipped, 1);
                 return Ok(out);
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
+                out.retry_after = Some(surface_retry_delay(&mut self.surface_failures));
+                crate::perf::add(crate::perf::Metric::Skipped, 1);
                 return Ok(out);
             }
             wgpu::CurrentSurfaceTexture::Validation => {
+                crate::perf::add(crate::perf::Metric::Skipped, 1);
                 return Ok(out);
             }
         };
+        self.surface_failures = 0;
+        drop(acquire_timing);
         // Acquire is timed separately: with queued vsync it blocks for the
         // previous frame's blank, which dwarfs real CPU work.
         let acquire_elapsed = acquire_start.elapsed();
@@ -741,6 +776,7 @@ impl Renderer {
         }];
 
         let prepare_start = Instant::now();
+        let prepare_timing = crate::perf::measure(crate::perf::Metric::Prepare);
         self.text_renderer.prepare(
             &self.device,
             &self.queue,
@@ -750,9 +786,11 @@ impl Renderer {
             text_areas,
             &mut self.swash_cache,
         )?;
+        drop(prepare_timing);
         let prepare_elapsed = prepare_start.elapsed();
 
         let encode_start = Instant::now();
+        let encode_timing = crate::perf::measure(crate::perf::Metric::EncodeSubmit);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -799,6 +837,7 @@ impl Renderer {
                 .render(&mut pass.forget_lifetime(), &paint_jobs, &screen_descriptor);
         }
         self.queue.submit(Some(encoder.finish()));
+        drop(encode_timing);
         let encode_elapsed = encode_start.elapsed();
         // Timed before `present`: presenting blocks on vsync by design
         // (~16ms on 60Hz), so including it would flag every healthy frame.
@@ -813,7 +852,12 @@ impl Renderer {
                  acquire={acquire_elapsed:?}"
             );
         }
-        self.queue.present(frame);
+        {
+            let _timing = crate::perf::measure(crate::perf::Metric::Present);
+            self.queue.present(frame);
+        }
+        out.presented = true;
+        crate::perf::add(crate::perf::Metric::Presented, 1);
         self.atlas.trim();
         Ok(out)
     }
@@ -823,6 +867,25 @@ impl Renderer {
 mod tests {
     use super::*;
     use crate::grid::Cell;
+
+    #[test]
+    fn surface_retries_back_off_without_a_blink_timer() {
+        let mut failures = 0;
+        for ms in [16, 32, 64, 128, 256, 512, 1000, 1000] {
+            assert_eq!(
+                surface_retry_delay(&mut failures),
+                Duration::from_millis(ms)
+            );
+        }
+        for _ in 0..300 {
+            assert_eq!(surface_retry_delay(&mut failures), Duration::from_secs(1));
+        }
+        failures = 0; // successful acquisition re-arms the fast first retry
+        assert_eq!(
+            surface_retry_delay(&mut failures),
+            Duration::from_millis(16)
+        );
+    }
 
     fn test_cells(text: &str) -> Vec<Cell> {
         text.chars()

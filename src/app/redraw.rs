@@ -19,6 +19,13 @@ fn egui_deadline(now: Instant, delay: Duration) -> Option<Instant> {
 
 impl App {
     pub(crate) fn on_redraw(&mut self) {
+        crate::perf::add(crate::perf::Metric::Redraw, 1);
+        if self.visuals_suspended() {
+            // Keep transport/replies/exits live while skipping visual work.
+            self.drain_pty();
+            crate::perf::add(crate::perf::Metric::Skipped, 1);
+            return;
+        }
         // Scale can change without a Resized event (monitor move), so
         // always sync before applying a pending resize.
         let current_scale = self.sync_scale_factor();
@@ -26,12 +33,10 @@ impl App {
             let scale = self.pending_scale.take().unwrap_or(current_scale);
             self.apply_resize(w, h, scale);
         }
-        // Drain any pending PTY output that arrived between wake and draw.
-        // True means the last tab's shell exited; the caller exits.
+        // Preserve resize-before-feed ordering for visible frames.
         if self.drain_pty() {
             return;
         }
-
         // Defensive: alt switches always drop the selection.
         if let Some(tab) = self.active_tab() {
             let alt_now = tab.terminal.grid().is_alt();
@@ -62,6 +67,7 @@ impl App {
         // rebuild (their content differs).
         let snap_before = (self.snapshot_tab, self.snapshot_version);
         if self.snapshot_tab != active || self.snapshot_version != version {
+            let _timing = crate::perf::measure(crate::perf::Metric::Snapshot);
             let rows: Vec<Vec<grid::Cell>> = self.tabs[active]
                 .terminal
                 .grid()
@@ -70,6 +76,10 @@ impl App {
                 .cloned()
                 .collect();
             self.snapshot_rows = rows;
+            crate::perf::add(
+                crate::perf::Metric::SnapshotCells,
+                self.snapshot_rows.iter().map(Vec::len).sum(),
+            );
             self.snapshot_version = version;
             self.snapshot_tab = active;
         }
@@ -166,7 +176,7 @@ impl App {
                 version,
                 renderer::HighlightCtx {
                     selection: selection_view,
-                    search: search_view.as_ref(),
+                    search: search_view.as_deref(),
                     links: link_hints.as_ref(),
                 },
                 renderer::ScrollCtx {
@@ -214,7 +224,7 @@ impl App {
             });
             (out, cfg_changed, q_changed)
         };
-        if rebuilt {
+        if rebuilt && output.presented {
             // Latency probe: echo bytes -> painted frame carrying them.
             if let Some(t) = self.last_echo.take() {
                 let elapsed = t.elapsed();
@@ -222,7 +232,7 @@ impl App {
                     log::debug!("echo-to-paint {elapsed:?}");
                 }
             }
-        } else {
+        } else if output.presented {
             // No new content reached the screen, so a pending echo stamp
             // is spent: this frame already reflects everything drained.
             // Dropping it keeps a later, unrelated frame from attributing
@@ -235,7 +245,9 @@ impl App {
         // event repaints directly, so this only adds egui's settle pass. A
         // finite delay is scheduled for `about_to_wait`; `MAX` means the UI
         // is idle and the loop stays reactive (PTY output / cursor blink).
-        let delay = output.egui_repaint_delay;
+        let delay = output
+            .egui_repaint_delay
+            .min(output.retry_after.unwrap_or(Duration::MAX));
         if delay.is_zero() {
             self.egui_repaint_at = None;
             if let Some(w) = self.window.as_ref() {
