@@ -99,7 +99,8 @@ impl App {
             }
             return true;
         }
-        // Find bar: Ctrl/Cmd+F opens it (or re-focuses an open bar). Placed
+        // Find bar: the configured search shortcut (Cmd+F on macOS, Ctrl+F
+        // elsewhere) opens it (or re-focuses an open bar). Placed
         // after the settings early-return so the dialog keeps the combo.
         if event.state == ElementState::Pressed
             && crate::app::search::is_search_toggle(

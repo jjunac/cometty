@@ -82,8 +82,13 @@ impl Renderer {
         ) {
             let _ = self.egui_state.take_egui_input(window);
             self.search_bar_rect = None;
-            // No panels open here by construction: keep window IME on so
-            // dead keys reach `App::on_ime` (egui would leave it off).
+            // No chrome is visible, so any egui focus left over from a panel
+            // or find bar that just closed is stale. This early return skips
+            // the full pass that would run egui's dead-man's-switch, so drop
+            // it here or the terminal would keep losing keys and IME.
+            self.surrender_egui_focus();
+            // No panels or text fields can be focused now: keep window
+            // IME on so dead keys reach `App::on_ime` (egui leaves it off).
             self.ensure_terminal_ime(window, false);
             let now = std::time::Instant::now();
             let animating =
@@ -171,6 +176,14 @@ impl Renderer {
                                 .max_width(container_w)
                                 .max_height(container_h)
                                 .auto_shrink([false, false])
+                                // The strip still scrolls with the wheel or
+                                // a trackpad, but never paints egui's
+                                // scrollbar: once tabs bottom out at
+                                // `min_tab_width` it drew a thumb inside the
+                                // pills.
+                                .scroll_bar_visibility(
+                                    egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                                )
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 0.0;
@@ -499,8 +512,9 @@ impl Renderer {
                     }
                 }
             });
-        // Find bar (floating overlay; Ctrl/Cmd+F). Drawn before the panels
-        // so their windows stack above it where they overlap.
+        // Find bar (floating overlay; Cmd+F on macOS, Ctrl+F elsewhere).
+        // Drawn before the panels so their windows stack above it where
+        // they overlap.
         let search_actions = search_ui::show_search(&ctx, search, tab_h);
         self.search_bar_rect = search_actions.rect;
         // Scrollbar fade/drag advances inside the pass, so its repaint
@@ -531,9 +545,9 @@ impl Renderer {
         self.egui_state
             .handle_platform_output(window, full_output.platform_output);
         // egui enables IME only for its own text fields (disabling it
-        // otherwise), which would make macOS dead keys vanish. Re-enable
-        // after its decision whenever the settings panel doesn't own the
-        // keyboard; commits flow to the PTY via `App::on_ime`.
+        // otherwise), which would make macOS dead keys vanish. Re-assert it
+        // after egui's decision whenever no text field owns the keyboard;
+        // commits flow to the PTY via `App::on_ime`.
         self.ensure_terminal_ime(window, settings.open);
         let paint_jobs = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
 

@@ -953,12 +953,17 @@ fn show_section(
                 &mut config.input.new_tab_super,
                 true,
             );
-            ed.flag(ui, "Search on Ctrl", &mut config.input.search_ctrl, true);
+            ed.flag(
+                ui,
+                "Search on Ctrl",
+                &mut config.input.search_ctrl,
+                d.input.search_ctrl,
+            );
             ed.flag(
                 ui,
                 "Search on Cmd/Super",
                 &mut config.input.search_super,
-                true,
+                d.input.search_super,
             );
             ed.flag(
                 ui,

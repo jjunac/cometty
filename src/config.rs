@@ -157,6 +157,11 @@ fn d_key_t() -> String {
 fn d_key_f() -> String {
     "f".to_string()
 }
+/// Ctrl+F opens the find bar only off macOS; there Cmd+F is the terminal
+/// convention and Ctrl+F belongs to the shell (readline forward-char).
+fn d_search_ctrl() -> bool {
+    !cfg!(target_os = "macos")
+}
 fn d_lines_per_tick() -> f64 {
     7.0
 }
@@ -512,7 +517,7 @@ pub struct InputConfig {
     pub new_tab_ctrl: bool,
     #[serde(default = "d_true")]
     pub new_tab_super: bool,
-    #[serde(default = "d_true")]
+    #[serde(default = "d_search_ctrl")]
     pub search_ctrl: bool,
     #[serde(default = "d_true")]
     pub search_super: bool,
@@ -541,7 +546,7 @@ impl Default for InputConfig {
             paste_super: true,
             new_tab_ctrl: true,
             new_tab_super: true,
-            search_ctrl: true,
+            search_ctrl: d_search_ctrl(),
             search_super: true,
             tab_switch_ctrl: true,
             tab_switch_super: true,
@@ -795,7 +800,8 @@ mod tests {
         assert!(c.selection.word_extra_chars.is_empty());
         assert_eq!(c.input.lines_per_tick, 7.0);
         assert_eq!(c.input.search_key, "f");
-        assert!(c.input.search_ctrl && c.input.search_super);
+        assert_eq!(c.input.search_ctrl, !cfg!(target_os = "macos"));
+        assert!(c.input.search_super);
         assert_eq!(c.links.open_modifier, "auto");
         assert_eq!(c.links.underline, "hover");
         assert!(c.links.detect_urls);

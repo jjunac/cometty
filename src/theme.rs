@@ -76,7 +76,7 @@ pub struct Theme {
     pub scrollbar_hover: Rgb,
     pub tab_active_bg: Rgb,
     pub tab_border: Rgb,
-    /// Find-bar highlight for every match (`Ctrl+F`), dim so the current
+    /// Find-bar highlight for every match (`Cmd/Ctrl+F`), dim so the current
     /// one stands out.
     pub search_match: Rgb,
     /// Find-bar highlight for the current match.

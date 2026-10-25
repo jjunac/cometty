@@ -87,6 +87,31 @@ fn pick_present_mode(supported: &[wgpu::PresentMode]) -> wgpu::PresentMode {
     }
 }
 
+/// Next `(force_enable, cached)` state for [`Renderer::ensure_terminal_ime`].
+///
+/// egui owns window IME while one of its text fields is focused; when that
+/// field loses focus, `egui-winit` calls `set_ime_allowed(false)`. The
+/// terminal must take IME back on the next frame, or dead keys (macOS
+/// US-Intl `' " ` ~`) stop producing any text for the rest of the session.
+/// The cached state keeps a steady terminal from re-sending
+/// `set_ime_allowed(true)` every frame, which could interrupt an in-progress
+/// composition.
+fn terminal_ime_step(
+    settings_open: bool,
+    egui_text_focused: bool,
+    terminal_ime_on: bool,
+) -> (bool, bool) {
+    if settings_open || egui_text_focused {
+        // egui drives IME (or the panel owns the keyboard); re-arm the
+        // terminal hand-off for the frame after control comes back.
+        (false, false)
+    } else if terminal_ime_on {
+        (false, true)
+    } else {
+        (true, true)
+    }
+}
+
 /// egui chrome input for [`Renderer::render`]: tab strip + overlay scrollbar.
 /// Grouped so `render` stays under the clippy arg limit.
 pub struct ScrollCtx<'a> {
@@ -170,9 +195,10 @@ pub struct Renderer {
     /// Painted find-bar rect (logical points), for press hit-testing.
     search_bar_rect: Option<egui::Rect>,
     last_grid_version: u64,
-    /// Whether the terminal has forced window IME on (see
-    /// [`Self::ensure_terminal_ime`]); reset when the settings panel
-    /// takes over so egui drives IME alone again.
+    /// Cached "terminal forced window IME on" state (see
+    /// [`Self::ensure_terminal_ime`]). Cleared while egui owns a text field
+    /// or the settings panel, so the hand-off re-asserts when control
+    /// returns to the terminal.
     ime_terminal_enabled: bool,
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
@@ -441,21 +467,28 @@ impl Renderer {
         }
     }
 
-    /// Force window IME on while the terminal owns the keyboard (settings
-    /// closed). egui enables IME only for its own text fields; without
-    /// this, macOS dead keys (`" ' ` ~` on US-Intl) produce neither text
-    /// nor `Ime` events and vanish before any handler runs. Normal keys
-    /// are unaffected: without marked text winit still emits plain
-    /// `KeyboardInput`. One-shot per settings-close (flagged) so the
-    /// per-frame call can't disturb an in-progress composition.
+    /// Keep window IME on while the terminal owns the keyboard (settings
+    /// closed, no egui text field focused). egui enables IME only for its
+    /// own text fields; without this, macOS dead keys (`" ' ` ~` on
+    /// US-Intl) produce neither text nor `Ime` events and vanish before
+    /// any handler runs. Normal keys are unaffected: without marked text
+    /// winit still emits plain `KeyboardInput`.
+    ///
+    /// egui disables IME again when its last text field loses focus (find
+    /// bar, log filter, settings input), so this cannot be a one-shot
+    /// force: the cached flag is reset whenever egui owns a field and
+    /// re-asserted on the frame after it lets go (see
+    /// [`terminal_ime_step`]). A steady terminal never re-sends, so an
+    /// in-progress composition is not disturbed.
     fn ensure_terminal_ime(&mut self, window: &winit::window::Window, settings_open: bool) {
-        if settings_open {
-            self.ime_terminal_enabled = false;
-            return;
-        }
-        if !self.ime_terminal_enabled {
+        let (force, cached) = terminal_ime_step(
+            settings_open,
+            self.text_edit_focused(),
+            self.ime_terminal_enabled,
+        );
+        self.ime_terminal_enabled = cached;
+        if force {
             window.set_ime_allowed(true);
-            self.ime_terminal_enabled = true;
         }
     }
 
@@ -975,7 +1008,7 @@ mod tests {
 
     #[test]
     fn row_text_hash_tracks_shaping_inputs_only() {
-        use super::text::{diff_rows, row_text_hash};
+        use super::text::row_text_hash;
         let base = test_cells("hello");
         let h = row_text_hash(&base);
         // Text, weight, style, and effective-fg changes invalidate.
@@ -1150,6 +1183,25 @@ mod tests {
             wgpu::PresentMode::AutoVsync
         );
         assert_eq!(pick_present_mode(&[]), wgpu::PresentMode::AutoVsync);
+    }
+
+    #[test]
+    fn terminal_ime_reasserted_after_egui_text_focus_closes() {
+        // Startup: the terminal takes IME.
+        assert_eq!(terminal_ime_step(false, false, false), (true, true));
+        // Steady state: no repeated `set_ime_allowed(true)` calls.
+        assert_eq!(terminal_ime_step(false, false, true), (false, true));
+        // Find bar / settings field focused: egui owns IME; re-arm the
+        // terminal hand-off.
+        assert_eq!(terminal_ime_step(false, true, true), (false, false));
+        // Field closed: egui has just disabled IME. The terminal must take
+        // it back or dead-key quotes stop working for the rest of the
+        // session (the reported Ctrl+F -> close -> broken quotes bug).
+        assert_eq!(terminal_ime_step(false, false, false), (true, true));
+        // The settings panel does the same hand-off, even with no focused
+        // field, and closing it re-asserts terminal IME.
+        assert_eq!(terminal_ime_step(true, false, true), (false, false));
+        assert_eq!(terminal_ime_step(false, false, false), (true, true));
     }
 
     #[test]

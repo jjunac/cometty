@@ -64,7 +64,7 @@ impl Default for SearchPanel {
 }
 
 impl SearchPanel {
-    /// Ctrl/Cmd+F: open + focus, or just re-focus an open bar (never
+    /// Search shortcut: open + focus, or just re-focus an open bar (never
     /// closes; `Esc` / the bar's `×` do). Returns true when it newly
     /// opened.
     pub fn focus_or_open(&mut self) -> bool {
@@ -172,9 +172,10 @@ impl SearchPanel {
     }
 }
 
-/// `Ctrl+F` / `Cmd+F` opens (or re-focuses) the find bar, gated by
+/// The configured search shortcut (`Cmd+F` on macOS, `Ctrl+F` elsewhere
+/// by default) opens (or re-focuses) the find bar, gated by
 /// [`InputConfig`]. Shift/Alt stay out so `Ctrl+Shift+F` and the shell's
-/// `Alt+F` keep their bindings; exactly one of Ctrl/Super per config.
+/// `Alt+F` keep their bindings; exactly one of Ctrl/Super is required.
 pub fn is_search_toggle(
     logical_key: &Key,
     modifiers: &ModifiersState,
@@ -207,7 +208,7 @@ impl App {
             .is_some_and(|t| t.search.open && t.search.focus_requested)
     }
 
-    /// Ctrl/Cmd+F: open the find bar (or re-focus it) and repaint.
+    /// Find-bar shortcut: open the find bar (or re-focus it) and repaint.
     pub(crate) fn focus_search(&mut self) {
         if let Some(tab) = self.active_tab_mut()
             && tab.search.focus_or_open()
@@ -302,7 +303,12 @@ mod tests {
 
     #[test]
     fn shortcut_matches_ctrl_and_super_only() {
-        let cfg = InputConfig::default();
+        // The default may be Cmd-only on macOS; the matcher itself supports
+        // both, so test with both explicitly enabled.
+        let cfg = InputConfig {
+            search_ctrl: true,
+            ..InputConfig::default()
+        };
         let f: Key = Key::Character("f".into());
         let upper: Key = Key::Character("F".into());
         assert!(is_search_toggle(&f, &ModifiersState::CONTROL, &cfg));
