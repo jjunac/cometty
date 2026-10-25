@@ -6,7 +6,7 @@ Single-binary Rust terminal emulator (`cometty`). Edition 2024. CI runs
 
 ## Commands
 
-- `cargo test` — 394 headless-safe tests in `grid`/`term`/`input`/`config`/`tabbar`/`icon`/`app::geometry`/`app::settings`/`app::logs`/`app::persistence`/`app::search`/`app::redraw`/`app::links`/`app::tab`/`procinfo`/`scrollbar`/`selection`/`search`/`links`/`theme`/`logbuf`/`logging`/`pty`/`renderer` (incl. `renderer::blocks`/`renderer::log_ui`/`renderer::search_ui`/`renderer::settings_ui`); runs in seconds, no services needed. Unix PTY lifecycle tests spawn and clean up short-lived local children.
+- `cargo test` — 406 tests (403 headless-safe, 3 opt-in probes) in `grid`/`term`/`input`/`config`/`tabbar`/`icon`/`app::geometry`/`app::settings`/`app::logs`/`app::persistence`/`app::search`/`app::redraw`/`app::links`/`app::tab`/`procinfo`/`scrollbar`/`selection`/`search`/`links`/`theme`/`logbuf`/`logging`/`pty`/`renderer` (incl. `renderer::blocks`/`renderer::log_ui`/`renderer::search_ui`/`renderer::settings_ui`); runs in seconds, no services needed. Unix PTY lifecycle tests spawn and clean up short-lived local children.
 - `cargo run` — launches GUI window (needs display + GPU surface). Do not run headless; prefer `cargo test` / `cargo check`.
 - `cargo clippy -- -D warnings` and `cargo fmt --check` — no configs committed; keep code warning- and rustfmt-clean.
 
@@ -27,6 +27,7 @@ Single-binary Rust terminal emulator (`cometty`). Edition 2024. CI runs
 
 ## Gotchas
 
+- OSC parsing: `term/parser.rs::BoundedParser` guards vte's `std` Vec **before** accumulation (2 MiB wire bytes after `ESC ]`, including ignored controls/separators). Overflow drops the parser without dispatching a prefix and discards to BEL/CAN/SUB/ESC; any ESC ends OSC and must remain the start of the next escape. Raw/UTF-8 `0x9c` is data in vte's OSC state. Parser storage is released after completed/cancelled OSCs longer than 64 KiB, only at these safe boundaries; smaller sequences reuse capacity. Keep the callback-equivalence/allocation tests when updating vte, don't use its ineffective-with-`std` const-generic limit, and don't replace the guard with a substring filter. OSC handlers stream bounded labels/preflight URI/base64 sizes; OSC 52 limits the final UTF-8 bytes as well as decoded bytes.
 - GUI binary: `cargo run`/`cargo build` need windowing/GPU; verification in headless sessions = `cargo test` + `cargo check`.
 - `grid::cell()`, `pen()`, `scrollback_len()` are `#[allow(dead_code)]` test/inspection helpers — do not remove. Same for `Renderer::set_theme` (future runtime switching) and `term` inspectors.
 - Erase uses BCE semantics: `ED/EL/clear` + `IL/DL`/scroll fill use `erase_cell()` (current pen bg, default fg/attrs); `blank_cell()` is only for structural fills (resize growth, fresh alt buffer).

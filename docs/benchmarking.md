@@ -129,3 +129,19 @@ selection rebase/cancel, ignored-versus-queued input admission, parser-reply
 headroom, bracketed-paste transaction integrity, debounced/ordered config saves,
 and log-ID eviction. Wall-clock thresholds remain manual, same-machine A/B
 checks rather than CI gates.
+
+## OSC memory regression checks
+
+`cargo test --locked term::` (also with `--release`) covers the 2 MiB raw OSC
+limit, oversize discard/recovery, >64 KiB completion/cancellation release, small
+buffer reuse, and supported-handler bounds. The test-only allocator additionally
+tracks relative live/peak requested-byte deltas and the largest request; it is
+not installed in the application binary and does not measure RSS/native/GPU
+bytes or malloc's internal realloc copying peak. See the batch-2 follow-up in
+[`memory_study.md`](memory_study.md#14-follow-up-batch-2-osc-bounds) for results.
+
+The existing `ignored_osc` benchmark is a **terminated 1 MiB payload**, below
+the raw limit but above the reuse threshold. It now deliberately allocates and
+releases its raw buffer on each iteration instead of retaining the high-water
+allocation. Increased requested-byte traffic in this case is expected, not
+evidence of retained-heap growth. Normal small OSCs still reuse parser storage.

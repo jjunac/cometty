@@ -11,6 +11,7 @@ pub mod unicode;
 pub use alt::MouseMode;
 pub use cell::{Cell, Cursor, CursorShape, CursorStyle, Pen, UnderlineStyle};
 pub use history::RowView;
+pub use link::MAX_HYPERLINK_URI;
 pub use row::Row;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};

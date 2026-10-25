@@ -29,6 +29,16 @@ impl Grid {
         };
     }
 
+    /// The terminal can reject a raw/decoded URI before allocating its text.
+    /// Keep the same clear-current-link and one-shot warning policy as an
+    /// oversized URI passed directly to `set_hyperlink`.
+    pub fn reject_oversized_hyperlink(&mut self, bytes: usize) {
+        self.current_hyperlink = None;
+        self.warn_hyperlink_once(format!(
+            "OSC 8 link ignored: {bytes} bytes (limit {MAX_HYPERLINK_URI})"
+        ));
+    }
+
     /// The current OSC 8 link id, if a link is open (test/inspection).
     #[allow(dead_code)]
     pub fn current_hyperlink(&self) -> Option<u16> {
@@ -56,10 +66,7 @@ impl Grid {
             return Some(*id);
         }
         if uri.len() > MAX_HYPERLINK_URI {
-            self.warn_hyperlink_once(format!(
-                "OSC 8 link ignored: {} bytes (limit {MAX_HYPERLINK_URI})",
-                uri.len()
-            ));
+            self.reject_oversized_hyperlink(uri.len());
             return None;
         }
         if self.hyperlinks.len() >= MAX_HYPERLINKS {

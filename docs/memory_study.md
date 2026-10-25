@@ -5,6 +5,13 @@
 - **Scope:** retained memory, allocation peaks, ownership/lifecycle defects, and plausible explanations for multi-gigabyte sessions.
 - **Changes:** this report only; no application behavior or dependency changes.
 
+> **Follow-up status:** The audit and its measurements below describe the historical
+> `e06f621` baseline, not the current implementation. Batch 1 repaired PTY lifecycle
+> ownership in `9c097cd`. Batch 2 addresses Finding B with bounded OSC parsing and
+> handler-side allocation limits; see [the follow-up results](#14-follow-up-batch-2-osc-bounds).
+> GPU staging, whole-application budgets, search, cluster tails, and renderer
+> high-water storage are deliberately not changed by batch 2.
+
 ## Executive summary
 
 **There are reproducible memory-retention defects, but this investigation does not identify which one caused the reported long-session RAM usage.** It also establishes that gigabyte-scale usage can result from the aggregate of individually bounded tabs, without a conventional unreachable-allocation leak.
@@ -568,6 +575,81 @@ The mechanisms above were checked against these files in Cargo's local registry 
 | `cosmic-text-0.19.0/src/shape.rs:84–111,173–191` and `src/swash.rs:131–172` | Six shape plans, scratch storage, cached versus uncached image paths |
 | `epaint-0.36.1/src/text/fonts.rs:734–748,1290–1296` | Font-atlas recreation and frame-generation galley eviction |
 
-## Bottom line
+## 14. Follow-up: batch 2 (OSC bounds)
+
+Implemented on 2026-10-25, separately from the baseline audit above.
+
+### Policy and implementation
+
+- [`src/term/parser.rs`](../src/term/parser.rs) wraps the existing vte 0.15 parser
+  with a small streaming guard. The hard limit is **2 MiB of wire bytes after
+  `ESC ]`**, including the OSC number, separators, and ignored C0s, excluding its
+  terminator. It applies to supported/unsupported OSCs and regardless of the
+  clipboard policy. A normal base64-encoded 1 MiB OSC 52 transfer fits, including
+  usual line wrapping; arbitrarily whitespace-inflated transfers do not.
+- Overflow drops the underlying parser immediately, without dispatching any
+  truncated title/cwd/link/clipboard update. The rest is discarded through
+  BEL/CAN/SUB/ESC. Recovery matches locked vte: **any ESC** ends OSC and starts
+  the next escape; raw or UTF-8 `0x9c` inside OSC is data, not a terminator.
+  One size-only raw-overflow warning is emitted per terminal, with no payload.
+- After a completed/cancelled OSC longer than **64 KiB**, the underlying parser
+  is replaced at that boundary, preserving an ending ESC's state. Smaller OSCs
+  reuse capacity. No parser fork, `std` feature change, per-frame shrinking, or
+  bytewise normal-text feed was introduced. `memchr` is now a direct dependency
+  for the normal-text scan; its already-locked version did not change.
+- [`src/term.rs`](../src/term.rs) streams title cleaning and bounded cwd percent
+  decoding instead of constructing whole-payload intermediate strings. URI
+  sizes are checked before allocation, preserving oversized-link clearing and
+  the grid's one-shot warning. OSC 52 validates target/encoded length before
+  filtering/decoding, reuses valid decoded UTF-8 storage, and rejects lossy
+  UTF-8 expansion beyond the **1 MiB final-text** cap before copying it.
+
+### Headless regression evidence
+
+The test-only allocator now records successful allocation/reallocation requests,
+deallocation deltas, a relative live-byte peak, and the largest request on the
+test's thread. These are **requested Rust bytes**, not RSS/physical footprint,
+allocator slack/internal realloc-copy peaks, or native/GPU allocations. Parser
+tests use a nonallocating callback sink; they do not measure the grid/log ring or
+clipboard together with the raw buffer.
+
+| Regression | Result in debug and release tests |
+| --- | --- |
+| Unsupported unterminated OSC, streamed in reusable 8 KiB chunks through 32 MiB | Largest allocation and live-byte peak **2 MiB**; **zero** retained raw bytes after overflow, with the parser still alive |
+| Another 32 MiB before termination of that same OSC | **Zero** allocation/reallocation requests; following valid OSC still dispatches |
+| Repeated terminated/cancelled OSCs at 64 KiB + 1 and the exact 2 MiB limit | Raw allocation released at each boundary; exact-limit commands accepted; ending ESC still introduces the next CSI |
+| OSC at the 64 KiB reuse threshold, followed by small OSCs | Allocation reused; no new allocations for subsequent small commands |
+| Supported and unknown oversized commands | No partial title, cwd, hyperlink, or clipboard update; following text/OSC parses after BEL/ST/CAN/SUB |
+| Full 1 MiB clipboard text, base64 with newline/space wrapping and split ST | Accepted unchanged |
+| 1 MiB of decoded invalid UTF-8 requiring 3 MiB of replacement text | Rejected without allocating the expanded string |
+| Megabyte-scale title/path with a 16-character result limit | No individual handler allocation reaches 4 KiB |
+
+Additional tests compare guarded callbacks with locked vte under identical
+chunking, including every split of mixed CSI/DCS/SOS/PM/APC/OSC/UTF-8/control
+corpora, bytewise feeds, and deterministic mixed-byte inputs. Small test limits
+exhaust every split immediately below/at/above overflow. Label transformations
+are compared with the previous full-transform semantics, including trimming,
+fragment separators, percent escapes, and invalid UTF-8.
+
+Validation:
+
+- `cargo test --locked --offline`: **403 passed, 3 opt-in probes ignored**.
+- `cargo test --release --locked --offline term::`: **76 passed**.
+- `cargo clippy --locked --offline --all-targets -- -D warnings`: passed.
+- `cargo fmt --check`: passed.
+- Existing release headless benchmark: passed with both quiet/default in-app
+  logging. ASCII/CRLF still request zero allocations; the quiet OSC 8 case fell
+  from 19,500 allocations/325,000 requested bytes to 6,500/156,000. Repeating the
+  accepted 1 MiB ignored OSC now reallocates instead of retaining its exceptional
+  buffer between sequences: this is an intentional retention/traffic tradeoff,
+  not a claim that allocation traffic is retained RAM. Timings remain noisy and
+  do not establish GUI latency or an RSS improvement.
+
+Reproduce the committed headless checks with `cargo test --locked term::` (or
+add `--release`). No disposable external probe or display/GPU is required.
+Finding C (failed-frame uploads) remains the next graphics-side repair to verify;
+this batch does **not** impose a process-wide RAM ceiling.
+
+## Bottom line (audited revision)
 
 The current history/log/input caps are valuable and work in the measured steady-state paths, but **they do not establish a bound on total application RAM**. The strongest reproduced defects are PTY resources outliving closed tabs and an uncapped, high-water-retaining OSC parser. Failed-frame staging is a particularly important graphics-side mechanism to reproduce next. Dense search, many tabs, large geometry, retained capacities, and allocator behavior can add substantial memory without an unreachable-allocation leak. Attributing the original gigabyte-scale sessions requires an affected-process trace that separates those categories.

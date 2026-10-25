@@ -1,6 +1,8 @@
+mod parser;
+
 use base64::Engine as _;
-use std::borrow::Cow;
-use vte::{Params, Parser};
+use parser::BoundedParser;
+use vte::Params;
 
 use crate::grid::{CursorShape, CursorStyle, Grid, MouseMode};
 use crate::theme::Theme;
@@ -21,7 +23,7 @@ pub const MAX_CLIPBOARD_BYTES: usize = 1 << 20;
 
 pub struct Terminal {
     grid: Grid,
-    parser: Parser,
+    parser: BoundedParser,
     // Pending wrap: true when cursor is past right margin and next printable should wrap first.
     pending_wrap: bool,
     // Last OSC 0/1/2 title set by the shell; empty when none seen.
@@ -55,8 +57,8 @@ const HANDLED_OSC: [&[u8]; 6] = [b"0", b"1", b"2", b"7", b"8", b"52"];
 /// base64 blobs and OSC 8 URLs can be kilobytes long.
 const OSC_SUMMARY_CHARS: usize = 120;
 
-/// Borrow the OSC number and split payload. Only the selected handler joins
-/// fragments; ignored sequences never materialize their payload. Preserve
+/// Borrow the OSC number and split payload. Handlers stream the fragments;
+/// ignored sequences never materialize their payload. Preserve
 /// the distinction between a bare number and an explicitly empty payload.
 struct Osc<'a> {
     number: &'a [u8],
@@ -104,15 +106,40 @@ impl<'a> OscPayload<'a> {
             .fold(self.first.len(), |len, piece| len + 1 + piece.len())
     }
 
-    fn joined(self) -> Cow<'a, [u8]> {
-        if self.rest.is_empty() {
-            Cow::Borrowed(self.first)
-        } else {
-            let mut bytes = Vec::with_capacity(self.len());
-            bytes.extend(self.bytes());
-            Cow::Owned(bytes)
+    /// Split at the first payload separator without joining large fragments.
+    fn split_once(self) -> Option<(&'a [u8], Self)> {
+        if let Some(i) = self.first.iter().position(|&b| b == b';') {
+            return Some((
+                &self.first[..i],
+                Self {
+                    first: &self.first[i + 1..],
+                    rest: self.rest,
+                },
+            ));
         }
+        let (first, rest) = self.rest.split_first()?;
+        Some((self.first, Self { first, rest }))
     }
+
+    fn chars(&self) -> impl Iterator<Item = char> + '_ {
+        // Fragments have an ASCII ';' between them, so no valid UTF-8 scalar
+        // crosses a fragment boundary. Lossy decoding each piece is equivalent
+        // to decoding the joined bytes, without allocating that joined text.
+        lossy_chars(self.first).chain(
+            self.rest
+                .iter()
+                .flat_map(|piece| std::iter::once(';').chain(lossy_chars(piece))),
+        )
+    }
+}
+
+fn lossy_chars(bytes: &[u8]) -> impl Iterator<Item = char> + '_ {
+    bytes.utf8_chunks().flat_map(|chunk| {
+        chunk
+            .valid()
+            .chars()
+            .chain((!chunk.invalid().is_empty()).then_some('\u{fffd}'))
+    })
 }
 
 /// Extract an `OSC 0/1/2` window-title update from vte's split params.
@@ -121,12 +148,18 @@ impl<'a> OscPayload<'a> {
 /// flow into the tab bar and the OS window title, where controls could break
 /// layout or smuggle sequences.
 fn title_payload(payload: OscPayload<'_>, max_chars: usize) -> String {
-    let payload = payload.joined();
-    let raw = String::from_utf8_lossy(&payload);
-    let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
-    let s = cleaned.trim().to_string();
-    let max_chars = max_chars.max(1);
-    s.chars().take(max_chars).collect()
+    let mut chars = payload
+        .chars()
+        .filter(|c| !c.is_control())
+        .skip_while(|c| c.is_whitespace());
+    let mut title: String = chars.by_ref().take(max_chars.max(1)).collect();
+    // Trim *before* truncation, as before. A whitespace suffix of our prefix
+    // stays if a non-space occurs later in the original title; otherwise it
+    // really was trailing whitespace and should be removed.
+    if title.ends_with(char::is_whitespace) && !chars.any(|c| !c.is_whitespace()) {
+        title.truncate(title.trim_end().len());
+    }
+    title
 }
 
 /// Extract an `OSC 7` working-directory update (`file://host/path`).
@@ -135,54 +168,85 @@ fn title_payload(payload: OscPayload<'_>, max_chars: usize) -> String {
 /// cometty only ever shows a local shell's directory). Non-`file` schemes
 /// and relative paths are rejected.
 fn cwd_payload(payload: OscPayload<'_>, max_chars: usize) -> Option<String> {
-    let payload = payload.joined();
-    let uri = String::from_utf8_lossy(&payload);
-    let rest = uri.strip_prefix("file://")?;
-    let path = &rest[rest.find('/')?..];
-    let decoded = percent_decode(path);
-    if !decoded.starts_with('/') {
+    let mut chars = payload.chars();
+    if !chars.by_ref().take(7).eq("file://".chars()) {
         return None;
     }
+    chars.find(|&c| c == '/')?;
+    let path_bytes = std::iter::once('/').chain(chars).flat_map(|c| {
+        let mut bytes = [0; 4];
+        let len = c.encode_utf8(&mut bytes).len();
+        bytes.into_iter().take(len)
+    });
     let max_chars = max_chars.max(1);
-    Some(decoded.chars().take(max_chars).collect())
+    // Four decoded bytes per retained scalar suffice, even with invalid UTF-8.
+    // Never decode/copy a megabyte-long suffix to keep a 256-character label.
+    let decoded: Vec<u8> = percent_decoded(path_bytes)
+        .take(max_chars.saturating_mul(4))
+        .collect();
+    Some(
+        String::from_utf8_lossy(&decoded)
+            .chars()
+            .take(max_chars)
+            .collect(),
+    )
 }
 
 /// Decode `%XX` escapes (paths with spaces, non-UTF-8 bytes, …). Invalid
 /// escapes are kept literally.
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hi = (bytes[i + 1] as char).to_digit(16);
-            let lo = (bytes[i + 2] as char).to_digit(16);
-            if let (Some(hi), Some(lo)) = (hi, lo) {
-                out.push((hi * 16 + lo) as u8);
-                i += 3;
-                continue;
+fn percent_decoded(bytes: impl Iterator<Item = u8>) -> impl Iterator<Item = u8> {
+    let mut bytes = bytes.peekable();
+    let mut pending = None;
+    std::iter::from_fn(move || {
+        if let Some(byte) = pending.take() {
+            return Some(byte);
+        }
+        let byte = bytes.next()?;
+        if byte == b'%' {
+            let hex = |b: &u8| (*b as char).to_digit(16);
+            if let Some(hi) = bytes.peek().and_then(hex) {
+                let first = bytes.next().unwrap();
+                if let Some(lo) = bytes.peek().and_then(hex) {
+                    bytes.next();
+                    return Some((hi * 16 + lo) as u8);
+                }
+                // The first hex digit is literal, but leave the next byte
+                // unconsumed: it could itself begin another `%XX` escape.
+                pending = Some(first);
             }
         }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+        Some(byte)
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HyperlinkOp {
+    End,
+    Set(String),
+    TooLong(usize),
 }
 
 /// Extract an `OSC 8` hyperlink update: `params;URI`.
 ///
-/// `Some(None)` ends the current link (empty URI), `Some(Some(uri))` starts
-/// or restarts one; `None` means the sequence is not an OSC 8 (or carries no
-/// `;` separator, which is malformed and ignored). The `id=` params before
-/// the separator are not interpreted: the URI alone identifies a link.
-fn hyperlink_payload(payload: OscPayload<'_>) -> Option<Option<String>> {
-    let payload = payload.joined();
-    let sep = payload.iter().position(|&b| b == b';')?;
-    let uri = &payload[sep + 1..];
-    if uri.is_empty() {
-        return Some(None);
+/// Empty/oversized URIs end the current link; a missing `;` is malformed and
+/// ignored. The `id=` params are not interpreted: only the URI identifies it.
+fn hyperlink_payload(payload: OscPayload<'_>) -> Option<HyperlinkOp> {
+    let (_, uri) = payload.split_once()?;
+    let len = uri.len();
+    if len == 0 {
+        return Some(HyperlinkOp::End);
     }
-    Some(Some(String::from_utf8_lossy(uri).into_owned()))
+    if len > crate::grid::MAX_HYPERLINK_URI {
+        return Some(HyperlinkOp::TooLong(len));
+    }
+    // Lossy UTF-8 can expand bytes. Check the final size before allocating it.
+    let text_len = uri.chars().map(char::len_utf8).sum();
+    if text_len > crate::grid::MAX_HYPERLINK_URI {
+        return Some(HyperlinkOp::TooLong(text_len));
+    }
+    let mut text = String::with_capacity(text_len);
+    text.extend(uri.chars());
+    Some(HyperlinkOp::Set(text))
 }
 
 /// Extract an `OSC 52` clipboard operation: `target;payload`.
@@ -190,46 +254,37 @@ fn hyperlink_payload(payload: OscPayload<'_>) -> Option<Option<String>> {
 /// Targets: `c` (clipboard), `p` (primary), `s` (selection), `0..7` (cut
 /// buffers) and empty all map to the system clipboard; unknown targets are
 /// ignored. `?` is a read request; anything else must be base64 text.
-/// Payloads over `max_bytes` decoded, invalid base64, and non-`?` binary
-/// data are dropped with a debug log.
+/// Invalid base64 or text exceeding `max_bytes` (including UTF-8 replacement
+/// expansion) is dropped with a size-only warning.
 fn clipboard_payload(payload: OscPayload<'_>, max_bytes: usize) -> Option<ClipboardOp> {
-    let payload = payload.joined();
-    let sep = payload.iter().position(|&b| b == b';')?;
-    let target = &payload[..sep];
+    let (target, data) = payload.split_once()?;
     let known_target = target.is_empty()
         || target == b"c"
         || target == b"p"
         || target == b"s"
         || (target.len() == 1 && (b'0'..=b'7').contains(&target[0]));
     if !known_target {
-        log::debug!(
-            "OSC 52 target {:?} ignored",
-            String::from_utf8_lossy(target)
-        );
+        log::debug!("OSC 52 unknown target ignored ({} bytes)", target.len());
         return None;
     }
-    let data = &payload[sep + 1..];
-    if data == b"?" {
+    if data.first == b"?" && data.rest.is_empty() {
         return Some(ClipboardOp::Query);
     }
     // tmux wraps long base64 payloads with newlines; whitespace is not data.
-    let encoded_len = data.iter().filter(|b| !b.is_ascii_whitespace()).count();
+    let encoded_len = data.bytes().filter(|b| !b.is_ascii_whitespace()).count();
     if encoded_len == 0 {
         return Some(ClipboardOp::Set(String::new()));
     }
     // Bound the decode: 4 base64 chars per 3 bytes (plus padding).
-    if encoded_len > max_bytes.div_ceil(3) * 4 {
+    if encoded_len > max_bytes.div_ceil(3).saturating_mul(4) {
         log::warn!(
             "OSC 52 payload ignored: {} bytes encoded (limit {max_bytes})",
             encoded_len
         );
         return None;
     }
-    let filtered: Vec<u8> = data
-        .iter()
-        .copied()
-        .filter(|b| !b.is_ascii_whitespace())
-        .collect();
+    let mut filtered = Vec::with_capacity(encoded_len);
+    filtered.extend(data.bytes().filter(|b| !b.is_ascii_whitespace()));
     let engine = base64::engine::general_purpose::STANDARD;
     let decoded = match engine
         .decode(&filtered)
@@ -248,9 +303,20 @@ fn clipboard_payload(payload: OscPayload<'_>, max_bytes: usize) -> Option<Clipbo
         );
         return None;
     }
-    Some(ClipboardOp::Set(
-        String::from_utf8_lossy(&decoded).into_owned(),
-    ))
+    let text = match String::from_utf8(decoded) {
+        Ok(text) => text, // Reuse the decode allocation for valid text.
+        Err(error) => {
+            let text_len: usize = lossy_chars(error.as_bytes()).map(char::len_utf8).sum();
+            if text_len > max_bytes {
+                log::warn!(
+                    "OSC 52 payload ignored: {text_len} bytes after UTF-8 conversion (limit {max_bytes})"
+                );
+                return None;
+            }
+            String::from_utf8_lossy(error.as_bytes()).into_owned()
+        }
+    };
+    Some(ClipboardOp::Set(text))
 }
 
 /// `OSC 52` reply carrying clipboard `text` (ST-terminated, `c` target).
@@ -342,7 +408,7 @@ impl Terminal {
     ) -> Self {
         Self {
             grid: Grid::new_with_config(cols, rows, theme, config),
-            parser: Parser::new(),
+            parser: BoundedParser::new(),
             pending_wrap: false,
             title: String::new(),
             cwd: None,
@@ -516,7 +582,7 @@ impl Terminal {
     pub fn feed(&mut self, bytes: &[u8]) {
         // vte::Parser::advance borrows both parser and performer; swap parser
         // out to satisfy the borrow checker while preserving state.
-        let mut parser = std::mem::replace(&mut self.parser, Parser::new());
+        let mut parser = std::mem::replace(&mut self.parser, BoundedParser::new());
         parser.advance(self, bytes);
         self.parser = parser;
     }
@@ -953,11 +1019,12 @@ impl vte::Perform for Terminal {
                     self.cwd_version += 1;
                 }
             }
-            b"8" => {
-                if let Some(link) = hyperlink_payload(payload) {
-                    self.grid.set_hyperlink(link.as_deref());
-                }
-            }
+            b"8" => match hyperlink_payload(payload) {
+                Some(HyperlinkOp::End) => self.grid.set_hyperlink(None),
+                Some(HyperlinkOp::Set(uri)) => self.grid.set_hyperlink(Some(&uri)),
+                Some(HyperlinkOp::TooLong(bytes)) => self.grid.reject_oversized_hyperlink(bytes),
+                None => {}
+            },
             b"52" => {
                 if let Some(op) = clipboard_payload(payload, MAX_CLIPBOARD_BYTES) {
                     self.pending_clipboard.push(op);
@@ -987,7 +1054,10 @@ mod tests {
     fn osc_hyperlink(params: &[&[u8]]) -> Option<Option<String>> {
         let osc = Osc::parse(params)?;
         (osc.number == b"8").then_some(())?;
-        hyperlink_payload(osc.payload?)
+        hyperlink_payload(osc.payload?).map(|op| match op {
+            HyperlinkOp::End | HyperlinkOp::TooLong(_) => None,
+            HyperlinkOp::Set(uri) => Some(uri),
+        })
     }
     fn osc_clipboard(params: &[&[u8]], max: usize) -> Option<ClipboardOp> {
         let osc = Osc::parse(params)?;
@@ -1034,6 +1104,244 @@ mod tests {
         let number = vec![b'9'; 1 << 20];
         assert!(osc_summary(&[&number]).len() < 200);
         assert!(!osc_summary(&[b"52", b"c", b"secret"]).contains("secret"));
+    }
+
+    #[test]
+    fn streaming_labels_match_full_transformations_without_prefix_trim_changes() {
+        let cases: &[&[&[u8]]] = &[
+            &[b" \x00abc     "],
+            &[b"abc    suffix"],
+            &["\u{2003}abc \u{2003}x\u{2003}".as_bytes()],
+            &[b"\xff \xe4\xb8", b"\xad end \n"],
+            &[b"file://host/a%20b%2Fc%%41%1%42%2%"],
+            &[b"file:///", "é中".as_bytes(), b"%FF%C3%A9%F0%9F%92%A5"],
+            &[b"file://host/\xff\xe4\xb8", b"%41"],
+            &[b"file://host/abc   "],
+            &[b"file://host"],
+            &[b"http://host/path"],
+            &[b"file:/", b"/path"],
+            &[b"", b""],
+        ];
+        for pieces in cases {
+            let payload = OscPayload {
+                first: pieces[0],
+                rest: &pieces[1..],
+            };
+            let joined: Vec<u8> = payload.bytes().collect();
+            for max in [0, 1, 2, 3, 4, 5, 6, 9, 16, 256] {
+                let cleaned: String = String::from_utf8_lossy(&joined)
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .collect();
+                let expected: String = cleaned.trim().chars().take(max.max(1)).collect();
+                assert_eq!(
+                    title_payload(payload, max),
+                    expected,
+                    "{pieces:?}, max={max}"
+                );
+                assert_eq!(
+                    cwd_payload(payload, max),
+                    reference_cwd(&joined, max),
+                    "{pieces:?}, max={max}"
+                );
+            }
+        }
+        // All decoded byte values, including UTF-8 split at the bounded-prefix
+        // edge, must match the old decode-entire-path-then-truncate semantics.
+        let uri = format!(
+            "file:///{}",
+            (0..=255).map(|b| format!("%{b:02X}")).collect::<String>()
+        );
+        let payload = OscPayload {
+            first: uri.as_bytes(),
+            rest: &[],
+        };
+        for max in 1..=260 {
+            assert_eq!(
+                cwd_payload(payload, max),
+                reference_cwd(uri.as_bytes(), max)
+            );
+        }
+    }
+
+    fn reference_cwd(bytes: &[u8], max: usize) -> Option<String> {
+        let uri = String::from_utf8_lossy(bytes);
+        let rest = uri.strip_prefix("file://")?;
+        let path = &rest.as_bytes()[rest.find('/')?..];
+        let mut decoded = Vec::new();
+        let mut i = 0;
+        while i < path.len() {
+            if path[i] == b'%' && i + 2 < path.len() {
+                let hi = (path[i + 1] as char).to_digit(16);
+                let lo = (path[i + 2] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    decoded.push((hi * 16 + lo) as u8);
+                    i += 3;
+                    continue;
+                }
+            }
+            decoded.push(path[i]);
+            i += 1;
+        }
+        Some(
+            String::from_utf8_lossy(&decoded)
+                .chars()
+                .take(max.max(1))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn handler_allocations_follow_retained_limits_not_raw_payload_size() {
+        let long = vec![b'x'; 1 << 20];
+        let title = OscPayload {
+            first: &long,
+            rest: &[],
+        };
+        let stats = crate::perf_bench::allocation_stats(|| {
+            assert_eq!(title_payload(title, 16).len(), 16);
+        });
+        assert!(stats.largest_request < 4096 && stats.live_delta == 0);
+
+        let uri = format!("file://host/{}", "%E4%B8%AD".repeat(1 << 17));
+        let cwd = OscPayload {
+            first: uri.as_bytes(),
+            rest: &[],
+        };
+        let stats = crate::perf_bench::allocation_stats(|| {
+            assert_eq!(cwd_payload(cwd, 16).unwrap().chars().count(), 16);
+        });
+        assert!(stats.largest_request < 4096 && stats.live_delta == 0);
+
+        let pieces: [&[u8]; 2] = [b"https://host/", &long];
+        let link = OscPayload {
+            first: b"id=1",
+            rest: &pieces,
+        };
+        assert_eq!(
+            crate::perf_bench::allocation_counts(|| {
+                assert!(matches!(
+                    hyperlink_payload(link),
+                    Some(HyperlinkOp::TooLong(_))
+                ));
+            }),
+            (0, 0, 0)
+        );
+
+        let pieces = [long.as_slice()];
+        let clipboard = OscPayload {
+            first: b"c",
+            rest: &pieces,
+        };
+        assert_eq!(
+            crate::perf_bench::allocation_counts(|| {
+                assert_eq!(clipboard_payload(clipboard, 16), None);
+            }),
+            (0, 0, 0),
+            "reject encoded size before joining/filtering/decoding"
+        );
+    }
+
+    #[test]
+    fn oversized_raw_oscs_never_apply_partial_supported_updates() {
+        let chunk = [b'x'; 8192];
+        for prefix in [
+            b"0;".as_slice(),
+            b"1;",
+            b"2;",
+            b"7;file:///",
+            b"8;;https://host/",
+            b"52;c;",
+            b"999;",
+        ] {
+            for end in [b"\x07".as_slice(), b"\x1b\\", b"\x18", b"\x1a"] {
+                let mut t = test_terminal(20, 2);
+                t.feed(b"\x1b]2;kept\x07\x1b]7;file:///kept\x07\x1b]8;;https://kept\x07");
+                let link = t.grid.current_hyperlink();
+                let cwd_version = t.cwd_version();
+                t.feed(b"\x1b]");
+                t.feed(prefix);
+                for _ in 0..=parser::MAX_RAW_OSC_BYTES / chunk.len() {
+                    t.feed(&chunk);
+                }
+                t.feed(end);
+                assert_eq!(t.title(), "kept", "prefix={prefix:?}, end={end:?}");
+                assert_eq!(t.cwd(), Some("/kept"));
+                assert_eq!(t.cwd_version(), cwd_version);
+                assert_eq!(t.grid.current_hyperlink(), link);
+                assert!(t.take_clipboard().is_empty());
+                t.feed(b"\x1b]2;after\x07\x1b[31mOK");
+                assert_eq!(t.title(), "after");
+                assert_eq!(t.grid.cell(0, 0).unwrap().ch, 'O');
+                assert_eq!(t.grid.cell(1, 0).unwrap().ch, 'K');
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_hyperlink_clears_current_link_without_interning_prefix() {
+        let mut t = test_terminal(10, 2);
+        t.feed(b"\x1b]8;;https://kept\x07");
+        assert!(t.grid.current_hyperlink().is_some());
+        t.feed(b"\x1b]8;id=1;https://host/");
+        t.feed(&[b'x'; crate::grid::MAX_HYPERLINK_URI]);
+        t.feed(b"\x07X");
+        assert!(t.grid.current_hyperlink().is_none());
+        assert!(t.grid.cell(0, 0).unwrap().hyperlink.is_none());
+        let invalid = [0xff; crate::grid::MAX_HYPERLINK_URI / 2];
+        let pieces = [invalid.as_slice()];
+        assert!(
+            matches!(
+                hyperlink_payload(OscPayload {
+                    first: b"",
+                    rest: &pieces
+                }),
+                Some(HyperlinkOp::TooLong(_))
+            ),
+            "lossy URI expansion must respect the same byte cap"
+        );
+    }
+
+    #[test]
+    fn osc52_full_one_megabyte_transfer_still_works_with_chunked_wrapping() {
+        let mut t = test_terminal(2, 1);
+        let text = "a".repeat(MAX_CLIPBOARD_BYTES);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&text);
+        t.feed(b"\x1b]52;c;");
+        for chunk in encoded.as_bytes().chunks(76) {
+            t.feed(chunk);
+            t.feed(b"\n ");
+        }
+        t.feed(b"\x1b");
+        t.feed(b"\\OK");
+        assert_eq!(t.take_clipboard(), vec![ClipboardOp::Set(text)]);
+        assert_eq!(t.grid.cell(0, 0).unwrap().ch, 'O');
+        assert_eq!(t.grid.cell(1, 0).unwrap().ch, 'K');
+    }
+
+    #[test]
+    fn osc52_lossy_utf8_expansion_cannot_bypass_final_text_limit() {
+        assert_eq!(osc_clipboard(&[b"52", b"c", b"/w=="], 2), None);
+        assert_eq!(
+            osc_clipboard(&[b"52", b"c", b"/w=="], 3),
+            Some(ClipboardOp::Set("\u{fffd}".into()))
+        );
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(vec![0xff; MAX_CLIPBOARD_BYTES]);
+        let pieces = [encoded.as_bytes()];
+        let payload = OscPayload {
+            first: b"c",
+            rest: &pieces,
+        };
+        let stats = crate::perf_bench::allocation_stats(|| {
+            assert_eq!(clipboard_payload(payload, MAX_CLIPBOARD_BYTES), None);
+        });
+        assert_eq!(stats.live_delta, 0);
+        assert!(
+            stats.largest_request <= encoded.len(),
+            "no expanded 3 MiB text allocation"
+        );
+        assert!(stats.peak_delta <= (encoded.len() + MAX_CLIPBOARD_BYTES + 2) as i64);
     }
 
     fn feed_str(t: &mut Terminal, s: &str) {
@@ -1136,9 +1444,8 @@ mod tests {
             for corpus in corpora {
                 let bytes = corpus.as_bytes();
                 let mut reference = test_terminal(cols, 3);
-                let mut parser = std::mem::replace(&mut reference.parser, Parser::new());
+                let mut parser = vte::Parser::new();
                 parser.advance(&mut Reference(&mut reference), bytes);
-                reference.parser = parser;
                 for split in 0..=bytes.len() {
                     let mut actual = test_terminal(cols, 3);
                     actual.feed(&bytes[..split]);

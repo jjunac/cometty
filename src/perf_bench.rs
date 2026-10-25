@@ -15,10 +15,15 @@ use crate::term::Terminal;
 use crate::theme::Theme;
 
 #[derive(Clone, Copy, Default)]
-struct Allocations {
+pub(crate) struct Allocations {
     calls: u64,
     reallocations: u64,
     bytes: u64,
+    /// Relative to the start of a counting window, not process-wide live RAM.
+    /// Frees of allocations made before the window can make this negative.
+    pub(crate) live_delta: i64,
+    pub(crate) peak_delta: i64,
+    pub(crate) largest_request: usize,
 }
 
 thread_local! {
@@ -28,12 +33,24 @@ thread_local! {
 
 struct CountingAllocator;
 
-fn count(bytes: usize, reallocation: bool) {
+fn count(bytes: usize, reallocation: bool, delta: i64) {
     let _ = ALLOCATIONS.try_with(|slot| {
         if let Some(mut counts) = slot.get() {
             counts.calls += u64::from(!reallocation);
             counts.reallocations += u64::from(reallocation);
             counts.bytes += bytes as u64;
+            counts.live_delta += delta;
+            counts.peak_delta = counts.peak_delta.max(counts.live_delta);
+            counts.largest_request = counts.largest_request.max(bytes);
+            slot.set(Some(counts));
+        }
+    });
+}
+
+fn count_free(bytes: usize) {
+    let _ = ALLOCATIONS.try_with(|slot| {
+        if let Some(mut counts) = slot.get() {
+            counts.live_delta -= bytes as i64;
             slot.set(Some(counts));
         }
     });
@@ -43,22 +60,32 @@ fn count(bytes: usize, reallocation: bool) {
 // accounting uses allocation-free TLS and is enabled only around one probe.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        count(layout.size(), false);
-        unsafe { System.alloc(layout) }
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() {
+            count(layout.size(), false, layout.size() as i64);
+        }
+        ptr
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        count(layout.size(), false);
-        unsafe { System.alloc_zeroed(layout) }
+        let ptr = unsafe { System.alloc_zeroed(layout) };
+        if !ptr.is_null() {
+            count(layout.size(), false, layout.size() as i64);
+        }
+        ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        count_free(layout.size());
         unsafe { System.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        count(new_size, true);
-        unsafe { System.realloc(ptr, layout, new_size) }
+        let ptr = unsafe { System.realloc(ptr, layout, new_size) };
+        if !ptr.is_null() {
+            count(new_size, true, new_size as i64 - layout.size() as i64);
+        }
+        ptr
     }
 }
 
@@ -66,6 +93,14 @@ unsafe impl GlobalAlloc for CountingAllocator {
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 pub(crate) fn allocation_counts(operation: impl FnOnce()) -> (u64, u64, u64) {
+    let counts = allocation_stats(operation);
+    (counts.calls, counts.reallocations, counts.bytes)
+}
+
+/// Tracks successful requested Rust bytes, not malloc slack/native/GPU/RSS or
+/// an allocator's internal realloc copying peak. Use stable pre-window owners
+/// (or create/drop them within the window) when asserting retention deltas.
+pub(crate) fn allocation_stats(operation: impl FnOnce()) -> Allocations {
     struct Reset;
     impl Drop for Reset {
         fn drop(&mut self) {
@@ -75,8 +110,7 @@ pub(crate) fn allocation_counts(operation: impl FnOnce()) -> (u64, u64, u64) {
     let _reset = Reset;
     ALLOCATIONS.with(|slot| slot.set(Some(Allocations::default())));
     operation();
-    let counts = ALLOCATIONS.with(|slot| slot.take().unwrap());
-    (counts.calls, counts.reallocations, counts.bytes)
+    ALLOCATIONS.with(|slot| slot.take().unwrap())
 }
 
 #[test]
