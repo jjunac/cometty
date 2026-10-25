@@ -1,5 +1,7 @@
 mod background;
 mod blocks;
+#[cfg(test)]
+mod gpu_tests;
 mod log_ui;
 mod overlay;
 mod search_ui;
@@ -176,6 +178,17 @@ pub struct RenderOutput {
     pub retry_after: Option<Duration>,
 }
 
+/// All inputs baked into glyphon's prepared instances. The revision belongs
+/// to the shared shaped buffer, not a tab's (possibly equal) grid counter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreparedTextKey {
+    revision: u64,
+    width: u32,
+    height: u32,
+    top: u32,
+    default_color: glyphon::Color,
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -228,6 +241,8 @@ pub struct Renderer {
     /// (a hash hit is only valid under identical shaping inputs); kept
     /// across `invalidate()` so content-identical frames skip layout.
     shaped_hashes: Vec<u64>,
+    text_revision: u64,
+    prepared_text: Option<PreparedTextKey>,
     /// Last slow-frame log (see `slow_log_due`): rate-limits the
     /// debug probes so a sustained slowdown can't flood the log panel.
     last_slow_log: Option<Instant>,
@@ -404,10 +419,12 @@ impl Renderer {
             egui_renderer,
             title_width_cache: std::collections::HashMap::new(),
             title_width_font: None,
-            advance_cache: std::collections::HashMap::new(),
+            advance_cache: text::AdvanceCache::new(),
             // Empty: the first render takes the full path below, which
             // fills it; every config change clears it for the same reason.
             shaped_hashes: Vec::new(),
+            text_revision: 0,
+            prepared_text: None,
             last_slow_log: None,
             surface_failures: 0,
         };
@@ -679,7 +696,9 @@ impl Renderer {
         let rebuild_elapsed = if grid_version != self.last_grid_version {
             let _timing = crate::perf::measure(crate::perf::Metric::Rebuild);
             let rebuild_start = Instant::now();
-            self.rebuild_buffer(grid_rows);
+            if self.rebuild_buffer(grid_rows) {
+                self.text_revision = self.text_revision.wrapping_add(1);
+            }
             let rebuild_elapsed = rebuild_start.elapsed();
             if rebuild_elapsed >= Duration::from_millis(8)
                 && slow_log_due(&mut self.last_slow_log, Instant::now())
@@ -741,6 +760,7 @@ impl Renderer {
                 return Ok(out);
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.prepared_text = None;
                 self.surface.configure(&self.device, &self.config);
                 out.retry_after = Some(surface_retry_delay(&mut self.surface_failures));
                 crate::perf::add(crate::perf::Metric::Skipped, 1);
@@ -760,34 +780,54 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let text_areas = [TextArea {
-            buffer: &self.buffer,
-            left: 0.0,
-            top: self.tab_bar_px(tab_count),
-            scale: 1.0,
-            bounds: TextBounds {
-                left: 0,
-                top: 0,
-                right: self.width as i32,
-                bottom: self.height as i32,
-            },
+        let top = self.tab_bar_px(tab_count);
+        let key = PreparedTextKey {
+            revision: self.text_revision,
+            width: self.width,
+            height: self.height,
+            top: top.to_bits(),
             default_color: self.theme.foreground.as_glyphon_color(),
-            custom_glyphs: &[],
-        }];
-
-        let prepare_start = Instant::now();
-        let prepare_timing = crate::perf::measure(crate::perf::Metric::Prepare);
-        self.text_renderer.prepare(
-            &self.device,
-            &self.queue,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            text_areas,
-            &mut self.swash_cache,
-        )?;
-        drop(prepare_timing);
-        let prepare_elapsed = prepare_start.elapsed();
+        };
+        let prepare_elapsed = if self.prepared_text != Some(key) {
+            // This atlas is private to this one TextRenderer. Keep the last
+            // preparation's glyphs pinned for every reuse frame; only unpin
+            // immediately before replacing ALL instances. No atlas writes or
+            // allocation may be introduced on the reuse path. glyphon 0.12's
+            // trim clears in-use tracking, it does not free texture storage.
+            // A failed prepare may have mutated both atlas and instances:
+            // never fall back to the previously prepared key after an error.
+            self.prepared_text = None;
+            self.atlas.trim();
+            let prepare_start = Instant::now();
+            let _timing = crate::perf::measure(crate::perf::Metric::Prepare);
+            self.text_renderer.prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                [TextArea {
+                    buffer: &self.buffer,
+                    left: 0.0,
+                    top,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.width as i32,
+                        bottom: self.height as i32,
+                    },
+                    default_color: key.default_color,
+                    custom_glyphs: &[],
+                }],
+                &mut self.swash_cache,
+            )?;
+            self.prepared_text = Some(key);
+            prepare_start.elapsed()
+        } else {
+            crate::perf::add(crate::perf::Metric::PrepareReuse, 1);
+            Duration::ZERO
+        };
 
         let encode_start = Instant::now();
         let encode_timing = crate::perf::measure(crate::perf::Metric::EncodeSubmit);
@@ -858,7 +898,6 @@ impl Renderer {
         }
         out.presented = true;
         crate::perf::add(crate::perf::Metric::Presented, 1);
-        self.atlas.trim();
         Ok(out)
     }
 }
@@ -867,6 +906,45 @@ impl Renderer {
 mod tests {
     use super::*;
     use crate::grid::Cell;
+
+    #[test]
+    fn prepared_text_key_ignores_grid_counters_and_tracks_baked_inputs() {
+        let key = PreparedTextKey {
+            revision: 1,
+            width: 800,
+            height: 600,
+            top: 38.0_f32.to_bits(),
+            default_color: glyphon::Color::rgb(255, 255, 255),
+        };
+        let prepared = Some(key);
+        // Cursor/selection/search/link/chrome changes alter none of these
+        // inputs. Even an invalidated grid can keep all row text hashes.
+        let mut rows = vec![test_cells("same shaped text")];
+        let mut hashes = vec![text::row_text_hash(&rows[0])];
+        rows[0][0].underline = crate::grid::UnderlineStyle::Double;
+        rows[0][1].hyperlink = Some(3);
+        assert!(text::diff_rows(&mut hashes, &rows).unwrap().is_empty());
+        assert_eq!(prepared, Some(key));
+        for changed in [
+            PreparedTextKey { revision: 2, ..key },
+            PreparedTextKey { width: 801, ..key },
+            PreparedTextKey { height: 601, ..key },
+            PreparedTextKey {
+                top: 0.0_f32.to_bits(),
+                ..key
+            },
+            PreparedTextKey {
+                default_color: glyphon::Color::rgb(1, 2, 3),
+                ..key
+            },
+        ] {
+            assert_ne!(prepared, Some(changed));
+        }
+        // A new tab with the same numeric grid counter but different text
+        // must replace lines before key construction, advancing the revision.
+        rows[0][0].ch = 'X';
+        assert_eq!(text::diff_rows(&mut hashes, &rows), Some(vec![0]));
+    }
 
     #[test]
     fn surface_retries_back_off_without_a_blink_timer() {

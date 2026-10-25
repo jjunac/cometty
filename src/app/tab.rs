@@ -54,6 +54,8 @@ impl Default for LinkHintCache {
 
 /// A single terminal tab.
 pub struct Tab {
+    /// Monotonic session identity; indices change when other tabs close.
+    pub(crate) id: u64,
     pub(crate) terminal: Terminal,
     pub(crate) pty: PtySession,
     pub(crate) selection: Option<Selection>,
@@ -69,11 +71,17 @@ pub struct Tab {
     pub(crate) search: SearchPanel,
     /// Per-tab link hint cache (view only).
     pub(crate) link_hints: LinkHintCache,
+    pub(crate) sync: super::scheduling::SyncPresentation,
+    pub(crate) visual_dirty: bool,
+    pub(crate) last_key_write: Option<Instant>,
+    pub(crate) last_output: Option<Instant>,
+    pub(crate) last_service: Option<Instant>,
 }
 
 impl Tab {
-    pub(crate) fn new(terminal: Terminal, pty: PtySession) -> Self {
+    pub(crate) fn new(id: u64, terminal: Terminal, pty: PtySession) -> Self {
         Self {
+            id,
             terminal,
             pty,
             selection: None,
@@ -85,6 +93,11 @@ impl Tab {
             foreground: Foreground::default(),
             search: SearchPanel::default(),
             link_hints: LinkHintCache::default(),
+            sync: super::scheduling::SyncPresentation::default(),
+            visual_dirty: true,
+            last_key_write: None,
+            last_output: None,
+            last_service: None,
         }
     }
 
@@ -395,37 +408,39 @@ impl App {
         self.tabs
             .iter()
             .enumerate()
-            .map(|(i, t)| {
-                // Shell-reported OSC 7 (only while it is live for the
-                // current job) or the shell process's kernel cwd, picked by
-                // who owns the terminal (see `preferred_cwd`); shortened at
-                // the last moment so the cache keeps raw paths.
-                let shell_foreground = t
-                    .pty
-                    .shell_pid()
-                    .is_some_and(|pid| t.foreground.pgid == Some(pid));
-                let osc7_live = osc7_is_live(
-                    t.terminal.cwd_version(),
-                    t.foreground.cwd_baseline,
-                    shell_foreground,
-                );
-                let cwd = preferred_cwd(
-                    t.terminal.cwd().filter(|_| osc7_live),
-                    t.foreground.cwd.as_deref(),
-                    shell_foreground,
-                )
-                .map(procinfo::shorten_home);
-                format_title(
-                    &TitleVars {
-                        title: t.terminal.title(),
-                        command: t.foreground.command.as_deref(),
-                        cwd: cwd.as_deref(),
-                        tab: i,
-                    },
-                    &self.config.tabbar,
-                )
-            })
+            .map(|(i, t)| self.title_for_tab(i, t))
             .collect()
+    }
+
+    pub(crate) fn title_for_tab(&self, i: usize, t: &Tab) -> String {
+        // Shell-reported OSC 7 (only while it is live for the
+        // current job) or the shell process's kernel cwd, picked by
+        // who owns the terminal (see `preferred_cwd`); shortened at
+        // the last moment so the cache keeps raw paths.
+        let shell_foreground = t
+            .pty
+            .shell_pid()
+            .is_some_and(|pid| t.foreground.pgid == Some(pid));
+        let osc7_live = osc7_is_live(
+            t.terminal.cwd_version(),
+            t.foreground.cwd_baseline,
+            shell_foreground,
+        );
+        let cwd = preferred_cwd(
+            t.terminal.cwd().filter(|_| osc7_live),
+            t.foreground.cwd.as_deref(),
+            shell_foreground,
+        )
+        .map(procinfo::shorten_home);
+        format_title(
+            &TitleVars {
+                title: t.terminal.title(),
+                command: t.foreground.command.as_deref(),
+                cwd: cwd.as_deref(),
+                tab: i,
+            },
+            &self.config.tabbar,
+        )
     }
 
     /// Push the active tab's OSC title to the OS window chrome.
@@ -509,7 +524,13 @@ impl App {
         // The label stays `Tab N` until the first prompt output triggers
         // `refresh_title`: a spawn-time query would race the child's exec
         // and may report cometty's own image as `$command`.
-        self.tabs.push(Tab::new(terminal, pty));
+        let id = self.next_tab_id;
+        self.next_tab_id = self.next_tab_id.wrapping_add(1);
+        if let Some(old) = self.active_tab_mut() {
+            old.last_output = None;
+            old.last_key_write = None;
+        }
+        self.tabs.push(Tab::new(id, terminal, pty));
         self.active = self.tabs.len() - 1;
         log::debug!("spawned tab {} ({}x{})", self.tabs.len(), cols, rows);
         if let Some(r) = self.renderer.as_mut() {
@@ -558,6 +579,10 @@ impl App {
         if index >= self.tabs.len() || index == self.active {
             return;
         }
+        if let Some(old) = self.active_tab_mut() {
+            old.last_output = None;
+            old.last_key_write = None;
+        }
         self.active = index;
         log::debug!("switched to tab {index}");
         // Two tabs can share a grid version while holding different
@@ -589,6 +614,7 @@ impl App {
         }
         log::debug!("closed tab {index} ({} left)", self.tabs.len() - 1);
         self.tabs.remove(index);
+        self.pty_schedule.removed(&[index], self.tabs.len());
         if self.tabs.is_empty() {
             return true;
         }

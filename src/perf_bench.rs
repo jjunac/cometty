@@ -279,7 +279,11 @@ fn headless_release() {
     let theme = Theme::default();
     let mut fonts = cosmic_text::FontSystem::new();
     let mut cache = AdvanceCache::new();
-    for (name, cluster) in [("shape_ascii", "e"), ("shape_decomposed", "e\u{301}")] {
+    for (name, cluster) in [
+        ("shape_ascii", "e"),
+        ("shape_decomposed", "e\u{301}"),
+        ("shape_zwj", "👨\u{200d}👩\u{200d}👧"),
+    ] {
         let mut grid = Grid::new(200, 60, theme);
         for _ in 0..200 {
             for c in cluster.chars() {
@@ -308,20 +312,16 @@ fn headless_release() {
         measure(name, 5, || {
             black_box(text::build_buffer_line(black_box(row), &theme, &mut ctx));
         });
-        measure(
-            if name == "shape_ascii" {
-                "layout_ascii"
-            } else {
-                "layout_decomposed"
-            },
-            5,
-            || {
-                let line = text::build_buffer_line(black_box(row), &theme, &mut ctx);
-                buffer.lines.clear();
-                buffer.lines.push(line);
-                black_box(buffer.line_layout(ctx.font_system, 0));
-            },
-        );
+        measure(&name.replacen("shape_", "layout_", 1), 5, || {
+            let line = text::build_buffer_line(black_box(row), &theme, &mut ctx);
+            buffer.lines.clear();
+            buffer.lines.push(line);
+            black_box(buffer.line_layout(ctx.font_system, 0));
+        });
+        measure(&format!("{name}_cold_advances"), 5, || {
+            ctx.cache.clear();
+            black_box(text::build_buffer_line(black_box(row), &theme, &mut ctx));
+        });
     }
     let grid = Grid::new(200, 60, theme);
     let mut hashes: Vec<_> = grid

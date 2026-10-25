@@ -49,6 +49,9 @@ pub struct App {
     pub(crate) renderer: Option<Renderer>,
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
+    pub(crate) next_tab_id: u64,
+    pub(crate) pty_schedule: scheduling::DrainSchedule,
+    pub(crate) last_slow_drain: Option<Instant>,
     pub(crate) proxy: Option<winit::event_loop::EventLoopProxy<UserEvent>>,
     pub(crate) theme: Theme,
     pub(crate) config: Config,
@@ -90,13 +93,7 @@ pub struct App {
     /// instead of re-cloning `rows x cols` Cells every frame.
     pub(crate) snapshot_rows: Vec<Vec<crate::grid::Cell>>,
     pub(crate) snapshot_version: u64,
-    pub(crate) snapshot_tab: usize,
-    /// Key-to-paint latency probe (debug logs only, never affects
-    /// rendering): stamped when a keystroke is handed to the PTY writer,
-    /// consumed by the next drain (key-to-echo) and the next content
-    /// rebuild (echo-to-paint).
-    pub(crate) last_key_write: Option<Instant>,
-    pub(crate) last_echo: Option<Instant>,
+    pub(crate) snapshot_tab: Option<u64>,
 }
 
 impl App {
@@ -113,6 +110,9 @@ impl App {
             renderer: None,
             tabs: Vec::new(),
             active: 0,
+            next_tab_id: 0,
+            pty_schedule: scheduling::DrainSchedule::default(),
+            last_slow_drain: None,
             proxy,
             theme,
             config,
@@ -140,9 +140,7 @@ impl App {
             menu: None,
             snapshot_rows: Vec::new(),
             snapshot_version: u64::MAX,
-            snapshot_tab: usize::MAX,
-            last_key_write: None,
-            last_echo: None,
+            snapshot_tab: None,
         }
     }
 

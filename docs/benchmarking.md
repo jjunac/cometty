@@ -34,6 +34,10 @@ allocator wrapper is installed in the application binary.
 `shape_*` measures line construction only; `layout_*` includes construction and
 final cosmic-text row layout. `projection_cached_*` measures the production
 per-tab projection cache, not just the standalone projector.
+`shape_*_cold_advances` clears the advance/measurement cache for each operation;
+the regular shape/layout cases warm it once. Font discovery/font-system caches
+remain warm, so these are not cold-start font measurements. ZWJ cases fill the
+same 200 columns with 100 wide clusters rather than 200 narrow ones.
 
 Use same-machine A/B runs, not fixed wall-clock CI thresholds. Deterministic
 tests cover work bounds, state equivalence, repaint decisions and invalidation.
@@ -54,6 +58,41 @@ They are disabled by default. Phases nest: do not sum their totals as frame time
 these are wall-clock phase measurements, not process CPU time. They can include
 preemption, and acquire/present can include platform waits; neither measures GPU
 execution.
+
+Tranche two adds `advance_miss`, `prepare_reuse`, `coalesced_wake`, `drain_yield`,
+`queue_wait` and `queued_bytes` (a per-queue high-water byte value including the
+reader's one in-flight send). Queue wait starts before the bounded send, so it
+includes reader backpressure as well as time in the channel.
+
+Timed phases report `p99_us_le`, an approximate percentile **upper bound** from
+fixed log2-microsecond buckets, not an exact p99. Counters have zero timing fields;
+`max_value` is used for high-water values. At most 64 stable tab IDs per reporting
+interval also report backlogged service gaps, input-to-first-output and oldest
+unpresented output-to-present. Empty queues reset their service-gap clock and
+tab switches discard pending presentation stamps. The input probe is still a
+heuristic: unrelated output in the **same tab** can arrive first. It does not
+prove an echo, correlate every repeated key, or measure scanned-out pixels.
+All diagnostics remain opt-in and add no timer/log-ring feedback.
+
+## Explicit scheduling and GPU checks
+
+```sh
+COMETTY_PERF=0 cargo test --release pty::tests::fair_drain_under_load -- --ignored --exact --nocapture --test-threads=1
+cargo test --release renderer::gpu_tests::retained_glyphs_match_fresh_preparation_after_atlas_churn -- --ignored --exact --nocapture --test-threads=1
+```
+
+The scheduling probe uses production bounded/coalesced queues, the production
+fair order/budget and terminal feeds, with a saturated earlier queue, an identified
+request/response in active slot 2, and an exit in slot 3. It reports exact sample
+p50/p95/p99 request-to-parse timings after eight warm-ups. It excludes OS PTYs,
+metadata queries, event-loop dispatch, rendering and presentation: it is **not**
+an interactive GUI echo-latency result. It is intentionally not a wall-clock CI
+gate. The ordinary tests assert fairness and shared budgets deterministically.
+
+The GPU check is ignored by default and requires a working adapter, but creates
+no window/surface. It compares offscreen pixels from retained instances against
+fresh preparation while changing glyph sets/styles and exercising atlas growth/
+reuse. It is a correctness check, not a GPU/application performance measurement.
 
 Dense search still stores all matches; this tranche does not change result
 counts or make scans incremental. Projection storage is restricted to visible

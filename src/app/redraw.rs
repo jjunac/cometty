@@ -37,6 +37,17 @@ impl App {
         if self.drain_pty() {
             return;
         }
+        if let Some(tab) = self.active_tab_mut() {
+            let now = Instant::now();
+            tab.sync.update(tab.terminal.in_sync(), now);
+            if tab.sync.blocked(now) {
+                // Every source of RedrawRequested observes synchronization,
+                // including blink/chrome events. The explicit, bounded sync
+                // deadline releases presentation even if the end is missing.
+                crate::perf::add(crate::perf::Metric::Skipped, 1);
+                return;
+            }
+        }
         // Defensive: alt switches always drop the selection.
         if let Some(tab) = self.active_tab() {
             let alt_now = tab.terminal.grid().is_alt();
@@ -58,15 +69,18 @@ impl App {
         let link_hints = self.link_hint_view();
 
         let active = self.active;
-        let Some(version) = self.tabs.get(active).map(|t| t.terminal.grid().version) else {
+        let Some((tab_id, version)) = self
+            .tabs
+            .get(active)
+            .map(|t| (t.id, t.terminal.grid().version))
+        else {
             return;
         };
         // Version-gated snapshot: idle blink frames reuse the last clone
         // instead of re-cloning `rows x cols` Cells every frame. A tab
         // switch changes `active`, so two tabs sharing a version still
         // rebuild (their content differs).
-        let snap_before = (self.snapshot_tab, self.snapshot_version);
-        if self.snapshot_tab != active || self.snapshot_version != version {
+        if self.snapshot_tab != Some(tab_id) || self.snapshot_version != version {
             let _timing = crate::perf::measure(crate::perf::Metric::Snapshot);
             let rows: Vec<Vec<grid::Cell>> = self.tabs[active]
                 .terminal
@@ -81,11 +95,8 @@ impl App {
                 self.snapshot_rows.iter().map(Vec::len).sum(),
             );
             self.snapshot_version = version;
-            self.snapshot_tab = active;
+            self.snapshot_tab = Some(tab_id);
         }
-        // Latency probe: only a rebuilt snapshot can carry fresh echo to
-        // the screen, so blink-only frames must not consume `last_echo`.
-        let rebuilt = (self.snapshot_tab, self.snapshot_version) != snap_before;
 
         // Small owned fields; the heavy `rows` stay in the cache above and
         // are borrowed for `render` (disjoint from the `&mut` borrows below).
@@ -224,20 +235,17 @@ impl App {
             });
             (out, cfg_changed, q_changed)
         };
-        if rebuilt && output.presented {
-            // Latency probe: echo bytes -> painted frame carrying them.
-            if let Some(t) = self.last_echo.take() {
+        if output.presented
+            && let Some(tab) = self.tabs.get_mut(active)
+        {
+            tab.visual_dirty = false;
+            if let Some(t) = tab.last_output.take() {
                 let elapsed = t.elapsed();
+                crate::perf::tab_duration(tab.id, crate::perf::TabMetric::OutputPresent, elapsed);
                 if elapsed <= Duration::from_secs(2) {
-                    log::debug!("echo-to-paint {elapsed:?}");
+                    log::debug!("output-to-present tab={} {elapsed:?}", tab.id);
                 }
             }
-        } else if output.presented {
-            // No new content reached the screen, so a pending echo stamp
-            // is spent: this frame already reflects everything drained.
-            // Dropping it keeps a later, unrelated frame from attributing
-            // a stale echo to itself.
-            self.last_echo.take();
         }
 
         // egui's own next-frame request (hover fades, panel animations,

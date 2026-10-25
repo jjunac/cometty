@@ -6,14 +6,7 @@ use super::App;
 use crate::app::tab::{active_after_removals, term_height_px};
 use crate::pty::PtyEvent;
 
-/// Per-frame drain budget: a burst (`cat` a huge file, paste flood) must
-/// not block the UI thread. Excess stays queued and continues next frame.
-pub(crate) const MAX_DRAIN_BYTES: usize = 256 * 1024;
-pub(crate) const MAX_DRAIN_TIME: Duration = Duration::from_millis(4);
-
-pub(crate) fn drain_budget_exceeded(bytes: usize, elapsed: Duration) -> bool {
-    bytes >= MAX_DRAIN_BYTES || elapsed >= MAX_DRAIN_TIME
-}
+use super::scheduling::MAX_DRAIN_TIME;
 
 impl App {
     pub(crate) fn scroll_terminal(&mut self, delta: isize) {
@@ -32,9 +25,11 @@ impl App {
     /// Returns true when no tabs remain (shell of the last tab exited)
     /// and the caller should exit the event loop.
     pub(crate) fn drain_pty(&mut self) -> bool {
+        self.pty_pending = self.tabs.iter().any(|tab| tab.pty.output_pending());
+        if !self.pty_pending || self.pty_schedule.exhausted(Duration::ZERO) {
+            return self.tabs.is_empty();
+        }
         let _timing = crate::perf::measure(crate::perf::Metric::Drain);
-        self.pty_pending = false;
-        let mut got_data = false;
         let mut exited: Vec<usize> = Vec::new();
         // OSC 52 requests leave the terminal (which owns no clipboard), but
         // the app-wide arboard handle is borrowed mutably: collect first,
@@ -42,52 +37,116 @@ impl App {
         let mut clipboard_ops: Vec<(usize, crate::term::ClipboardOp)> = Vec::new();
         let start = Instant::now();
         let mut drained_bytes: usize = 0;
-        let mut budget_hit = false;
-        for (i, tab) in self.tabs.iter_mut().enumerate() {
-            let mut got_bytes = false;
-            loop {
-                match tab.pty.try_recv() {
-                    Some(PtyEvent::Data(bytes)) => {
-                        drained_bytes = drained_bytes.saturating_add(bytes.len());
-                        {
-                            let _timing = crate::perf::measure(crate::perf::Metric::Parse);
-                            tab.terminal.feed(&bytes);
-                        }
-                        crate::perf::add(crate::perf::Metric::ParsedBytes, bytes.len());
-                        // Query replies (DA / CPR / DSR / DECRQM) flow back.
-                        let reply = tab.terminal.take_response();
-                        if !reply.is_empty() {
-                            tab.pty.write(reply);
-                        }
-                        clipboard_ops
-                            .extend(tab.terminal.take_clipboard().into_iter().map(|op| (i, op)));
-                        got_data = true;
-                        got_bytes = true;
-                        if drain_budget_exceeded(drained_bytes, start.elapsed()) {
-                            budget_hit = true;
-                            break;
+        let mut titles_before = vec![None; self.tabs.len()];
+        let mut empty_visits = 0;
+        // One chunk per visit is the per-tab quantum. The persistent order
+        // also survives an expensive callback that overshoots the deadline.
+        while !self.pty_schedule.exhausted(start.elapsed()) {
+            let Some(i) = self.pty_schedule.next_tab(self.tabs.len(), self.active) else {
+                break;
+            };
+            let event = if exited.contains(&i) {
+                None
+            } else {
+                self.tabs[i].pty.try_recv()
+            };
+            match event {
+                Some(PtyEvent::Data(bytes)) => {
+                    if titles_before[i].is_none() {
+                        titles_before[i] = Some(self.title_for_tab(i, &self.tabs[i]));
+                    }
+                    empty_visits = 0;
+                    let tab = &mut self.tabs[i];
+                    let now = Instant::now();
+                    if crate::perf::enabled()
+                        && let Some(last) = tab.last_service.replace(now)
+                    {
+                        crate::perf::tab_duration(
+                            tab.id,
+                            crate::perf::TabMetric::ServiceGap,
+                            now.saturating_duration_since(last),
+                        );
+                    }
+                    if let Some(input) = tab.last_key_write.take() {
+                        let elapsed = now.saturating_duration_since(input);
+                        if elapsed <= Duration::from_secs(2) {
+                            crate::perf::tab_duration(
+                                tab.id,
+                                crate::perf::TabMetric::InputOutput,
+                                elapsed,
+                            );
+                            log::debug!("input-to-first-output tab={} {elapsed:?}", tab.id);
                         }
                     }
-                    Some(PtyEvent::Exit) => {
-                        log::info!("shell exited (tab {i})");
-                        exited.push(i);
-                        got_data = true;
-                        break;
+                    drained_bytes = drained_bytes.saturating_add(bytes.len());
+                    self.pty_schedule.add_bytes(bytes.len());
+                    let before = tab.terminal.grid().version;
+                    {
+                        let _timing = crate::perf::measure(crate::perf::Metric::Parse);
+                        tab.terminal.feed(&bytes);
                     }
-                    None => break,
+                    crate::perf::add(crate::perf::Metric::ParsedBytes, bytes.len());
+                    // Query replies (DA / CPR / DSR / DECRQM) flow back.
+                    let reply = tab.terminal.take_response();
+                    if !reply.is_empty() {
+                        tab.pty.write(reply);
+                    }
+                    clipboard_ops
+                        .extend(tab.terminal.take_clipboard().into_iter().map(|op| (i, op)));
+                    if before != tab.terminal.grid().version {
+                        tab.visual_dirty = true;
+                        // Keep the oldest unpresented output stamp, not
+                        // the most recent chunk in a continuous flood.
+                        if i == self.active {
+                            tab.last_output.get_or_insert(now);
+                        }
+                    }
+                    tab.sync.update(tab.terminal.in_sync(), now);
+                }
+                Some(PtyEvent::Exit) => {
+                    log::info!("shell exited (tab {i})");
+                    exited.push(i);
+                    empty_visits += 1;
+                }
+                None => {
+                    self.tabs[i].last_service = None;
+                    empty_visits += 1;
                 }
             }
-            // Output is the only reliable signal that the foreground job
-            // or the shell's cwd changed; refresh `$command`/`$cwd` once
-            // per burst rather than per 8KB chunk.
-            if got_bytes {
-                tab.refresh_title();
-            }
-            if budget_hit {
+            // A weighted round visits every queue within at most 2N slots.
+            if empty_visits >= self.tabs.len().saturating_mul(2) {
                 break;
             }
         }
-        self.pty_pending = budget_hit;
+        let mut chrome_changed = false;
+        for (i, before) in titles_before.iter().enumerate() {
+            if let Some(before) = before {
+                // Metadata queries stay off the render path and run once
+                // per touched tab, not once per scheduling quantum.
+                let tab = &mut self.tabs[i];
+                tab.refresh_title();
+                if tab.visual_dirty && !tab.selecting {
+                    tab.selection = None;
+                    tab.select_mode = crate::selection::SelectMode::Char;
+                    tab.select_anchor = None;
+                }
+                chrome_changed |= *before != self.title_for_tab(i, &self.tabs[i]);
+            }
+        }
+        let active_output = titles_before.get(self.active).is_some_and(Option::is_some);
+        if active_output {
+            self.sync_window_title();
+        }
+        // A background tab cannot consume the active tab's selection.
+        if active_output
+            && self.should_clear_selection()
+            && self.active_tab().is_some_and(|t| t.visual_dirty)
+        {
+            self.clear_selection();
+            if let Some(tab) = self.active_tab_mut() {
+                tab.is_alt = tab.terminal.grid().is_alt();
+            }
+        }
         // Apply OSC 52 requests while tab indices still match (a tab
         // removed below could shift another tab's reply target).
         if !clipboard_ops.is_empty() {
@@ -95,6 +154,8 @@ impl App {
         }
         // Remove exited tabs from the back so indices stay valid, then
         // remap the active index once (tabs before it may have vanished).
+        exited.sort_unstable();
+        exited.dedup();
         let removed = !exited.is_empty();
         for i in exited.iter().rev() {
             self.tabs.remove(*i);
@@ -104,49 +165,39 @@ impl App {
         }
         if removed {
             self.active = active_after_removals(self.active, &exited, self.tabs.len());
-        }
-        if removed {
+            self.pty_schedule.removed(&exited, self.tabs.len());
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.invalidate();
+            }
             // Dropping to 1 tab hides the bar and hands space back.
             self.sync_tab_sizes();
         }
-        if got_data {
-            // Latency probe: keystroke -> first echo bytes back on the UI
-            // thread. Only attributed when recent; older stamps are stale
-            // background output, dropped silently.
-            if let Some(t) = self.last_key_write.take() {
-                let elapsed = t.elapsed();
-                if elapsed <= Duration::from_secs(2) {
-                    log::debug!("key-to-echo {elapsed:?} ({drained_bytes}B drained)");
-                }
-            }
-            self.last_echo = Some(Instant::now());
-            let drain_elapsed = start.elapsed();
-            if drain_elapsed >= Duration::from_millis(4) {
-                log::debug!("slow pty drain {drain_elapsed:?} ({drained_bytes}B)");
-            }
+        self.pty_pending = self.tabs.iter().any(|tab| tab.pty.output_pending());
+        let drain_elapsed = start.elapsed();
+        self.pty_schedule.finish_call(drain_elapsed);
+        if self.pty_pending && self.pty_schedule.exhausted(Duration::ZERO) {
+            crate::perf::add(crate::perf::Metric::DrainYield, 1);
         }
-        if got_data && self.should_clear_selection() {
-            // New output invalidates the selected text; alt switches too.
-            // Skipped mid-drag (see `should_clear_selection`).
-            self.clear_selection();
-            if let Some(tab) = self.active_tab_mut() {
-                tab.is_alt = tab.terminal.grid().is_alt();
-            }
-            if let Some(r) = self.renderer.as_mut() {
-                // Titles feed the tab bar; a changed title must repaint
-                // even when the grid version is unchanged.
-                r.invalidate();
-            }
-            // Synchronized output (`CSI ? 2026 h`): batch intermediate
-            // frames; the end marker (`l`) clears `in_sync` so that drain
-            // redraws once with the final state. A budget hit always
-            // re-requests: queued bytes remain and need another drain.
-            let in_sync = self.active_tab().is_some_and(|t| t.terminal.in_sync());
-            if (budget_hit || !in_sync)
-                && let Some(w) = self.window.as_ref()
-            {
-                w.request_redraw();
-            }
+        if drained_bytes > 0
+            && drain_elapsed >= MAX_DRAIN_TIME
+            && self
+                .last_slow_drain
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(2))
+        {
+            self.last_slow_drain = Some(Instant::now());
+            log::debug!("slow pty drain {drain_elapsed:?} ({drained_bytes}B)");
+        }
+        // Parsing continuation is scheduled separately by about_to_wait;
+        // queued background bytes are not a reason to present the active view.
+        let visible_changed = active_output
+            && self.active_tab().is_some_and(|tab| {
+                tab.visual_dirty && !tab.selecting && !tab.sync.blocked(Instant::now())
+            });
+        if !self.visuals_suspended()
+            && (visible_changed || chrome_changed || removed)
+            && let Some(w) = self.window.as_ref()
+        {
+            w.request_redraw();
         }
         false
     }
@@ -205,6 +256,111 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::scheduling::{MAX_DRAIN_BYTES, drain_budget_exceeded};
+
+    fn app() -> App {
+        let mut config = crate::config::Config::default();
+        config.clipboard.osc52 = "off".into();
+        App::new(
+            None,
+            crate::theme::Theme::default(),
+            config,
+            crate::app::AppStartup {
+                config_path_override: None,
+                cli_theme: None,
+                config_corrupt: false,
+            },
+            std::sync::Arc::new(std::sync::Mutex::new(crate::logbuf::LogBuffer::new(1000))),
+        )
+    }
+
+    fn add_tab(
+        app: &mut App,
+    ) -> (
+        impl Fn(PtyEvent) + use<>,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        let (pty, output, input) = crate::pty::test_support::session();
+        let terminal = crate::term::Terminal::new(20, 2, crate::theme::Theme::default());
+        let mut tab = crate::app::Tab::new(app.next_tab_id, terminal, pty);
+        tab.visual_dirty = false; // model an already presented frame
+        app.next_tab_id += 1;
+        app.tabs.push(tab);
+        (output, input)
+    }
+
+    fn finish_draining(app: &mut App) {
+        for _ in 0..128 {
+            app.pty_schedule.begin_turn();
+            if app.drain_pty() || !app.pty_pending {
+                return;
+            }
+        }
+        panic!("stranded PTY continuation");
+    }
+
+    #[test]
+    fn background_output_does_not_dirty_or_clear_the_active_view_or_steal_input_stamp() {
+        let mut app = app();
+        let (background, _) = add_tab(&mut app);
+        let (_foreground, _) = add_tab(&mut app);
+        app.active = 1;
+        let selection = crate::selection::Selection::new(crate::selection::CellPos { x: 0, y: 0 });
+        app.tabs[1].selection = Some(selection);
+        app.tabs[1].last_key_write = Some(Instant::now());
+        background(PtyEvent::Data(b"background output".to_vec()));
+        finish_draining(&mut app);
+        assert!(app.tabs[0].visual_dirty);
+        assert!(!app.tabs[1].visual_dirty);
+        assert_eq!(app.tabs[1].selection, Some(selection));
+        assert!(app.tabs[1].last_key_write.is_some());
+        assert!(app.tabs[1].last_output.is_none());
+    }
+
+    #[test]
+    fn budget_continuation_and_replies_work_while_occluded_dragging_and_synchronized() {
+        let mut app = app();
+        let (output, input) = add_tab(&mut app);
+        app.occluded = true;
+        app.tabs[0].selecting = true;
+        output(PtyEvent::Data(b"\x1b[?2026hhel".to_vec()));
+        output(PtyEvent::Data(b"lo\x1b[6n".to_vec()));
+        app.pty_schedule.add_bytes(MAX_DRAIN_BYTES);
+        assert!(!app.drain_pty());
+        assert!(app.pty_pending);
+        assert!(input.try_recv().is_err());
+        finish_draining(&mut app);
+        assert_eq!(input.try_recv().unwrap(), b"\x1b[1;6R");
+        assert!(app.tabs[0].selecting);
+        assert!(app.tabs[0].sync.deadline().is_some());
+        assert_eq!(app.tabs[0].terminal.grid().cell(0, 0).unwrap().ch, 'h');
+        output(PtyEvent::Data(b"\x1b[?2026l".to_vec()));
+        finish_draining(&mut app);
+        assert!(app.tabs[0].sync.deadline().is_none());
+        assert!(app.tabs[0].visual_dirty);
+    }
+
+    #[test]
+    fn out_of_order_exits_keep_reply_targets_and_surviving_tab_identity() {
+        let mut app = app();
+        let (first, replies) = add_tab(&mut app);
+        let (second, _) = add_tab(&mut app);
+        let (third, _) = add_tab(&mut app);
+        let (_survivor, _) = add_tab(&mut app);
+        app.active = 2;
+        app.snapshot_tab = Some(app.tabs[2].id);
+        first(PtyEvent::Data(b"\x1b[6n\x1b]52;c;?\x07".to_vec()));
+        first(PtyEvent::Exit);
+        second(PtyEvent::Exit);
+        third(PtyEvent::Exit);
+        finish_draining(&mut app);
+        assert_eq!(replies.try_recv().unwrap(), b"\x1b[1;1R");
+        assert!(replies.try_recv().is_err()); // clipboard policy was preserved
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].id, 3);
+        assert_eq!(app.active, 0);
+        assert_ne!(app.snapshot_tab, Some(app.tabs[0].id));
+    }
 
     #[test]
     fn drain_budget_trips_on_bytes_or_time() {

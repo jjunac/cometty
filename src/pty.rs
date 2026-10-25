@@ -1,9 +1,16 @@
 use std::io::{Read, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Instant;
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::config::Config;
+
+#[cfg(test)]
+#[path = "pty_test_support.rs"]
+pub(crate) mod test_support;
 
 /// Pending PTY-output chunks buffered between the reader thread and the UI
 /// drain. The reader blocks past this (~1MB at 8KB chunks), which applies
@@ -19,9 +26,101 @@ pub enum PtyEvent {
     Exit,
 }
 
+struct QueuedEvent {
+    event: PtyEvent,
+    queued_at: Option<Instant>,
+}
+
+#[derive(Default)]
+struct OutputState {
+    notified: AtomicBool,
+    // Includes the reader's one in-flight send when the bounded queue is full.
+    bytes: AtomicUsize,
+}
+
+struct OutputSender<W> {
+    tx: mpsc::SyncSender<QueuedEvent>,
+    state: Arc<OutputState>,
+    waker: W,
+}
+
+struct OutputReceiver {
+    rx: Receiver<QueuedEvent>,
+    state: Arc<OutputState>,
+}
+
+fn output_channel<W: Fn()>(waker: W) -> (OutputSender<W>, OutputReceiver) {
+    let (tx, rx) = mpsc::sync_channel(FROM_PTY_CHANNEL_BOUND);
+    let state = Arc::new(OutputState::default());
+    (
+        OutputSender {
+            tx,
+            state: state.clone(),
+            waker,
+        },
+        OutputReceiver { rx, state },
+    )
+}
+
+fn event_bytes(event: &PtyEvent) -> usize {
+    match event {
+        PtyEvent::Data(bytes) => bytes.len(),
+        PtyEvent::Exit => 0,
+    }
+}
+
+impl<W: Fn()> OutputSender<W> {
+    fn send(&self, event: PtyEvent) -> bool {
+        let bytes = event_bytes(&event);
+        let queued = self.state.bytes.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        crate::perf::peak(crate::perf::Metric::QueuedBytes, queued);
+        let queued_at = crate::perf::enabled().then(Instant::now);
+        if self.tx.send(QueuedEvent { event, queued_at }).is_err() {
+            self.state.bytes.fetch_sub(bytes, Ordering::Relaxed);
+            return false;
+        }
+        if !self.state.notified.swap(true, Ordering::AcqRel) {
+            (self.waker)();
+        } else {
+            crate::perf::add(crate::perf::Metric::CoalescedWake, 1);
+        }
+        true
+    }
+}
+
+impl OutputReceiver {
+    fn pending(&self) -> bool {
+        self.state.notified.load(Ordering::Acquire)
+    }
+
+    fn try_recv(&self) -> Option<PtyEvent> {
+        self.try_recv_rearm(|| {})
+    }
+
+    fn try_recv_rearm(&self, before_rearm: impl FnOnce()) -> Option<PtyEvent> {
+        let queued = self.rx.try_recv().ok().or_else(|| {
+            before_rearm();
+            self.state.notified.store(false, Ordering::Release);
+            // Close the empty-observation/re-arm race: a send between the
+            // first empty read and the clear may have suppressed its wake.
+            // After this second read, a new send necessarily wakes us.
+            let queued = self.rx.try_recv().ok()?;
+            self.state.notified.store(true, Ordering::Release);
+            Some(queued)
+        })?;
+        self.state
+            .bytes
+            .fetch_sub(event_bytes(&queued.event), Ordering::Relaxed);
+        if let Some(start) = queued.queued_at {
+            crate::perf::duration(crate::perf::Metric::QueueWait, start.elapsed());
+        }
+        Some(queued.event)
+    }
+}
+
 pub struct PtySession {
     pub tx_to_pty: Sender<Vec<u8>>,
-    pub rx_from_pty: Receiver<PtyEvent>,
+    output: OutputReceiver,
     master: Box<dyn MasterPty + Send>,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
     /// Pid of the spawned shell (the session/group leader), the query
@@ -92,7 +191,7 @@ impl PtySession {
         // below blocks when the UI falls behind, pushing backpressure to
         // the child. UI→PTY stays unbounded: input is user-driven and the
         // UI thread must never block.
-        let (tx_from_pty, rx_from_pty) = mpsc::sync_channel::<PtyEvent>(FROM_PTY_CHANNEL_BOUND);
+        let (tx_from_pty, output) = output_channel(waker);
         let (tx_to_pty, rx_to_pty) = mpsc::channel::<Vec<u8>>();
 
         // Detached threads: they exit on their own when the PTY closes or the
@@ -102,19 +201,16 @@ impl PtySession {
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
-                        let _ = tx_from_pty.send(PtyEvent::Exit);
-                        waker();
+                        tx_from_pty.send(PtyEvent::Exit);
                         break;
                     }
                     Ok(n) => {
-                        if tx_from_pty.send(PtyEvent::Data(buf[..n].to_vec())).is_err() {
+                        if !tx_from_pty.send(PtyEvent::Data(buf[..n].to_vec())) {
                             break;
                         }
-                        waker();
                     }
                     Err(_) => {
-                        let _ = tx_from_pty.send(PtyEvent::Exit);
-                        waker();
+                        tx_from_pty.send(PtyEvent::Exit);
                         break;
                     }
                 }
@@ -133,7 +229,7 @@ impl PtySession {
 
         Ok(Self {
             tx_to_pty,
-            rx_from_pty,
+            output,
             master: pair.master,
             _child: child,
             shell_pid,
@@ -147,7 +243,11 @@ impl PtySession {
     }
 
     pub fn try_recv(&self) -> Option<PtyEvent> {
-        self.rx_from_pty.try_recv().ok()
+        self.output.try_recv()
+    }
+
+    pub(crate) fn output_pending(&self) -> bool {
+        self.output.pending()
     }
 
     /// Kernel-reported foreground process group of the PTY (`tcgetpgrp`
@@ -277,6 +377,183 @@ pub fn default_shell() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_notifications_coalesce_until_empty_and_rearm_for_exit() {
+        let wakes = AtomicUsize::new(0);
+        let (tx, rx) = output_channel(|| {
+            wakes.fetch_add(1, Ordering::Relaxed);
+        });
+        for n in 0..FROM_PTY_CHANNEL_BOUND {
+            assert!(tx.send(PtyEvent::Data(vec![n as u8])));
+        }
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        for n in 0..FROM_PTY_CHANNEL_BOUND {
+            assert!(rx.pending());
+            assert!(matches!(rx.try_recv(), Some(PtyEvent::Data(bytes)) if bytes == [n as u8]));
+        }
+        assert!(rx.try_recv().is_none());
+        assert!(!rx.pending());
+        assert_eq!(rx.state.bytes.load(Ordering::Relaxed), 0);
+        assert!(tx.send(PtyEvent::Exit));
+        assert_eq!(wakes.load(Ordering::Relaxed), 2);
+        assert!(matches!(rx.try_recv(), Some(PtyEvent::Exit)));
+        assert!(rx.try_recv().is_none());
+        drop(rx);
+        assert!(!tx.send(PtyEvent::Data(vec![1])));
+        assert_eq!(tx.state.bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn send_during_empty_rearm_is_not_lost() {
+        let wakes = AtomicUsize::new(0);
+        let (tx, rx) = output_channel(|| {
+            wakes.fetch_add(1, Ordering::Relaxed);
+        });
+        assert!(tx.send(PtyEvent::Data(vec![1])));
+        assert!(rx.try_recv().is_some());
+        let event = rx.try_recv_rearm(|| {
+            // The reader sees the OLD outstanding notification, so it
+            // intentionally sends no wake in this adversarial interleaving.
+            assert!(tx.send(PtyEvent::Data(vec![2])));
+            assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        });
+        assert!(matches!(event, Some(PtyEvent::Data(bytes)) if bytes == [2]));
+        assert!(rx.pending());
+        assert!(rx.try_recv().is_none());
+        assert!(!rx.pending());
+        assert!(tx.send(PtyEvent::Exit));
+        assert_eq!(wakes.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn threaded_output_preserves_order_without_lost_wakes() {
+        let (wake_tx, wake_rx) = mpsc::channel();
+        let (tx, rx) = output_channel(move || {
+            let _ = wake_tx.send(());
+        });
+        let producer = std::thread::spawn(move || {
+            for n in 0_u32..20_000 {
+                assert!(tx.send(PtyEvent::Data(n.to_le_bytes().to_vec())));
+            }
+            assert!(tx.send(PtyEvent::Exit));
+        });
+        let mut next = 0_u32;
+        'receive: loop {
+            wake_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("lost output notification");
+            while let Some(event) = rx.try_recv() {
+                match event {
+                    PtyEvent::Data(bytes) => {
+                        assert_eq!(bytes, next.to_le_bytes());
+                        next += 1;
+                    }
+                    PtyEvent::Exit => break 'receive,
+                }
+            }
+        }
+        producer.join().unwrap();
+        assert_eq!(next, 20_000);
+        assert_eq!(rx.state.bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    #[ignore = "manual release scheduling probe; not GUI/input-to-visible latency"]
+    fn fair_drain_under_load() {
+        use crate::app::scheduling::DrainSchedule;
+        use crate::term::Terminal;
+        use crate::theme::Theme;
+
+        let wake = || {};
+        let (flood_tx, flood_rx) = output_channel(wake);
+        let (_idle_tx, idle_rx) = output_channel(wake);
+        let (echo_tx, echo_rx) = output_channel(wake);
+        let (exit_tx, exit_rx) = output_channel(wake);
+        let producer =
+            std::thread::spawn(
+                move || {
+                    while flood_tx.send(PtyEvent::Data(vec![b'a'; PTY_READ_CHUNK])) {}
+                },
+            );
+        let (request_tx, request_rx) = mpsc::channel::<u32>();
+        let echo = std::thread::spawn(move || {
+            while let Ok(seq) = request_rx.recv() {
+                if !echo_tx.send(PtyEvent::Data(format!("probe-{seq:08}\r\n").into_bytes())) {
+                    break;
+                }
+            }
+        });
+        assert!(exit_tx.send(PtyEvent::Data(b"last output\r\n".to_vec())));
+        assert!(exit_tx.send(PtyEvent::Exit));
+        let queues = [flood_rx, idle_rx, echo_rx, exit_rx];
+        let mut terminals: Vec<_> = (0..4)
+            .map(|_| Terminal::new(80, 24, Theme::default()))
+            .collect();
+        let mut schedule = DrainSchedule::default();
+        let mut exited = false;
+        let mut samples = Vec::new();
+        let mut flood_bytes = 0;
+        for seq in 0..136 {
+            let start = Instant::now();
+            request_tx.send(seq).unwrap();
+            let expected = format!("probe-{seq:08}\r\n").into_bytes();
+            let mut received = false;
+            while !received {
+                assert!(
+                    start.elapsed() < std::time::Duration::from_secs(5),
+                    "active queue starved"
+                );
+                schedule.begin_turn();
+                let turn = Instant::now();
+                let mut empty = 0;
+                while !schedule.exhausted(turn.elapsed()) && empty < queues.len() * 2 {
+                    let i = schedule.next_tab(queues.len(), 2).unwrap();
+                    match queues[i].try_recv() {
+                        Some(PtyEvent::Data(bytes)) => {
+                            schedule.add_bytes(bytes.len());
+                            terminals[i].feed(&bytes);
+                            empty = 0;
+                            if i == 0 {
+                                flood_bytes += bytes.len();
+                            }
+                            if i == 2 {
+                                assert_eq!(bytes, expected);
+                                received = true;
+                                break;
+                            }
+                        }
+                        Some(PtyEvent::Exit) => {
+                            assert_eq!(i, 3);
+                            exited = true;
+                            empty += 1;
+                        }
+                        None => empty += 1,
+                    }
+                }
+                schedule.finish_call(turn.elapsed());
+                std::thread::yield_now();
+            }
+            if seq >= 8 {
+                samples.push(start.elapsed().as_micros());
+            }
+        }
+        samples.sort_unstable();
+        assert!(exited, "a later tab's exit must be serviced under load");
+        println!(
+            "PERF scheduling=identified_request_to_parse samples={} p50_us={} p95_us={} p99_us={} max_us={} flood_bytes={} (headless; excludes metadata/render/presentation/OS PTY)",
+            samples.len(),
+            samples[samples.len() / 2],
+            samples[(samples.len() * 95).div_ceil(100) - 1],
+            samples[(samples.len() * 99).div_ceil(100) - 1],
+            samples.last().unwrap(),
+            flood_bytes
+        );
+        drop(request_tx);
+        drop(queues);
+        producer.join().unwrap();
+        echo.join().unwrap();
+    }
 
     #[test]
     fn shell_split_plain_and_args() {

@@ -56,6 +56,9 @@ impl App {
         if let Some(tab) = self.active_tab() {
             tab.pty.write(text.as_bytes().to_vec());
         }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.last_key_write = Some(Instant::now());
+        }
     }
 
     /// Returns true when the event was consumed locally (never reaches PTY).
@@ -281,9 +284,11 @@ impl App {
             false
         };
         if wrote_to_pty {
-            // Latency probe: `drain_pty` turns this into a key-to-echo
-            // measurement, `on_redraw` into echo-to-paint (debug logs).
-            self.last_key_write = Some(Instant::now());
+            // This is input-to-first-output for THIS tab, not proof that
+            // arbitrary shell output is an echo of this particular key.
+            if let Some(tab) = self.active_tab_mut() {
+                tab.last_key_write = Some(Instant::now());
+            }
         }
         true
     }

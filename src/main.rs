@@ -110,6 +110,10 @@ pub(crate) fn parse_cli_args(args: &[String]) -> anyhow::Result<CliParsed> {
 }
 
 impl ApplicationHandler<UserEvent> for App {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
+        self.pty_schedule.begin_turn();
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -372,9 +376,19 @@ impl ApplicationHandler<UserEvent> for App {
 
         let now = Instant::now();
         let suspended = self.visuals_suspended();
+        let (sync_repaint, sync_at) = self.active_tab_mut().map_or((false, None), |tab| {
+            let repaint = tab.sync.release_due(now);
+            (repaint, tab.sync.deadline())
+        });
+        if sync_repaint
+            && !suspended
+            && let Some(w) = self.window.as_ref()
+        {
+            w.request_redraw();
+        }
         let blinking = self.active_tab().is_some_and(|tab| {
             app::scheduling::cursor_blinks(
-                suspended,
+                suspended || sync_at.is_some(),
                 tab.terminal.cursor_visible(),
                 tab.terminal.cursor_style().blinking,
                 tab.terminal.scroll_offset(),
@@ -391,6 +405,9 @@ impl ApplicationHandler<UserEvent> for App {
             w.request_redraw();
         }
         if !suspended {
+            next = app::scheduling::earlier(next, sync_at);
+        }
+        if !suspended && sync_at.is_none() {
             let search_at = self
                 .active_tab()
                 .and_then(|t| t.search.rescan_at(t.terminal.grid(), now));
