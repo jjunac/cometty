@@ -517,6 +517,10 @@ fn main() -> anyhow::Result<()> {
         log_buffer,
     );
     let result = event_loop.run_app(&mut app);
+    // Request all shutdowns before waiting, so the deadline is shared rather
+    // than one grace period per tab. This also covers earlier closed tabs.
+    app.tabs.clear();
+    pty::finish_shutdown();
     app.finish_config_saves();
     result?;
     Ok(())

@@ -8,10 +8,21 @@ use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::config::Config;
 pub(crate) mod input;
+mod lifecycle;
+#[cfg(unix)]
+mod unix;
+
+pub(crate) fn finish_shutdown() {
+    lifecycle::finish_shutdown();
+}
 
 #[cfg(test)]
 #[path = "pty_test_support.rs"]
 pub(crate) mod test_support;
+
+#[cfg(all(test, unix))]
+#[path = "pty/lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 /// Pending PTY-output chunks buffered between the reader thread and the UI
 /// drain. The reader blocks past this (~1MB at 8KB chunks), which applies
@@ -37,6 +48,8 @@ struct OutputState {
     notified: AtomicBool,
     // Includes the reader's one in-flight send when the bounded queue is full.
     bytes: AtomicUsize,
+    #[cfg(test)]
+    chunks: AtomicUsize,
 }
 
 struct OutputSender<W> {
@@ -76,8 +89,12 @@ impl<W: Fn()> OutputSender<W> {
         let queued = self.state.bytes.fetch_add(bytes, Ordering::Relaxed) + bytes;
         crate::perf::peak(crate::perf::Metric::QueuedBytes, queued);
         let queued_at = crate::perf::enabled().then(Instant::now);
+        #[cfg(test)]
+        self.state.chunks.fetch_add(1, Ordering::Relaxed);
         if self.tx.send(QueuedEvent { event, queued_at }).is_err() {
             self.state.bytes.fetch_sub(bytes, Ordering::Relaxed);
+            #[cfg(test)]
+            self.state.chunks.fetch_sub(1, Ordering::Relaxed);
             return false;
         }
         if !self.state.notified.swap(true, Ordering::AcqRel) {
@@ -112,6 +129,8 @@ impl OutputReceiver {
         self.state
             .bytes
             .fetch_sub(event_bytes(&queued.event), Ordering::Relaxed);
+        #[cfg(test)]
+        self.state.chunks.fetch_sub(1, Ordering::Relaxed);
         if let Some(start) = queued.queued_at {
             crate::perf::duration(crate::perf::Metric::QueueWait, start.elapsed());
         }
@@ -123,7 +142,7 @@ pub struct PtySession {
     tx_to_pty: input::InputSender,
     output: OutputReceiver,
     master: Box<dyn MasterPty + Send>,
-    _child: Box<dyn portable_pty::Child + Send + Sync>,
+    lifecycle: Option<lifecycle::Session>,
     /// Pid of the spawned shell (the session/group leader), the query
     /// target for the `$cwd` label fallback.
     shell_pid: Option<i32>,
@@ -156,6 +175,19 @@ impl PtySession {
             pixel_height: 0,
         };
         let pair = pty_system.openpty(size)?;
+        // Do fallible transport setup before starting a child. Once spawned,
+        // the startup guard owns cleanup even if a worker cannot be created.
+        lifecycle::Startup::supervisor()?;
+        #[cfg(unix)]
+        let cancellation = Arc::new(unix::Cancellation::new()?);
+        #[cfg(unix)]
+        let mut reader = unix::Io::new(&*pair.master, cancellation.clone())?;
+        #[cfg(unix)]
+        let writer = unix::Io::new(&*pair.master, cancellation.clone())?;
+        #[cfg(not(unix))]
+        let mut reader = pair.master.try_clone_reader()?;
+        #[cfg(not(unix))]
+        let writer = pair.master.take_writer()?;
 
         let shell = configured_shell(&config.shell);
         let (program, shell_args) = split_shell_command(&shell);
@@ -187,14 +219,18 @@ impl PtySession {
             }
         };
         let shell_pid = child.process_id().and_then(|pid| i32::try_from(pid).ok());
+        let mut startup = lifecycle::Startup::new(
+            child,
+            #[cfg(unix)]
+            cancellation,
+        );
+        // Retaining a slave in the parent prevents the reader seeing EOF.
+        drop(pair.slave);
         log::debug!(
             "pty spawned: {program} at {}x{} (term={term})",
             size.cols,
             size.rows
         );
-
-        let mut reader = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
 
         // PTY→UI is bounded (see `FROM_PTY_CHANNEL_BOUND`): the `send`
         // below blocks when the UI falls behind, pushing backpressure to
@@ -204,36 +240,46 @@ impl PtySession {
         let (tx_from_pty, output) = output_channel(move || output_wake());
         let (tx_to_pty, rx_to_pty) = input::channel(move || waker());
 
-        // Detached threads: they exit on their own when the PTY closes or the
-        // session's channels are dropped.
-        std::thread::spawn(move || {
-            let mut buf = [0u8; PTY_READ_CHUNK];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => {
-                        tx_from_pty.send(PtyEvent::Exit);
-                        break;
-                    }
-                    Ok(n) => {
-                        if !tx_from_pty.send(PtyEvent::Data(buf[..n].to_vec())) {
-                            break;
+        startup.worker(
+            std::thread::Builder::new()
+                .name("pty-reader".into())
+                .spawn(move || {
+                    let mut buf = [0u8; PTY_READ_CHUNK];
+                    loop {
+                        match reader.read(&mut buf) {
+                            Ok(0) => {
+                                tx_from_pty.send(PtyEvent::Exit);
+                                break;
+                            }
+                            Ok(n) => {
+                                if !tx_from_pty.send(PtyEvent::Data(buf[..n].to_vec())) {
+                                    break;
+                                }
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                                continue;
+                            }
+                            Err(_) => {
+                                tx_from_pty.send(PtyEvent::Exit);
+                                break;
+                            }
                         }
                     }
-                    Err(_) => {
-                        tx_from_pty.send(PtyEvent::Exit);
-                        break;
-                    }
-                }
-            }
-        });
+                })?,
+        );
 
-        std::thread::spawn(move || rx_to_pty.run(writer));
+        startup.worker(
+            std::thread::Builder::new()
+                .name("pty-writer".into())
+                .spawn(move || rx_to_pty.run(writer))?,
+        );
+        let lifecycle = Some(startup.activate());
 
         Ok(Self {
             tx_to_pty,
             output,
             master: pair.master,
-            _child: child,
+            lifecycle,
             shell_pid,
             min_dim,
             max_dim,
@@ -314,6 +360,18 @@ impl PtySession {
             pixel_width: 0,
             pixel_height: 0,
         });
+    }
+}
+
+impl Drop for PtySession {
+    fn drop(&mut self) {
+        self.tx_to_pty.cancel();
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.shutdown(self.foreground_pgid());
+        }
+        // Dropping output disconnects even a reader blocked on a full send.
+        // Worker-owned descriptors are closed by those workers, never raced
+        // against a blocking syscall from the UI thread.
     }
 }
 

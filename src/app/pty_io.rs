@@ -371,19 +371,26 @@ mod tests {
     #[test]
     fn out_of_order_exits_keep_reply_targets_and_surviving_tab_identity() {
         let mut app = app();
-        let (first, replies) = add_tab(&mut app);
+        let (first, _) = add_tab(&mut app);
         let (second, _) = add_tab(&mut app);
-        let (third, _) = add_tab(&mut app);
-        let (_survivor, _) = add_tab(&mut app);
+        let (third, replies) = add_tab(&mut app);
+        let (_survivor, survivor_input) = add_tab(&mut app);
         app.active = 2;
         app.snapshot_tab = Some(app.tabs[2].id);
-        first(PtyEvent::Data(b"\x1b[6n\x1b]52;c;?\x07".to_vec()));
+        // Keep the reply target alive while earlier tabs exit and shift its
+        // index. Once it too exits, shutdown deliberately cancels unsent input.
+        third(PtyEvent::Data(b"\x1b[6n\x1b]52;c;?\x07".to_vec()));
         first(PtyEvent::Exit);
         second(PtyEvent::Exit);
-        third(PtyEvent::Exit);
         finish_draining(&mut app);
         assert_eq!(replies.try_recv().unwrap(), b"\x1b[1;1R");
         assert!(replies.try_recv().is_err()); // clipboard policy was preserved
+        assert!(survivor_input.try_recv().is_err());
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[0].id, 2);
+        assert_eq!(app.active, 0);
+        third(PtyEvent::Exit);
+        finish_draining(&mut app);
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.tabs[0].id, 3);
         assert_eq!(app.active, 0);

@@ -64,7 +64,7 @@ pub(crate) fn session() -> (PtySession, impl Fn(PtyEvent), input::InputReceiver)
         tx_to_pty,
         output,
         master: Box::new(Stub),
-        _child: Box::new(Stub),
+        lifecycle: None,
         shell_pid: None,
         min_dim: 1,
         max_dim: 1024,

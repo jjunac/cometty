@@ -22,6 +22,12 @@ Linux needs the GUI system deps first (see `.github/workflows/ci.yml`):
 sudo apt-get install -y libx11-dev libxkbcommon-dev libgl1-mesa-dev
 ```
 
+On macOS/Linux, closing a tab cancels unsent input and hangs up its shell and
+foreground job. A shell that ignores hangup is force-terminated after a 250 ms
+grace period. Cleanup and child reaping run off the UI thread; detached jobs are
+not recursively hunted. Application exit waits up to two seconds for all PTY
+sessions together.
+
 ## Config
 
 TOML file at `$HOME/.config/cometty/config.toml` (missing file or keys = defaults).

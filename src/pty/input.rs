@@ -31,6 +31,7 @@ struct State {
     bytes: usize,
     messages: usize,
     closed: bool,
+    aborted: bool,
     notice: Option<String>,
     reply_waiting: bool,
     reply_retry: bool,
@@ -71,6 +72,20 @@ fn cost(data: &Vec<u8>) -> usize {
 }
 
 impl InputSender {
+    /// Closing a tab is cancellation, not a graceful drain of queued paste.
+    pub(super) fn cancel(&self) {
+        self.0.cancel();
+    }
+
+    #[cfg(test)]
+    pub(super) fn observe(&self) -> impl Fn() -> (usize, usize) + use<> {
+        let shared = self.0.clone();
+        move || {
+            let state = shared.state.lock().unwrap();
+            (state.bytes, state.queue.len())
+        }
+    }
+
     pub fn send(&self, data: Vec<u8>, bulk: bool) -> Result<(), AdmissionError> {
         self.admit(data, bulk, false).map_err(|(error, _)| error)
     }
@@ -177,6 +192,23 @@ impl Drop for InputSender {
     }
 }
 
+impl Shared {
+    fn cancel(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let queue = std::mem::take(&mut state.queue);
+        state.bytes -= queue.iter().map(cost).sum::<usize>();
+        state.messages -= queue.len();
+        state.reply_waiting = false;
+        state.reply_retry = false;
+        state.closed = true;
+        state.aborted = true;
+        drop(state);
+        self.ready.notify_all();
+        // Free potentially large allocations outside the admission mutex.
+        drop(queue);
+    }
+}
+
 struct Message {
     data: Vec<u8>,
     charge: usize,
@@ -188,7 +220,7 @@ impl Drop for Message {
         let mut state = self.shared.state.lock().unwrap_or_else(|p| p.into_inner());
         state.bytes -= self.charge;
         state.messages -= 1;
-        let wake = state.reply_waiting && !state.reply_retry;
+        let wake = state.reply_waiting && !state.reply_retry && !state.aborted;
         if wake {
             state.reply_retry = true;
         }
@@ -219,15 +251,29 @@ impl InputReceiver {
             if let Err(error) = message
                 .data
                 .chunks(8192)
-                .try_for_each(|chunk| writer.write_all(chunk))
+                .try_for_each(|chunk| {
+                    if self
+                        .0
+                        .state
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .aborted
+                    {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionAborted,
+                            "PTY session closed",
+                        ));
+                    }
+                    writer.write_all(chunk)
+                })
                 .and_then(|()| writer.flush())
             {
-                self.0
-                    .state
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .notice = Some(format!("Terminal write failed: {error}"));
-                (self.0.wake)();
+                let mut state = self.0.state.lock().unwrap_or_else(|p| p.into_inner());
+                if !state.aborted {
+                    state.notice = Some(format!("Terminal write failed: {error}"));
+                    drop(state);
+                    (self.0.wake)();
+                }
                 break;
             }
         }
@@ -254,15 +300,7 @@ impl InputReceiver {
 
 impl Drop for InputReceiver {
     fn drop(&mut self) {
-        let mut state = self.0.state.lock().unwrap_or_else(|p| p.into_inner());
-        let queued = state.queue.iter().map(cost).sum::<usize>();
-        state.bytes = state.bytes.saturating_sub(queued);
-        state.messages = state.messages.saturating_sub(state.queue.len());
-        state.queue.clear();
-        state.reply_waiting = false;
-        state.reply_retry = false;
-        state.closed = true;
-        self.0.ready.notify_all();
+        self.0.cancel();
     }
 }
 
@@ -270,6 +308,57 @@ impl Drop for InputReceiver {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn cancellation_discards_queue_but_charges_inflight_until_released() {
+        let (tx, rx) = channel_with_budget(1024, 256, || {});
+        tx.send(vec![b'a'; 600], true).unwrap();
+        let message = rx.recv().unwrap();
+        let inflight_cost = message.charge;
+        tx.send(vec![b'b'; 200], true).unwrap();
+        assert!(tx.reply(vec![b'r'; 600]).is_some());
+        assert!(tx.reply_blocked());
+        tx.cancel();
+        tx.cancel();
+        assert_eq!(tx.observe()(), (inflight_cost, 0));
+        assert!(!tx.reply_blocked());
+        assert!(rx.recv().is_none());
+        assert_eq!(tx.0.state.lock().unwrap().queue.capacity(), 0);
+        drop(message);
+        assert_eq!(tx.observe()(), (0, 0));
+        assert_eq!(tx.0.state.lock().unwrap().messages, 0);
+        assert!(tx.take_notice().is_none());
+        assert_eq!(tx.send(vec![1], false), Err(AdmissionError::Closed));
+    }
+
+    #[test]
+    fn cancellation_stops_writer_between_chunks_without_failure_notice() {
+        struct CancelWriter<'a> {
+            tx: &'a InputSender,
+            written: usize,
+        }
+        impl Write for CancelWriter<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.written += bytes.len();
+                self.tx.cancel();
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                panic!("cancelled transaction must not be flushed");
+            }
+        }
+        let (tx, rx) = channel(|| {});
+        tx.send(vec![b'x'; 16384], true).unwrap();
+        tx.send(b"later key".to_vec(), false).unwrap();
+        let mut writer = CancelWriter {
+            tx: &tx,
+            written: 0,
+        };
+        rx.run(&mut writer);
+        assert_eq!(writer.written, 8192);
+        assert_eq!(tx.observe()(), (0, 0));
+        assert!(tx.take_notice().is_none());
+    }
 
     #[test]
     fn bulk_admission_is_atomic_and_charges_inflight_capacity() {
