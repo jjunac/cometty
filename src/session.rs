@@ -2,10 +2,14 @@
 //! bring them back. Pure data + file helpers; the event-loop glue lives in
 //! [`crate::app::session`].
 //!
-//! Only shell working directories, tab order, the active tab, and window
-//! geometry are stored — never terminal contents or commands.
+//! `session.toml` stores shell working directories, tab order, the active
+//! tab, and window geometry — never commands. With `restore = "scrollback"`,
+//! a quit snapshot also references one owner-only VT dump per tab in the
+//! sibling `scrollback/` directory; dumps exist only while referenced.
 
+use std::collections::HashSet;
 use std::fs::File;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -16,6 +20,11 @@ pub const VERSION: u32 = 1;
 /// Upper bound on tabs spawned from a file, so a corrupt or hostile
 /// snapshot can't fork an unbounded number of shells.
 pub const MAX_TABS: usize = 64;
+
+/// Largest scrollback dump written or replayed per tab. Far above what the
+/// default history caps produce; a bigger dump is skipped, not truncated
+/// mid-escape.
+pub const MAX_SCROLLBACK_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Session {
@@ -48,6 +57,10 @@ pub struct TabState {
     /// The shell's working directory; absent = configured cwd.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// File name of this tab's VT dump in [`scrollback_dir`]; absent = no
+    /// contents to replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrollback: Option<String>,
 }
 
 /// A physical monitor rectangle: `(x, y, width, height)`.
@@ -69,14 +82,28 @@ impl Session {
         }
     }
 
-    /// Dim first line of each restored tab, fed to the terminal (not the
-    /// shell) before the shell's first output: `Restored session: <date>`.
-    pub fn banner(&self) -> String {
+    /// Block fed to each restored tab's terminal (not the shell), after any
+    /// replayed scrollback and before the shell's first output: the date in
+    /// bold accent (ANSI cyan, so it follows the theme palette) between
+    /// `cols`-wide rules, plus a plain-accent opt-out hint when scrollback
+    /// was replayed.
+    pub fn banner(&self, cols: usize, scrollback: bool) -> String {
+        let rule = "─".repeat(cols.clamp(1, 512));
         let label = match self.saved_at.and_then(format_local_time) {
-            Some(date) => format!("Restored session: {date}"),
-            None => "Restored session".to_string(),
+            Some(date) => format!("Session restored: {date}"),
+            None => "Session restored".to_string(),
         };
-        format!("\x1b[2m{label}\x1b[0m\r\n")
+        const ACCENT: &str = "\x1b[0;36m";
+        const STRONG: &str = "\x1b[0;1;36m";
+        let hint = if scrollback {
+            format!(
+                "{ACCENT}To stop restoring scrollback: Settings › Session, or \
+                 [session] restore = \"tabs\"\r\n"
+            )
+        } else {
+            String::new()
+        };
+        format!("{STRONG}{rule}\r\n{label}\r\n{hint}{STRONG}{rule}\x1b[0m\r\n")
     }
 
     /// Drop what can't be restored as-is: vanished directories fall back
@@ -94,6 +121,15 @@ impl Session {
                 .is_some_and(|cwd| !is_dir(Path::new(cwd)))
             {
                 tab.cwd = None;
+            }
+            // Only a bare name inside `scrollback/`: a hostile snapshot
+            // must not point the replay at an arbitrary file.
+            if tab
+                .scrollback
+                .as_deref()
+                .is_some_and(|name| !valid_scrollback_name(name))
+            {
+                tab.scrollback = None;
             }
         }
         self.active = self.active.min(self.tabs.len() - 1);
@@ -199,31 +235,144 @@ fn parse(text: &str, is_dir: impl Fn(&Path) -> bool) -> Result<Option<Session>, 
     Ok(session.sanitized(is_dir))
 }
 
+/// The dump directory next to the snapshot at `path`.
+pub fn scrollback_dir(path: &Path) -> PathBuf {
+    path.with_file_name("scrollback")
+}
+
+/// A fresh dump name for tab `index`. Unique per snapshot, so a new quit
+/// never overwrites a dump the committed snapshot still references.
+pub fn scrollback_name(index: usize) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{nanos}-{index}.vt")
+}
+
+fn valid_scrollback_name(name: &str) -> bool {
+    name.len() <= 64
+        && !name.starts_with('.')
+        && name.ends_with(".vt")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// Read the dump `name` referenced by the snapshot at `path`. Missing is
+/// silent; unreadable or oversized dumps are logged and skipped (the tab
+/// still opens).
+pub fn load_scrollback(path: &Path, name: &str) -> Option<Vec<u8>> {
+    let file = scrollback_dir(path).join(name);
+    let read = || -> std::io::Result<Option<Vec<u8>>> {
+        let mut bytes = Vec::new();
+        File::open(&file)?
+            .take(MAX_SCROLLBACK_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        Ok((bytes.len() <= MAX_SCROLLBACK_BYTES).then_some(bytes))
+    };
+    match read() {
+        Ok(Some(bytes)) => Some(bytes),
+        Ok(None) => {
+            log::warn!("skipping oversized scrollback {}", file.display());
+            None
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            log::warn!("unreadable scrollback {} ({e})", file.display());
+            None
+        }
+    }
+}
+
+/// Create or truncate `path`, owner-only on Unix from the first byte.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(bytes)?;
+    // `mode` only applies on creation; a leftover file keeps its own.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 /// Atomically replace `path` (temp file + rename), owner-only on Unix.
-pub fn save_to_path(session: &Session, path: &Path) -> anyhow::Result<()> {
+/// `scrollback` holds the `(name, dump)` pairs the tabs reference. Commit
+/// order keeps the pair consistent across a crash: dumps first, then the
+/// snapshot rename, then removal of every dump it no longer references.
+pub fn save_to_path(
+    session: &Session,
+    scrollback: &[(String, Vec<u8>)],
+    path: &Path,
+) -> anyhow::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)?;
     }
+    let dir = scrollback_dir(path);
+    if !scrollback.is_empty() {
+        std::fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        for (name, dump) in scrollback {
+            anyhow::ensure!(valid_scrollback_name(name), "bad scrollback name {name}");
+            write_private(&dir.join(name), dump)?;
+        }
+    }
     let text = toml::to_string_pretty(session)?;
     let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-    }
+    write_private(&tmp, text.as_bytes())?;
     std::fs::rename(&tmp, path)?;
+    let referenced: HashSet<&str> = session
+        .tabs
+        .iter()
+        .filter_map(|t| t.scrollback.as_deref())
+        .collect();
+    prune_scrollback(&dir, &referenced);
     Ok(())
 }
 
-/// Delete the snapshot; already gone is success.
+/// Best effort: a leftover dump is retried by the next save or removal.
+fn prune_scrollback(dir: &Path, keep: &HashSet<&str>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.ends_with(".vt")
+            && !keep.contains(name)
+            && let Err(e) = std::fs::remove_file(entry.path())
+        {
+            log::warn!("failed to remove scrollback {name} ({e})");
+        }
+    }
+    if keep.is_empty() {
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
+/// Delete the snapshot, then its dumps; already gone is success.
 pub fn remove(path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(path) {
+    let gone = |r: std::io::Result<()>| match r {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
-    }
+    };
+    gone(std::fs::remove_file(path))?;
+    gone(std::fs::remove_dir_all(scrollback_dir(path)))
 }
 
 /// Whether a window placed at physical `position` would keep its title
@@ -245,6 +394,7 @@ mod tests {
     fn tab(cwd: &str) -> TabState {
         TabState {
             cwd: Some(cwd.to_string()),
+            scrollback: None,
         }
     }
 
@@ -257,7 +407,14 @@ mod tests {
                 height: 800.0,
                 position: Some((-40, 25)),
             }),
-            vec![tab("/a"), TabState::default(), tab("/b c")],
+            vec![
+                tab("/a"),
+                TabState::default(),
+                TabState {
+                    scrollback: Some("1-2.vt".into()),
+                    ..tab("/b c")
+                },
+            ],
         );
         let text = toml::to_string_pretty(&session).unwrap();
         assert_eq!(parse(&text, |_| true).unwrap(), Some(session));
@@ -282,6 +439,13 @@ mod tests {
         assert_eq!(s.active, 1);
         assert_eq!(s.window, None);
         assert_eq!(parse("version = 1\n", |_| true).unwrap(), None);
+        let names = "version = 1\n[[tabs]]\nscrollback = \"../../etc/passwd\"\n\
+                     [[tabs]]\nscrollback = \"a/b.vt\"\n[[tabs]]\nscrollback = \".x.vt\"\n\
+                     [[tabs]]\nscrollback = \"12-0.vt\"\n";
+        let s = parse(names, |_| true).unwrap().unwrap();
+        let kept: Vec<_> = s.tabs.iter().map(|t| t.scrollback.as_deref()).collect();
+        assert_eq!(kept, [None, None, None, Some("12-0.vt")]);
+        assert!(valid_scrollback_name(&scrollback_name(3)));
         let many = format!("version = 1\n{}", "[[tabs]]\n".repeat(MAX_TABS + 5));
         assert_eq!(
             parse(&many, |_| true).unwrap().unwrap().tabs.len(),
@@ -304,15 +468,20 @@ mod tests {
     }
 
     #[test]
-    fn banner_is_a_dim_dated_line() {
+    fn banner_is_a_bold_accent_dated_block() {
         let mut session = Session::new(0, None, vec![TabState::default()]);
-        let banner = session.banner();
-        assert!(banner.starts_with("\x1b[2mRestored session: "));
-        assert!(banner.ends_with("\x1b[0m\r\n"));
+        let banner = session.banner(4, true);
+        assert!(banner.starts_with("\x1b[0;1;36m────\r\nSession restored: "));
+        assert!(banner.contains("\x1b[0;36mTo stop restoring scrollback"));
+        assert!(banner.contains("restore = \"tabs\""));
+        assert!(banner.ends_with("\r\n\x1b[0;1;36m────\x1b[0m\r\n"));
         #[cfg(unix)]
         assert!(format_local_time(1_793_000_000).unwrap().contains("2026"));
         session.saved_at = None;
-        assert_eq!(session.banner(), "\x1b[2mRestored session\x1b[0m\r\n");
+        assert_eq!(
+            session.banner(2, false),
+            "\x1b[0;1;36m──\r\nSession restored\r\n\x1b[0;1;36m──\x1b[0m\r\n"
+        );
     }
 
     #[test]
@@ -330,14 +499,54 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cometty-session-{}", std::process::id()));
         let path = dir.join("session.toml");
         let session = Session::new(0, None, vec![tab(dir.to_str().unwrap())]);
-        save_to_path(&session, &path).unwrap();
-        assert_eq!(load(&path), Some(session));
+        save_to_path(&session, &[], &path).unwrap();
+        assert_eq!(load(&path), Some(session.clone()));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+
+        // A quit with dumps writes them owner-only; the next snapshot that
+        // stops referencing one deletes it.
+        let with_dump = |name: &str| {
+            Session::new(
+                0,
+                None,
+                vec![TabState {
+                    scrollback: Some(name.to_string()),
+                    ..tab(dir.to_str().unwrap())
+                }],
+            )
+        };
+        let first = with_dump("1-0.vt");
+        save_to_path(&first, &[("1-0.vt".into(), b"one\r\n".to_vec())], &path).unwrap();
+        assert_eq!(load_scrollback(&path, "1-0.vt").unwrap(), b"one\r\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = std::fs::metadata(scrollback_dir(&path))
+                .unwrap()
+                .permissions();
+            assert_eq!(dir_mode.mode() & 0o777, 0o700);
+            let file = scrollback_dir(&path).join("1-0.vt");
+            let mode = std::fs::metadata(file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let second = with_dump("2-0.vt");
+        save_to_path(&second, &[("2-0.vt".into(), b"two".to_vec())], &path).unwrap();
+        assert_eq!(load_scrollback(&path, "1-0.vt"), None, "pruned");
+        assert_eq!(load_scrollback(&path, "2-0.vt").unwrap(), b"two");
+        save_to_path(&session, &[], &path).unwrap();
+        assert!(!scrollback_dir(&path).exists(), "unreferenced dumps vanish");
+        save_to_path(&second, &[("2-0.vt".into(), b"two".to_vec())], &path).unwrap();
+        remove(&path).unwrap();
+        assert!(!scrollback_dir(&path).exists(), "removal takes the dumps");
+        assert!(
+            save_to_path(&second, &[("../x.vt".into(), Vec::new())], &path).is_err(),
+            "never writes outside the dump directory"
+        );
         remove(&path).unwrap();
         remove(&path).unwrap();
         assert_eq!(load(&path), None);

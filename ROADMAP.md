@@ -6,7 +6,6 @@ user-facing behavior to the [README](README.md), then delete it here. Known
 storage/latency gaps live in [memory](docs/memory.md#remaining-limits-and-follow-up-work).
 
 ## Session restoration
-- [ ] Scrollback restoration (opt-in)
 - [ ] Per-tab shell command history (later)
 
 ## Tabs & panes

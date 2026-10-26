@@ -502,6 +502,23 @@ impl Terminal {
         self.last_graphic = None;
     }
 
+    /// History plus primary screen as replayable VT text; see
+    /// [`Grid::dump_primary`].
+    pub fn dump_scrollback(&self) -> Vec<u8> {
+        self.grid.dump_primary()
+    }
+
+    /// Feed a saved dump into a fresh terminal. It is not program output:
+    /// any reply or clipboard request it provokes is dropped (a tampered
+    /// file must not type into the shell), and an unterminated string or
+    /// open style/link ends with it.
+    pub fn replay(&mut self, dump: &[u8]) {
+        self.feed(dump);
+        self.feed(b"\x1b\\\x1b[0m\x1b]8;;\x1b\\");
+        self.pending_response = Vec::new();
+        self.pending_clipboard = Vec::new();
+    }
+
     /// Take queued PTY reply bytes (DA / CPR / DSR / DECRQM).
     /// The app writes the result back via `PtySession::write`.
     pub fn take_response(&mut self) -> Vec<u8> {

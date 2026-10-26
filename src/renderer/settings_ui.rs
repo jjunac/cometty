@@ -690,9 +690,10 @@ fn show_section(
             ui.label(
                 "Quitting (Cmd+Q or the window close button) remembers the open \
                  tabs, their working directories, the active tab, and the \
-                 window size and position for the next launch. Closing every \
-                 tab starts fresh. Running programs and scrollback are not \
-                 restored; \"off\" also forgets the saved session at quit.",
+                 window size and position for the next launch; \"scrollback\" \
+                 also brings back each tab's history. Closing every tab starts \
+                 fresh. Running programs are not restored; \"off\" also forgets \
+                 the saved session at quit.",
             );
             ui.horizontal(|ui| {
                 let slot = begin_reset_slot(ui);

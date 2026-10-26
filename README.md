@@ -99,11 +99,13 @@ overrides your saved theme for the current session, and `--config` selects a
 different preferences file.
 
 Quitting with tabs open (Cmd+Q, or closing the window) reopens the same tabs, in
-their working directories, at the next launch, along with the window size and
-position; each restored tab starts with a dim `Restored session: <date>` line.
-Closing every tab yourself starts fresh next time. Running programs and
-scrollback are not restored. Set `[session] restore = "off"` to always start
-fresh.
+their working directories, at the next launch, with their scrollback and the
+window size and position. Each restored tab shows its previous contents followed
+by a highlighted `Session restored: <date>` block. Closing every tab yourself starts
+fresh next time. Running programs are not restored, and a fullscreen program
+(vim, less) left open at quit comes back as the shell screen underneath it. Set
+`[session] restore = "tabs"` to restore tabs without their contents, or `"off"`
+to always start fresh.
 
 See the [configuration reference](docs/configuration.md) for all options,
 custom shortcuts, tab labels, and logging preferences.
@@ -115,6 +117,12 @@ custom shortcuts, tab labels, and logging preferences.
   `"read-write"` if you trust applications—including remote ones—to read your
   clipboard.
 - Web, FTP, and email links can open; local `file` links are refused.
+- **Restored scrollback is saved to disk.** At quit, each tab's history (which
+  may include secrets you printed) is written to
+  `${XDG_STATE_HOME:-$HOME/.local/state}/cometty/scrollback/`, readable only by
+  you. It is deleted shortly after the next launch, or when you close every tab
+  or set `[session] restore` to `"tabs"` or `"off"`. Use one of those settings
+  if the history should never touch the disk.
 - An input-full or oversized-paste notice means that input was **not sent**.
   Wait for the program to read, then retry with a smaller paste.
 - Closing a tab on macOS/Linux ends its shell and requests that its foreground
@@ -128,5 +136,7 @@ custom shortcuts, tab labels, and logging preferences.
 - Search does not span displayed row boundaries; wrapped plain-text links are
   detected separately on each row.
 - Font choice currently uses generic families rather than individual font names.
+- Scrollback is saved only when you quit: after a crash, tabs come back without
+  their contents. Restoring into a narrower window re-wraps long lines.
 - Large histories, many tabs, and dense searches can use substantial memory;
   scrollback limits are per tab, not an application-wide RAM limit.

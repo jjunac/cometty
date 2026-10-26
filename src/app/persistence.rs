@@ -182,7 +182,9 @@ impl ConfigSaver {
 
 /// What the session writer does with the snapshot file.
 pub enum SessionJob {
-    Write(Session),
+    /// The snapshot plus the `(name, dump)` scrollback files it references
+    /// (empty except at quit).
+    Write(Session, Vec<(String, Vec<u8>)>),
     /// Fresh start next launch (every tab closed, or restore turned off).
     Remove,
 }
@@ -220,8 +222,8 @@ impl SessionSaver {
         let worker = self.worker.get_or_insert_with(|| {
             Worker::new(
                 |(path, job): (PathBuf, SessionJob)| match job {
-                    SessionJob::Write(s) => {
-                        session::save_to_path(&s, &path).map_err(|e| format!("{e:#}"))
+                    SessionJob::Write(s, scrollback) => {
+                        session::save_to_path(&s, &scrollback, &path).map_err(|e| format!("{e:#}"))
                     }
                     SessionJob::Remove => session::remove(&path).map_err(|e| e.to_string()),
                 },
@@ -298,7 +300,11 @@ mod tests {
         assert!(saver.due(now, true));
 
         let snapshot = Session::new(0, None, vec![session::TabState::default()]);
-        saver.submit(path.clone(), SessionJob::Write(snapshot.clone()), || {});
+        saver.submit(
+            path.clone(),
+            SessionJob::Write(snapshot.clone(), Vec::new()),
+            || {},
+        );
         assert!(!saver.due(now, true), "submitting clears the change");
         saver.submit(path.clone(), SessionJob::Remove, || {});
         assert_eq!(saver.finish(), None);
@@ -306,7 +312,11 @@ mod tests {
 
         let mut saver = SessionSaver::default();
         saver.submit(path.clone(), SessionJob::Remove, || {});
-        saver.submit(path.clone(), SessionJob::Write(snapshot.clone()), || {});
+        saver.submit(
+            path.clone(),
+            SessionJob::Write(snapshot.clone(), Vec::new()),
+            || {},
+        );
         assert_eq!(saver.finish(), None);
         assert_eq!(session::load(&path), Some(snapshot));
         let _ = std::fs::remove_dir_all(&dir);

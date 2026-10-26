@@ -86,7 +86,9 @@ tests or headless timings with native-memory, GUI-latency, or energy verificatio
 - **Session:** exit-time work belongs in `exiting()` (macOS Cmd+Q never returns
   from `run_app`). Tabs open at exit save; none left after a spawn removes; only
   the lock holder touches the snapshot; writes/removals share one ordered queue.
-  Restore shell cwds from the kernel, not OSC 7.
+  Restore shell cwds from the kernel, not OSC 7. Scrollback dumps are captured
+  only at quit, written before the snapshot commit and pruned after it; replay
+  discards replies/clipboard requests.
 
 ## Documentation contract
 

@@ -221,7 +221,7 @@ pub const LINK_MODIFIERS: [&str; 5] = ["auto", "cmd", "ctrl", "alt", "none"];
 /// Values offered for `[links] underline`.
 pub const LINK_UNDERLINES: [&str; 3] = ["always", "hover", "never"];
 /// Values offered for `[session] restore`.
-pub const SESSION_RESTORE_MODES: [&str; 2] = ["tabs", "off"];
+pub const SESSION_RESTORE_MODES: [&str; 3] = ["scrollback", "tabs", "off"];
 /// Values offered for `[clipboard] osc52` (least to most permissive).
 pub const OSC52_MODES: [&str; 3] = ["off", "write", "read-write"];
 /// Values offered for `[log] level` (least to most verbose). Parsing is

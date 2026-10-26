@@ -6,6 +6,8 @@
 //! tab left (every shell exited or was closed) removes the snapshot. The
 //! final decision runs from `ApplicationHandler::exiting`, the only hook
 //! macOS reaches on Cmd+Q (AppKit terminates the process right after it).
+//! Scrollback is captured only there: debounced runtime snapshots stay
+//! tabs-only crash insurance (and drop the previous quit's dumps).
 
 use std::fs::File;
 use std::path::PathBuf;
@@ -79,7 +81,9 @@ impl App {
 
     /// Spawn the first window's tabs: the restored snapshot when there is
     /// one (tabs that fail to spawn are skipped), else a single default
-    /// tab. Returns false when no tab could be spawned.
+    /// tab. Each restored tab replays its scrollback dump (when enabled)
+    /// and the banner before the shell's first output is drained. Returns
+    /// false when no tab could be spawned.
     pub(crate) fn spawn_initial_tabs(
         &mut self,
         cols: usize,
@@ -87,11 +91,20 @@ impl App {
         restored: Option<Session>,
     ) -> bool {
         if let Some(restored) = restored {
-            let banner = restored.banner();
-            for tab in &restored.tabs {
-                if self.spawn_tab(cols, rows, tab.cwd.as_deref())
-                    && let Some(tab) = self.tabs.last_mut()
-                {
+            let replay = self.config.session.restores_scrollback();
+            for saved in &restored.tabs {
+                if !self.spawn_tab(cols, rows, saved.cwd.as_deref()) {
+                    continue;
+                }
+                let dump = match (&self.session.path, &saved.scrollback) {
+                    (Some(path), Some(name)) if replay => session::load_scrollback(path, name),
+                    _ => None,
+                };
+                if let Some(tab) = self.tabs.last_mut() {
+                    if let Some(dump) = &dump {
+                        tab.terminal.replay(dump);
+                    }
+                    let banner = restored.banner(tab.terminal.cols(), dump.is_some());
                     tab.terminal.feed(banner.as_bytes());
                 }
             }
@@ -110,27 +123,28 @@ impl App {
             log::warn!("failed to save session: {e}");
         }
         if self.session.saver.due(now, false) {
-            self.submit_session_job();
+            self.submit_session_job(false);
         }
     }
 
     /// Final exit decision; joins the writer so the file is settled before
     /// the process ends.
     pub(crate) fn finish_session(&mut self) {
-        self.submit_session_job();
+        self.submit_session_job(self.config.session.restores_scrollback());
         if let Some(e) = self.session.saver.finish() {
             log::warn!("failed to save session: {e}");
         }
     }
 
-    fn submit_session_job(&mut self) {
+    fn submit_session_job(&mut self, scrollback: bool) {
         let Some(path) = self.session.path.clone() else {
             return;
         };
         let job = if !self.config.session.restores_tabs() {
             SessionJob::Remove
         } else if !self.tabs.is_empty() {
-            SessionJob::Write(self.session_snapshot())
+            let (snapshot, dumps) = self.session_snapshot(scrollback);
+            SessionJob::Write(snapshot, dumps)
         } else if self.spawned_any {
             SessionJob::Remove
         } else {
@@ -140,7 +154,10 @@ impl App {
         self.session.saver.submit(path, job, || {});
     }
 
-    fn session_snapshot(&mut self) -> Session {
+    /// The snapshot, plus each tab's VT dump when `scrollback` asks for it.
+    /// Dumps are encoded here (the grids live on this thread); the worker
+    /// only writes them.
+    fn session_snapshot(&mut self, scrollback: bool) -> (Session, Vec<(String, Vec<u8>)>) {
         if let Some(w) = self.window.as_ref() {
             let size = w.inner_size();
             if !super::is_fullscreen_like(w, size.width, size.height) {
@@ -152,20 +169,36 @@ impl App {
                 });
             }
         }
-        let tabs = self
-            .tabs
-            .iter()
-            .map(|t| TabState {
+        let mut dumps = Vec::new();
+        let mut tabs = Vec::with_capacity(self.tabs.len());
+        for (i, t) in self.tabs.iter().enumerate() {
+            let mut state = TabState {
                 cwd: t.shell_cwd().map(str::to_string),
-            })
-            .collect();
-        Session::new(self.active, self.session.window.clone(), tabs)
+                scrollback: None,
+            };
+            let dump = if scrollback {
+                t.terminal.dump_scrollback()
+            } else {
+                Vec::new()
+            };
+            if dump.len() > session::MAX_SCROLLBACK_BYTES {
+                log::warn!("tab {i} scrollback is {} bytes; not saved", dump.len());
+            } else if !dump.is_empty() {
+                let name = session::scrollback_name(i);
+                state.scrollback = Some(name.clone());
+                dumps.push((name, dump));
+            }
+            tabs.push(state);
+        }
+        let snapshot = Session::new(self.active, self.session.window.clone(), tabs);
+        (snapshot, dumps)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn app_at(path: &std::path::Path) -> App {
         let mut app = App::new(
@@ -228,6 +261,54 @@ mod tests {
         app.config.session.restore = "off".to_string();
         app.finish_session();
         assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quit_saves_scrollback_only_when_enabled() {
+        let dir = std::env::temp_dir().join(format!("cometty-app-sb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.toml");
+        let cwd = dir.to_str().unwrap();
+
+        let mut app = app_at(&path);
+        add_tab(&mut app, cwd);
+        add_tab(&mut app, cwd);
+        let tab = &mut app.tabs[0].terminal;
+        tab.feed(b"first\r\nsecond\r\nthird\r\n");
+        let expected: Vec<_> = (0..3)
+            .map(|i| tab.grid().global_line_cells(i).unwrap())
+            .collect();
+
+        // Debounced runtime snapshots never carry dumps.
+        app.session_changed();
+        app.service_session_saves(Instant::now() + Duration::from_secs(5));
+        assert_eq!(app.session.saver.finish(), None);
+        assert_eq!(session::load(&path).unwrap().tabs.len(), 2);
+        assert!(!session::scrollback_dir(&path).exists());
+
+        // Default quit: the written tab's dump replays its rows; the empty
+        // tab references nothing.
+        app.finish_session();
+        let saved = session::load(&path).unwrap();
+        assert_eq!(saved.tabs[1].scrollback, None);
+        let name = saved.tabs[0]
+            .scrollback
+            .as_deref()
+            .expect("dump referenced");
+        let dump = session::load_scrollback(&path, name).unwrap();
+        let mut replayed = crate::term::Terminal::new(20, 2, crate::theme::Theme::default());
+        replayed.replay(&dump);
+        let got: Vec<_> = (0..3)
+            .map(|i| replayed.grid().global_line_cells(i).unwrap())
+            .collect();
+        assert_eq!(got, expected);
+
+        // `tabs` keeps the tabs but no contents.
+        app.config.session.restore = "tabs".to_string();
+        app.finish_session();
+        assert!(session::load(&path).unwrap().tabs[0].scrollback.is_none());
+        assert!(!session::scrollback_dir(&path).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

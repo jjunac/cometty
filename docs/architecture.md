@@ -132,7 +132,9 @@ Sources: [`session.rs`](../src/session.rs),
 The snapshot is `${XDG_STATE_HOME:-$HOME/.local/state}/cometty/session.toml`
 (owner-only, versioned TOML), independent of `--config`. It records tab order,
 each shell's working directory, the active tab, the save time, and the last
-windowed logical size and physical position, never terminal contents or commands.
+windowed logical size and physical position, never commands. A quit snapshot
+with `restore = "scrollback"` also names one dump per tab in the sibling
+owner-only `scrollback/` directory.
 
 - **Ownership:** startup takes a non-blocking exclusive lock on the sibling
   `session.lock`. Only the holder reads or writes the snapshot; a concurrent
@@ -148,22 +150,41 @@ windowed logical size and physical position, never terminal contents or commands
   override. Vanished directories fall back to `[shell] cwd`; at most 64 tabs are
   restored; failed spawns are skipped, and none spawning opens a default tab.
   Unknown versions or unreadable files mean a fresh start. Each restored tab's
-  terminal (not its shell) is fed a dim `Restored session: <save time>` line
-  before the shell's first output.
+  terminal (not its shell) replays its dump, when enabled, and is then fed a bold ANSI-cyan
+  `Session restored: <save time>` block (with the opt-out hint when contents were
+  replayed), all before the shell's first output is drained.
+- **Scrollback dumps:** `Grid::dump_primary` writes history plus the primary
+  screen (the saved main screen while the alternate screen is active) as plain
+  VT text: clusters, `SGR 0`-based style changes, OSC 8, CRLF per row. Theme
+  default colors are emitted as `SGR 0`, other colors as truecolor, so default
+  text follows the restoring theme. Trailing blank screen rows and default-blank
+  cells are trimmed. The format is independent of compact history storage, and
+  replay through `Terminal::feed` re-applies every history cap. Rows carry no
+  soft-wrap flag, so a narrower restoring window wraps long rows.
+  `Terminal::replay` drops any reply or OSC 52 request the dump provokes (a
+  tampered file must not type into the shell) and closes open strings, styles,
+  and links. Dumps and reads are capped at 64 MiB per tab; names are bare
+  `*.vt` files (anything else in the snapshot is ignored). Encoding runs on the
+  UI thread in `exiting`; its latency for many full tabs is unmeasured.
+- **Dump commit order:** dumps get fresh names, are written first, then the
+  snapshot is atomically renamed, then every unreferenced dump is deleted. A
+  crash leaves either the old pair or the new one. Removal deletes the snapshot
+  before the directory.
 - **While running:** tab spawn/close/exit, active-tab switches, shell cwd changes,
   window moves/resizes, and restore-setting edits mark the snapshot dirty.
   `SessionSaver` writes at most once per second, anchored at the first change, so
-  a crash restores recent state.
+  a crash restores recent state. These runtime writes are tabs-only (no dumps),
+  so the previous quit's dumps are deleted by the first one after a restore.
 - **Exit decision** (in `ApplicationHandler::exiting`): tabs still open (Cmd+Q,
-  window close) → write; no tab left after one was spawned (every shell exited or
+  window close) → write (with dumps under `scrollback`); no tab left after one was spawned (every shell exited or
   was closed) → remove; restore `off` → remove; startup failed before any tab →
   leave the file. Writes and removals share one ordered queue, so a stale
   debounced write cannot resurrect a removed session.
 
 On macOS, Cmd+Q terminates the process right after `exiting`, so `run_app` never
 returns. Session finalization, PTY shutdown, and the config flush therefore run
-in `exiting`; `main`'s tail repeats them idempotently. Fullscreen state, running
-programs, and scrollback are not restored (see the [roadmap](roadmap.md)).
+in `exiting`; `main`'s tail repeats them idempotently. Fullscreen state and
+running programs are not restored.
 
 ## Logging without UI feedback loops
 

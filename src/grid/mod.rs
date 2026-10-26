@@ -1,5 +1,6 @@
 mod alt;
 mod cell;
+mod dump;
 mod edit;
 mod history;
 mod link;

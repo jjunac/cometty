@@ -162,15 +162,20 @@ input was not sent; wait for the program to read and retry with a smaller paste.
 
 | Section / key | Default | Meaning |
 | --- | --- | --- |
-| `session.restore` | `"tabs"` | `tabs` reopens the tabs, their working directories, the active tab, and the window size/position at the next launch; `off` forgets the session at quit |
+| `session.restore` | `"scrollback"` | `scrollback` reopens the tabs with their history and screen contents; `tabs` reopens the tabs, their working directories, the active tab, and the window size/position without contents; `off` forgets the session at quit |
 
 The session is saved when you quit (Cmd+Q, or closing the window) with tabs open.
 Closing every tab, so the window closes by itself, starts fresh next time. Shells
-start fresh in their saved directories: running programs, scrollback, and
-fullscreen state are not restored, and directories that no longer exist fall back
-to `shell.cwd`. While one cometty instance is running, other instances start
-fresh and do not change its saved session. The snapshot lives in
-`${XDG_STATE_HOME:-$HOME/.local/state}/cometty/session.toml`.
+start fresh in their saved directories: running programs and fullscreen state are
+not restored, and directories that no longer exist fall back to `shell.cwd`.
+With `scrollback`, each tab's history and primary screen (never a fullscreen
+program's screen) are replayed above a bold accent-colored `Session restored: <date>` block that
+names the setting to change. Contents are captured only at quit, so a crash
+restores tabs without them. While one cometty instance is running, other
+instances start fresh and do not change its saved session. The snapshot lives in
+`${XDG_STATE_HOME:-$HOME/.local/state}/cometty/session.toml`, and scrollback
+dumps in the owner-only `scrollback/` directory next to it; dumps are deleted
+once no snapshot references them.
 
 ## Logs
 
