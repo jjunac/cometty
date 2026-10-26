@@ -190,15 +190,18 @@ impl App {
     }
 
     pub(crate) fn service_config_saves(&mut self, now: Instant, force: bool) {
-        let proxy = self.proxy.clone();
+        let proxy = &self.proxy;
         self.config_saver.dispatch(
             now,
             force,
             &self.config,
             self.settings.effective_save_path(),
-            move || {
-                if let Some(p) = &proxy {
-                    let _ = p.send_event(UserEvent::ConfigSaveAvailable);
+            || {
+                let proxy = proxy.clone();
+                move || {
+                    if let Some(p) = &proxy {
+                        let _ = p.send_event(UserEvent::ConfigSaveAvailable);
+                    }
                 }
             },
         );

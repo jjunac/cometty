@@ -137,13 +137,16 @@ impl ConfigSaver {
         self.deadline
     }
 
-    pub fn dispatch(
+    /// `make_wake` runs only when the worker is first created: on macOS each
+    /// winit `EventLoopProxy` clone adds a run-loop source and wakes the loop,
+    /// so building one per call would keep `about_to_wait` spinning.
+    pub fn dispatch<W: Fn() + Send + 'static>(
         &mut self,
         now: Instant,
         force: bool,
         config: &Config,
         path: Option<PathBuf>,
-        wake: impl Fn() + Send + 'static,
+        make_wake: impl FnOnce() -> W,
     ) {
         if !self.dirty || (!force && self.deadline.is_some_and(|at| at > now)) {
             return;
@@ -154,7 +157,7 @@ impl ConfigSaver {
                     Some(path) => job.config.save_to_path(&path).map_err(|e| format!("{e:#}")),
                     None => Err("no HOME set; cannot resolve config path".into()),
                 },
-                wake,
+                make_wake(),
             )
         });
         worker.enqueue(
@@ -260,11 +263,11 @@ mod tests {
         for i in 0..100 {
             cfg.window.title = format!("generation {i}");
             saver.changed(now);
-            saver.dispatch(now, false, &cfg, Some(path.clone()), || {});
+            saver.dispatch(now, false, &cfg, Some(path.clone()), || || {});
         }
         assert!(saver.worker.is_none(), "drag edits do no filesystem work");
         assert_eq!(saver.deadline(), Some(now + SAVE_DELAY));
-        saver.dispatch(now, true, &cfg, Some(path.clone()), || {});
+        saver.dispatch(now, true, &cfg, Some(path.clone()), || || {});
         assert!(saver.finish().unwrap().is_ok());
         assert_eq!(
             Config::load_from_path(&path).unwrap().window.title,
@@ -280,9 +283,9 @@ mod tests {
         let now = Instant::now();
         let cfg = Config::default();
         saver.changed(now);
-        saver.dispatch(now, true, &cfg, None, || {});
+        saver.dispatch(now, true, &cfg, None, || || {});
         saver.changed(now);
-        saver.dispatch(now, true, &cfg, None, || {});
+        saver.dispatch(now, true, &cfg, None, || || {});
         assert!(saver.finish().unwrap().unwrap_err().contains("no HOME"));
     }
 
