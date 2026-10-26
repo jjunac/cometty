@@ -16,7 +16,14 @@ The shell comes from `[shell] shell`, otherwise `$SHELL` (`COMSPEC` on Windows)
 with a platform fallback. Shell command splitting supports quotes/backslash
 grouping, not variable expansion or a shell-evaluated command string. A failed
 spawn tries `/bin/bash` and logs the failure. TERM defaults to `xterm-256color`;
-cwd defaults to `$HOME` or `/`. Geometry uses the same clamp as the terminal.
+cwd defaults to `$HOME` or `/` (a restored tab passes its saved directory).
+Geometry uses the same clamp as the terminal.
+
+Children get `TERM_PROGRAM=cometty` and never inherit the identity of the
+terminal that launched cometty (`TERM_SESSION_ID`, iTerm/kitty/WezTerm/tmux
+variables, …; see `INHERITED_TERMINAL_ENV` in [`pty.rs`](../src/pty.rs)).
+Inherited, macOS zsh would run `/etc/zshrc_Apple_Terminal` and every tab would
+share the parent Terminal.app tab's session and history files.
 
 ## Output backpressure and coalesced wakes
 

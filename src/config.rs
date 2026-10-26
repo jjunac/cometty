@@ -183,6 +183,9 @@ fn d_link_underline() -> String {
 fn d_osc52() -> String {
     "write".to_string()
 }
+fn d_session_restore() -> String {
+    "tabs".to_string()
+}
 
 // --- sections ---
 
@@ -656,6 +659,28 @@ impl ClipboardConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionConfig {
+    /// What quitting remembers for the next launch: `"tabs"` (tab order,
+    /// working directories, active tab, window geometry) or `"off"`.
+    #[serde(default = "d_session_restore")]
+    pub restore: String,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            restore: d_session_restore(),
+        }
+    }
+}
+
+impl SessionConfig {
+    pub fn restores_tabs(&self) -> bool {
+        self.restore == "tabs"
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -682,6 +707,8 @@ pub struct Config {
     pub links: LinksConfig,
     #[serde(default)]
     pub clipboard: ClipboardConfig,
+    #[serde(default)]
+    pub session: SessionConfig,
     #[serde(default)]
     pub log: LogConfig,
 }
@@ -789,6 +816,10 @@ impl Config {
             known @ ("off" | "write" | "read-write") => known.to_string(),
             _ => d_osc52(),
         };
+        self.session.restore = match self.session.restore.trim().to_ascii_lowercase().as_str() {
+            known @ ("tabs" | "off") => known.to_string(),
+            _ => d_session_restore(),
+        };
         self.log.buffer_lines = self
             .log
             .buffer_lines
@@ -859,6 +890,8 @@ mod tests {
         assert!(c.links.detect_urls);
         assert_eq!(c.clipboard.osc52, "write");
         assert!(c.clipboard.allows_write() && !c.clipboard.allows_read());
+        assert_eq!(c.session.restore, "tabs");
+        assert!(c.session.restores_tabs());
         assert_eq!(c.log.level, "debug");
         assert_eq!(c.log.filter, "");
         assert_eq!(c.log.buffer_lines, 1000);
@@ -962,6 +995,10 @@ mod tests {
         // Unknown osc52 mode falls back to write-only.
         let bad: Config = toml::from_str("[clipboard]\nosc52=\"loud\"\n").unwrap();
         assert_eq!(bad.sanitized().clipboard.osc52, "write");
+        let off: Config = toml::from_str("[session]\nrestore=\"OFF\"\n").unwrap();
+        assert!(!off.sanitized().session.restores_tabs());
+        let bad: Config = toml::from_str("[session]\nrestore=\"all\"\n").unwrap();
+        assert_eq!(bad.sanitized().session.restore, "tabs");
     }
 
     #[test]

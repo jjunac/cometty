@@ -46,6 +46,9 @@ detect_urls = true
 
 [clipboard]
 osc52 = "write"
+
+[session]
+restore = "tabs"
 ```
 
 ## Appearance
@@ -154,6 +157,20 @@ refused. Wrapped plain-text URLs are detected separately on each displayed row.
 programs to set it but not read it. OSC 52 transfers are limited to 1 MiB of text;
 normal copy/paste is separate. An input-full/oversized-paste notice means that
 input was not sent; wait for the program to read and retry with a smaller paste.
+
+## Session restore
+
+| Section / key | Default | Meaning |
+| --- | --- | --- |
+| `session.restore` | `"tabs"` | `tabs` reopens the tabs, their working directories, the active tab, and the window size/position at the next launch; `off` forgets the session at quit |
+
+The session is saved when you quit (Cmd+Q, or closing the window) with tabs open.
+Closing every tab, so the window closes by itself, starts fresh next time. Shells
+start fresh in their saved directories: running programs, scrollback, and
+fullscreen state are not restored, and directories that no longer exist fall back
+to `shell.cwd`. While one cometty instance is running, other instances start
+fresh and do not change its saved session. The snapshot lives in
+`${XDG_STATE_HOME:-$HOME/.local/state}/cometty/session.toml`.
 
 ## Logs
 

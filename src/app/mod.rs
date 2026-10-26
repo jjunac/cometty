@@ -16,6 +16,7 @@ pub mod redraw;
 pub mod scheduling;
 pub mod search;
 pub mod selection_view;
+pub mod session;
 pub mod settings;
 pub mod tab;
 
@@ -89,6 +90,11 @@ pub struct App {
     pub(crate) window_title: String,
     pub(crate) settings: SettingsPanel,
     pub(crate) config_saver: persistence::ConfigSaver,
+    /// Session snapshot ownership + writer (inert unless `main` opens it).
+    pub(crate) session: session::SessionState,
+    /// A tab was spawned this run: an empty tab list at exit then means
+    /// "every tab was closed", not "startup failed".
+    pub(crate) spawned_any: bool,
     pub(crate) logs: LogsPanel,
     /// Ring buffer for the log panel; the global logger also holds a clone.
     pub(crate) log_buffer: Arc<Mutex<LogBuffer>>,
@@ -142,6 +148,8 @@ impl App {
             window_title,
             settings: SettingsPanel::new(startup),
             config_saver: persistence::ConfigSaver::default(),
+            session: session::SessionState::default(),
+            spawned_any: false,
             logs: LogsPanel::default(),
             log_buffer,
             menu: None,
@@ -226,6 +234,9 @@ impl App {
         let actions = settings::diff_actions(old, &self.config);
         if !actions.any {
             return;
+        }
+        if old.session != self.config.session {
+            self.session_changed();
         }
         // Theme (skipped live while a CLI --theme owns the session) and
         // terminal tuning both flow through the per-tab session config.

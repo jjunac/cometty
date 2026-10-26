@@ -98,6 +98,13 @@ shell/starting-directory changes in Settings apply to new tabs. `--theme`
 overrides your saved theme for the current session, and `--config` selects a
 different preferences file.
 
+Quitting with tabs open (Cmd+Q, or closing the window) reopens the same tabs, in
+their working directories, at the next launch, along with the window size and
+position; each restored tab starts with a dim `Restored session: <date>` line.
+Closing every tab yourself starts fresh next time. Running programs and
+scrollback are not restored. Set `[session] restore = "off"` to always start
+fresh.
+
 See the [configuration reference](docs/configuration.md) for all options,
 custom shortcuts, tab labels, and logging preferences.
 
@@ -113,7 +120,7 @@ custom shortcuts, tab labels, and logging preferences.
 - Closing a tab on macOS/Linux ends its shell and requests that its foreground
   job stop. Unsent input is discarded. There is currently **no confirmation for
   running work**, so save or finish it first. Closing the last shell closes the
-  window.
+  window, and the next launch starts with a single fresh tab.
 
 ## Current limitations
 

@@ -11,6 +11,7 @@ App
 ├── shared Window, Renderer, clipboard, Config, settings and log panels
 ├── shared viewport snapshot (only the active view)
 ├── ConfigSaver → ordered background writer
+├── SessionState → session lock + SessionSaver (ordered background writer)
 └── tabs: Vec<Tab>
     ├── stable session ID (independent of its vector index)
     ├── Terminal → bounded parser + Grid → live/alternate cells + history
@@ -29,6 +30,7 @@ This distinction matters when diagnosing memory or invalidating shared caches.
 | [`main.rs`](../src/main.rs) | CLI, startup, winit `ApplicationHandler`, event-loop deadlines, final shutdown |
 | [`app/mod.rs`](../src/app/mod.rs) | App state, cross-subsystem settings application, save/result servicing |
 | [`app/tab.rs`](../src/app/tab.rs) | Tab ownership, spawn/switch/close, title facts, selection rebasing |
+| [`session.rs`](../src/session.rs), [`app/session.rs`](../src/app/session.rs) | Session snapshot format/validation; snapshot, restore, and exit decision |
 | [`app/keyboard.rs`](../src/app/keyboard.rs), [`app/mouse.rs`](../src/app/mouse.rs) | Input dispatch, local shortcuts/selection, terminal reporting |
 | [`app/pty_io.rs`](../src/app/pty_io.rs), [`app/scheduling.rs`](../src/app/scheduling.rs) | Output drain, fair shared budget, resize, visual wake decisions |
 | [`app/redraw.rs`](../src/app/redraw.rs) | Snapshot/highlight gathering, render call, returned UI actions |
@@ -115,11 +117,53 @@ Sources: [`config.rs`](../src/config.rs),
    status; sequential writes prevent an older save from landing after a newer one.
 5. Saves create parent directories, serialize TOML, write a sibling temporary
    file, then rename. Panel close forces dispatch; application shutdown flushes
-   and joins the writer after the event loop. Failures remain visible in settings.
+   and joins the writer in `exiting`. Failures remain visible in settings.
 
 Do not move filesystem writes back into the render path or enqueue a save for
 every slider frame. The atomic replacement path is not a claim of crash-durable
 `fsync` semantics.
+
+## Session persistence
+
+Sources: [`session.rs`](../src/session.rs),
+[`app/session.rs`](../src/app/session.rs),
+[`app/persistence.rs`](../src/app/persistence.rs).
+
+The snapshot is `${XDG_STATE_HOME:-$HOME/.local/state}/cometty/session.toml`
+(owner-only, versioned TOML), independent of `--config`. It records tab order,
+each shell's working directory, the active tab, the save time, and the last
+windowed logical size and physical position, never terminal contents or commands.
+
+- **Ownership:** startup takes a non-blocking exclusive lock on the sibling
+  `session.lock`. Only the holder reads or writes the snapshot; a concurrent
+  second instance starts fresh, so it cannot duplicate or clobber the first
+  instance's tabs. Without `HOME` (and in tests) the session is inert.
+- **Source of each cwd:** the kernel-reported cwd of the *shell* pid, cached by
+  `Tab::refresh_title` (falling back to the restored spawn directory before the
+  first query). OSC 7 is not used: it is label-truncated and may name a remote
+  host.
+- **Restore:** with `[session] restore = "tabs"`, the first window uses the saved
+  size, and the saved position only if a current monitor contains its title bar.
+  Shells spawn at the final tab count's grid size with `PtySession`'s cwd
+  override. Vanished directories fall back to `[shell] cwd`; at most 64 tabs are
+  restored; failed spawns are skipped, and none spawning opens a default tab.
+  Unknown versions or unreadable files mean a fresh start. Each restored tab's
+  terminal (not its shell) is fed a dim `Restored session: <save time>` line
+  before the shell's first output.
+- **While running:** tab spawn/close/exit, active-tab switches, shell cwd changes,
+  window moves/resizes, and restore-setting edits mark the snapshot dirty.
+  `SessionSaver` writes at most once per second, anchored at the first change, so
+  a crash restores recent state.
+- **Exit decision** (in `ApplicationHandler::exiting`): tabs still open (Cmd+Q,
+  window close) → write; no tab left after one was spawned (every shell exited or
+  was closed) → remove; restore `off` → remove; startup failed before any tab →
+  leave the file. Writes and removals share one ordered queue, so a stale
+  debounced write cannot resurrect a removed session.
+
+On macOS, Cmd+Q terminates the process right after `exiting`, so `run_app` never
+returns. Session finalization, PTY shutdown, and the config flush therefore run
+in `exiting`; `main`'s tail repeats them idempotently. Fullscreen state, running
+programs, and scrollback are not restored (see the [roadmap](roadmap.md)).
 
 ## Logging without UI feedback loops
 

@@ -17,9 +17,13 @@ fn until(mut predicate: impl FnMut() -> bool) {
 }
 
 fn spawn(command: &str) -> PtySession {
+    spawn_in(command, None)
+}
+
+fn spawn_in(command: &str, cwd: Option<&str>) -> PtySession {
     let mut config = Config::default();
     config.shell.shell = format!("/bin/sh -c '{command}'");
-    PtySession::spawn_with_size(80, 24, || {}, &config).unwrap()
+    PtySession::spawn_with_size(80, 24, || {}, &config, cwd).unwrap()
 }
 
 fn ready(session: &PtySession) {
@@ -64,6 +68,23 @@ fn close(session: PtySession) {
         "input allocation still charged after close"
     );
     assert_reaped(pid);
+}
+
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn restored_cwd_overrides_configured_cwd() {
+    let dir = std::env::temp_dir().join(format!("cometty-pty-cwd-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let session = spawn_in(
+        "printf READY; exec /bin/sleep 60",
+        Some(dir.to_str().unwrap()),
+    );
+    ready(&session);
+    let cwd = crate::procinfo::cwd(session.shell_pid().unwrap());
+    close(session);
+    assert_eq!(cwd.as_deref(), dir.to_str());
+    std::fs::remove_dir(&dir).unwrap();
 }
 
 #[test]

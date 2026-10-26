@@ -152,11 +152,14 @@ pub struct PtySession {
 }
 
 impl PtySession {
+    /// Spawn the configured shell. `cwd` (a restored tab's directory)
+    /// overrides `[shell] cwd` for this session only.
     pub fn spawn_with_size(
         cols: usize,
         rows: usize,
         waker: impl Fn() + Send + Sync + 'static,
         config: &Config,
+        cwd: Option<&str>,
     ) -> anyhow::Result<Self> {
         let min_dim = config.terminal.min_dim.max(1);
         let max_dim = config.terminal.max_dim.max(min_dim);
@@ -198,8 +201,9 @@ impl PtySession {
         };
         let mut cmd = CommandBuilder::new(program.clone());
         cmd.args(shell_args.clone());
-        cmd.env("TERM", &term);
-        cmd.cwd(configured_cwd(&config.shell));
+        apply_terminal_env(&mut cmd, &term);
+        let cwd = cwd.map_or_else(|| configured_cwd(&config.shell), str::to_string);
+        cmd.cwd(&cwd);
 
         let child = match pair.slave.spawn_command(cmd) {
             Ok(child) => child,
@@ -209,8 +213,8 @@ impl PtySession {
                 // log panel. Only the total failure below still errors.
                 log::warn!("failed to spawn {program:?}: {e:#}; falling back to /bin/bash");
                 let mut fallback = CommandBuilder::new("/bin/bash");
-                fallback.env("TERM", &term);
-                fallback.cwd(configured_cwd(&config.shell));
+                apply_terminal_env(&mut fallback, &term);
+                fallback.cwd(&cwd);
                 pair.slave.spawn_command(fallback).map_err(|e2| {
                     anyhow::anyhow!(
                         "failed to spawn {program:?}: {e:#} (fallback also failed: {e2:#})"
@@ -445,6 +449,42 @@ pub(crate) fn split_shell_command(shell: &str) -> (String, Vec<String>) {
     (program, args)
 }
 
+/// Identity variables of the terminal cometty itself was launched from.
+/// Inherited, they make shells act as that terminal's session: with
+/// `TERM_PROGRAM=Apple_Terminal`, macOS zsh sources
+/// `/etc/zshrc_Apple_Terminal`, and every tab shares the parent tab's
+/// `TERM_SESSION_ID` session/history files (racing to restore and delete
+/// them when restored tabs start together).
+const INHERITED_TERMINAL_ENV: &[&str] = &[
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "TERM_SESSION_ID",
+    "ITERM_SESSION_ID",
+    "ITERM_PROFILE",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+    "KITTY_WINDOW_ID",
+    "KITTY_PID",
+    "WEZTERM_PANE",
+    "WEZTERM_UNIX_SOCKET",
+    "ALACRITTY_WINDOW_ID",
+    "WT_SESSION",
+    "VTE_VERSION",
+    "TMUX",
+    "TMUX_PANE",
+    "STY",
+];
+
+/// Advertise cometty (not the launching terminal) to the child.
+fn apply_terminal_env(cmd: &mut CommandBuilder, term: &str) {
+    for key in INHERITED_TERMINAL_ENV {
+        cmd.env_remove(key);
+    }
+    cmd.env("TERM", term);
+    cmd.env("TERM_PROGRAM", "cometty");
+    cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+}
+
 fn configured_cwd(shell_config: &crate::config::ShellConfig) -> String {
     if !shell_config.cwd.trim().is_empty() {
         return shell_config.cwd.clone();
@@ -471,6 +511,21 @@ pub fn default_shell() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_env_drops_the_launching_terminal_identity() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.env("TERM_PROGRAM", "Apple_Terminal");
+        cmd.env("TERM_SESSION_ID", "52CD32D0-75EB-45E6-BF7C-3F70713180D2");
+        cmd.env("TMUX", "/tmp/tmux-501/default,1,0");
+        cmd.env("HOME", "/home/u");
+        apply_terminal_env(&mut cmd, "xterm-256color");
+        assert_eq!(cmd.get_env("TERM_PROGRAM"), Some("cometty".as_ref()));
+        assert_eq!(cmd.get_env("TERM"), Some("xterm-256color".as_ref()));
+        assert_eq!(cmd.get_env("TERM_SESSION_ID"), None);
+        assert_eq!(cmd.get_env("TMUX"), None);
+        assert_eq!(cmd.get_env("HOME"), Some("/home/u".as_ref()));
+    }
 
     #[test]
     fn output_notifications_coalesce_until_empty_and_rearm_for_exit() {

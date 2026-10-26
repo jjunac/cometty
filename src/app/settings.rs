@@ -19,6 +19,7 @@ pub enum SettingsSection {
     Window,
     Terminal,
     Shell,
+    Session,
     Cursor,
     Selection,
     Scrollbar,
@@ -30,12 +31,13 @@ pub enum SettingsSection {
 }
 
 impl SettingsSection {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Theme,
         Self::Font,
         Self::Window,
         Self::Terminal,
         Self::Shell,
+        Self::Session,
         Self::Cursor,
         Self::Selection,
         Self::Scrollbar,
@@ -53,6 +55,7 @@ impl SettingsSection {
             Self::Window => "Window",
             Self::Terminal => "Terminal",
             Self::Shell => "Shell",
+            Self::Session => "Session",
             Self::Cursor => "Cursor",
             Self::Selection => "Selection",
             Self::Scrollbar => "Scrollbar",
@@ -193,6 +196,7 @@ pub fn reset_section(config: &mut Config, section: SettingsSection) {
         SettingsSection::Window => config.window = defaults.window,
         SettingsSection::Terminal => config.terminal = defaults.terminal,
         SettingsSection::Shell => config.shell = defaults.shell,
+        SettingsSection::Session => config.session = defaults.session,
         SettingsSection::Cursor => config.cursor = defaults.cursor,
         SettingsSection::Selection => config.selection = defaults.selection,
         SettingsSection::Scrollbar => config.scrollbar = defaults.scrollbar,
@@ -216,6 +220,8 @@ pub const CURSOR_SHAPES: [&str; 3] = ["block", "underline", "bar"];
 pub const LINK_MODIFIERS: [&str; 5] = ["auto", "cmd", "ctrl", "alt", "none"];
 /// Values offered for `[links] underline`.
 pub const LINK_UNDERLINES: [&str; 3] = ["always", "hover", "never"];
+/// Values offered for `[session] restore`.
+pub const SESSION_RESTORE_MODES: [&str; 2] = ["tabs", "off"];
 /// Values offered for `[clipboard] osc52` (least to most permissive).
 pub const OSC52_MODES: [&str; 3] = ["off", "write", "read-write"];
 /// Values offered for `[log] level` (least to most verbose). Parsing is
@@ -445,6 +451,11 @@ mod tests {
         new = old.clone();
         new.clipboard.osc52 = "read-write".to_string();
         assert!(diff_actions(&old, &new).chrome);
+        new = old.clone();
+        new.session.restore = "off".to_string();
+        let a = diff_actions(&old, &new);
+        assert!(a.any, "saved, but nothing to live-apply");
+        assert!(!a.chrome && !a.terminal && !a.theme && !a.font && !a.window_size);
     }
 
     #[test]

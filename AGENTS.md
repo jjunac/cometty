@@ -30,7 +30,7 @@ tests or headless timings with native-memory, GUI-latency, or energy verificatio
 
 | Area | Entry points | Design reference |
 | --- | --- | --- |
-| Event loop / settings / logging | `src/main.rs`, `src/app/{mod,scheduling,persistence}.rs`, `src/{logbuf,logging}.rs` | [Architecture](docs/architecture.md) |
+| Event loop / settings / logging / session | `src/main.rs`, `src/app/{mod,scheduling,persistence,session}.rs`, `src/{logbuf,logging,session}.rs` | [Architecture](docs/architecture.md) |
 | Parser / grid / history | `src/term.rs`, `src/term/parser.rs`, `src/grid/` | [Terminal model](docs/terminal.md) |
 | Transport / shutdown | `src/pty.rs`, `src/pty/`, `src/app/pty_io.rs` | [PTY lifecycle](docs/pty.md) |
 | Text / GPU / chrome | `src/renderer/`, `src/theme.rs`, `src/scrollbar.rs`, `src/tabbar.rs` | [Rendering](docs/rendering.md) |
@@ -83,6 +83,10 @@ tests or headless timings with native-memory, GUI-latency, or energy verificatio
   filters separate, target-scoped recording independent of `RUST_LOG`, ID-only
   incremental log indexing outside the lock, fixed-height rows, and no closed-panel
   ring lock.
+- **Session:** exit-time work belongs in `exiting()` (macOS Cmd+Q never returns
+  from `run_app`). Tabs open at exit save; none left after a spawn removes; only
+  the lock holder touches the snapshot; writes/removals share one ordered queue.
+  Restore shell cwds from the kernel, not OSC 7.
 
 ## Documentation contract
 

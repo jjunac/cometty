@@ -21,6 +21,7 @@ maintaining it.
 | [Interaction](interaction.md) | Keyboard/IME focus, search, selection, links, or tab labels |
 | [Memory](memory.md) | Storage budgets, retained capacity, known gaps, or memory diagnostics |
 | [Performance](performance.md) | Release benchmarks, phase counters, profiling, or interpreting results |
+| [Roadmap](roadmap.md) | Planned features and proposed designs (not yet implemented) |
 
 ## Keeping these documents useful
 

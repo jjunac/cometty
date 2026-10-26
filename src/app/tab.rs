@@ -78,6 +78,9 @@ pub struct Tab {
     pub(crate) last_service: Option<Instant>,
     pub(crate) input_notice: Option<String>,
     pub(crate) pending_reply: Option<Vec<u8>>,
+    /// Directory the shell was spawned in when it overrode `[shell] cwd`
+    /// (a restored tab): the snapshot fallback until the first kernel query.
+    pub(crate) spawn_cwd: Option<String>,
 }
 
 impl Tab {
@@ -137,6 +140,7 @@ impl Tab {
             last_service: None,
             input_notice: None,
             pending_reply: None,
+            spawn_cwd: None,
         }
     }
 
@@ -165,7 +169,9 @@ impl Tab {
     /// must not blank the label for a frame. While the shell owns the
     /// terminal the OSC 7 baseline is refreshed, so only reports emitted
     /// by a job itself count as live (see [`osc7_is_live`]).
-    pub(crate) fn refresh_title(&mut self) {
+    ///
+    /// Returns whether the shell's cwd changed (a session-snapshot input).
+    pub(crate) fn refresh_title(&mut self) -> bool {
         // Latency probe: this runs on the UI thread between echo and
         // paint, so a slow query delays every keystroke's frame.
         let start = Instant::now();
@@ -176,8 +182,12 @@ impl Tab {
                 self.foreground.command = Some(command);
             }
         }
-        if let Some(cwd) = self.pty.shell_pid().or(pgid).and_then(procinfo::cwd) {
+        let mut cwd_changed = false;
+        if let Some(cwd) = self.pty.shell_pid().or(pgid).and_then(procinfo::cwd)
+            && self.foreground.cwd.as_ref() != Some(&cwd)
+        {
             self.foreground.cwd = Some(cwd);
+            cwd_changed = true;
         }
         // Every OSC 7 seen while the shell owns the terminal is accounted
         // for; a later report (from the next job) is the only one allowed
@@ -189,6 +199,12 @@ impl Tab {
         if elapsed >= Duration::from_millis(2) {
             log::debug!("slow refresh_title {elapsed:?}");
         }
+        cwd_changed
+    }
+
+    /// The shell's last known working directory, for session snapshots.
+    pub(crate) fn shell_cwd(&self) -> Option<&str> {
+        self.foreground.cwd.as_deref().or(self.spawn_cwd.as_deref())
     }
 }
 
@@ -549,11 +565,12 @@ impl App {
         }
     }
 
-    /// Spawn a tab at `cols`x`rows` and switch to it. Returns false when
-    /// the PTY failed to spawn (error already logged).
-    pub(crate) fn spawn_tab(&mut self, cols: usize, rows: usize) -> bool {
+    /// Spawn a tab at `cols`x`rows` and switch to it; `cwd` (a restored
+    /// tab's directory) overrides `[shell] cwd`. Returns false when the PTY
+    /// failed to spawn (error already logged).
+    pub(crate) fn spawn_tab(&mut self, cols: usize, rows: usize, cwd: Option<&str>) -> bool {
         let terminal = Terminal::new_with_config(cols, rows, self.theme, &self.config);
-        let pty = match PtySession::spawn_with_size(cols, rows, self.waker(), &self.config) {
+        let pty = match PtySession::spawn_with_size(cols, rows, self.waker(), &self.config, cwd) {
             Ok(p) => p,
             Err(e) => {
                 log::error!("failed to spawn pty: {e:#}");
@@ -569,8 +586,12 @@ impl App {
             old.last_output = None;
             old.last_key_write = None;
         }
-        self.tabs.push(Tab::new(id, terminal, pty));
+        let mut tab = Tab::new(id, terminal, pty);
+        tab.spawn_cwd = cwd.map(str::to_string);
+        self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
+        self.spawned_any = true;
+        self.session_changed();
         log::debug!("spawned tab {} ({}x{})", self.tabs.len(), cols, rows);
         if let Some(r) = self.renderer.as_mut() {
             r.invalidate();
@@ -610,7 +631,7 @@ impl App {
             renderer.line_height,
             &self.config.terminal,
         );
-        self.spawn_tab(cols, rows);
+        self.spawn_tab(cols, rows, None);
     }
 
     /// Switch to tab `index`. No-op when out of range or already active.
@@ -623,6 +644,7 @@ impl App {
             old.last_key_write = None;
         }
         self.active = index;
+        self.session_changed();
         log::debug!("switched to tab {index}");
         // Two tabs can share a grid version while holding different
         // content: the new tab's cached matches must be recomputed.
@@ -654,6 +676,7 @@ impl App {
         log::debug!("closed tab {index} ({} left)", self.tabs.len() - 1);
         self.tabs.remove(index);
         self.pty_schedule.removed(&[index], self.tabs.len());
+        self.session_changed();
         if self.tabs.is_empty() {
             return true;
         }

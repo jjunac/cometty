@@ -16,6 +16,7 @@ mod renderer;
 mod scrollbar;
 mod search;
 mod selection;
+mod session;
 mod tabbar;
 mod term;
 mod theme;
@@ -140,13 +141,34 @@ impl ApplicationHandler<UserEvent> for App {
         // here (same requirement as the native menu above).
         #[cfg(target_os = "macos")]
         icon::set_dock_icon();
-        let attrs = Window::default_attributes()
-            .with_title(self.config.window.title.clone())
-            .with_window_icon(icon::load_window_icon())
-            .with_inner_size(winit::dpi::LogicalSize::new(
+        let restored = self.session.take_restored();
+        let saved_window = restored.as_ref().and_then(|s| s.window.as_ref());
+        let (width, height) = saved_window.map_or(
+            (
                 self.config.window.width as f64,
                 self.config.window.height as f64,
-            ));
+            ),
+            |w| (w.width, w.height),
+        );
+        let mut attrs = Window::default_attributes()
+            .with_title(self.config.window.title.clone())
+            .with_window_icon(icon::load_window_icon())
+            .with_inner_size(winit::dpi::LogicalSize::new(width, height));
+        // A saved position on a since-disconnected display would strand the
+        // window off-screen: only reuse it when a monitor still shows it.
+        if let Some(position) = saved_window.and_then(|w| w.position) {
+            let monitors: Vec<session::MonitorRect> = event_loop
+                .available_monitors()
+                .map(|m| {
+                    let (p, s) = (m.position(), m.size());
+                    (p.x, p.y, s.width, s.height)
+                })
+                .collect();
+            if session::position_on_monitor(position, &monitors) {
+                attrs =
+                    attrs.with_position(winit::dpi::PhysicalPosition::new(position.0, position.1));
+            }
+        }
         // Brave-style merged titlebar on macOS: transparent titlebar with
         // fullsize content view. The tab strip paints into the titlebar
         // area; the OS keeps drawing the traffic lights on top. The title
@@ -178,8 +200,10 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
-        // Single tab: no bar, so the grid gets the full height.
-        let term_h = app::tab::term_height_px(h, scale, 1, &self.config.tabbar);
+        // Size shells for the final tab count (a single tab has no bar),
+        // so restored tabs don't each start with a resize.
+        let tab_count = restored.as_ref().map_or(1, |s| s.tabs.len());
+        let term_h = app::tab::term_height_px(h, scale, tab_count, &self.config.tabbar);
         let (cols, rows) = app::compute_grid_size(
             w,
             term_h,
@@ -191,7 +215,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.last_blink = Instant::now();
-        if !self.spawn_tab(cols, rows) {
+        if !self.spawn_initial_tabs(cols, rows, restored) {
             event_loop.exit();
         }
     }
@@ -290,7 +314,11 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
+            WindowEvent::Moved(_) => {
+                self.session_changed();
+            }
             WindowEvent::Resized(size) => {
+                self.session_changed();
                 self.zero_sized = size.width == 0 || size.height == 0;
                 let scale = self
                     .window
@@ -385,6 +413,7 @@ impl ApplicationHandler<UserEvent> for App {
 
         let now = Instant::now();
         self.service_config_saves(now, !self.settings.open);
+        self.service_session_saves(now);
         let suspended = self.visuals_suspended();
         let (sync_repaint, sync_at) = self.active_tab_mut().map_or((false, None), |tab| {
             let repaint = tab.sync.release_due(now);
@@ -440,8 +469,23 @@ impl ApplicationHandler<UserEvent> for App {
             next = app::scheduling::earlier(next, Some(now));
         }
         next = app::scheduling::earlier(next, self.config_saver.deadline());
+        next = app::scheduling::earlier(next, self.session.deadline());
         perf::report_due(now);
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+    }
+
+    /// Every exit path ends here, including macOS Cmd+Q, where AppKit
+    /// terminates the process right after this callback so `run_app` never
+    /// returns: the session decision and shutdown must not wait for
+    /// `main`'s tail (which stays as an idempotent fallback).
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Before the tabs go: they are the snapshot.
+        self.finish_session();
+        // Request all shutdowns before waiting, so the deadline is shared
+        // rather than one grace period per tab.
+        self.tabs.clear();
+        pty::finish_shutdown();
+        self.finish_config_saves();
     }
 }
 
@@ -516,9 +560,10 @@ fn main() -> anyhow::Result<()> {
         },
         log_buffer,
     );
+    app.session = app::session::SessionState::open(&app.config);
     let result = event_loop.run_app(&mut app);
-    // Request all shutdowns before waiting, so the deadline is shared rather
-    // than one grace period per tab. This also covers earlier closed tabs.
+    // Normally already done by `exiting`; repeated here in case the loop
+    // returned without it. Also covers earlier closed tabs.
     app.tabs.clear();
     pty::finish_shutdown();
     app.finish_config_saves();

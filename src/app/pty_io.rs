@@ -150,12 +150,13 @@ impl App {
             }
         }
         let mut chrome_changed = false;
+        let mut cwd_changed = false;
         for (i, before) in titles_before.iter().enumerate() {
             if let Some(before) = before {
                 // Metadata queries stay off the render path and run once
                 // per touched tab, not once per scheduling quantum.
                 let tab = &mut self.tabs[i];
-                tab.refresh_title();
+                cwd_changed |= tab.refresh_title();
                 if tab.visual_dirty && !tab.selecting {
                     tab.selection = None;
                     tab.select_mode = crate::selection::SelectMode::Char;
@@ -190,6 +191,9 @@ impl App {
         let removed = !exited.is_empty();
         for i in exited.iter().rev() {
             self.tabs.remove(*i);
+        }
+        if removed || cwd_changed {
+            self.session_changed();
         }
         if self.tabs.is_empty() {
             return true;

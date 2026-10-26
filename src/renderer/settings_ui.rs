@@ -8,9 +8,10 @@
 
 use crate::app::settings::{
     CURSOR_SHAPES, FONT_FAMILIES, KNOWN_THEMES, LINK_MODIFIERS, LINK_UNDERLINES, LOG_LEVELS,
-    OSC52_MODES, SettingsPanel, SettingsSection, is_known_theme, normalize_min_max,
-    repair_finite_f32, repair_min_u32, repair_min_u64, repair_min_usize, repair_positive_f32,
-    repair_positive_f64, reset_all, reset_section, sanitize_cursor_shape, sanitize_key_label,
+    OSC52_MODES, SESSION_RESTORE_MODES, SettingsPanel, SettingsSection, is_known_theme,
+    normalize_min_max, repair_finite_f32, repair_min_u32, repair_min_u64, repair_min_usize,
+    repair_positive_f32, repair_positive_f64, reset_all, reset_section, sanitize_cursor_shape,
+    sanitize_key_label,
 };
 use crate::config::{Config, MAX_LOG_BUFFER_LINES, MIN_LOG_BUFFER_LINES};
 
@@ -685,6 +686,44 @@ fn show_section(
                 &d.shell.cwd,
             );
         }
+        SettingsSection::Session => {
+            ui.label(
+                "Quitting (Cmd+Q or the window close button) remembers the open \
+                 tabs, their working directories, the active tab, and the \
+                 window size and position for the next launch. Closing every \
+                 tab starts fresh. Running programs and scrollback are not \
+                 restored; \"off\" also forgets the saved session at quit.",
+            );
+            ui.horizontal(|ui| {
+                let slot = begin_reset_slot(ui);
+                ui.label("Restore on launch");
+                egui::ComboBox::from_id_salt("session-restore")
+                    .selected_text(config.session.restore.as_str())
+                    .show_ui(ui, |ui| {
+                        for mode in SESSION_RESTORE_MODES {
+                            if ui
+                                .selectable_value(
+                                    &mut config.session.restore,
+                                    mode.to_string(),
+                                    mode,
+                                )
+                                .changed()
+                            {
+                                ed.mark();
+                            }
+                        }
+                    });
+                if end_reset_slot(
+                    ui,
+                    slot,
+                    "restore on launch",
+                    config.session.restore != d.session.restore,
+                ) {
+                    config.session.restore = d.session.restore.clone();
+                    ed.mark();
+                }
+            });
+        }
         SettingsSection::Cursor => {
             ui.label("Shape defaults apply to new tabs; blink speed is live.");
             ed.u64(
@@ -1193,17 +1232,23 @@ mod tests {
     use super::*;
     use crate::app::settings::AppStartup;
 
-    /// The logs section is the newest widget arm; a headless egui frame
-    /// proves it lays out (and that `SettingsSection::ALL` reaches it).
+    /// A headless egui frame proves every section lays out (and that
+    /// `SettingsSection::ALL` reaches it).
     #[test]
-    fn logs_section_lays_out_headless() {
+    fn sections_lay_out_headless() {
+        for section in SettingsSection::ALL {
+            section_lays_out_headless(section);
+        }
+    }
+
+    fn section_lays_out_headless(section: SettingsSection) {
         let mut settings = SettingsPanel::new(AppStartup {
             config_path_override: None,
             cli_theme: None,
             config_corrupt: false,
         });
         settings.open = true;
-        settings.section = SettingsSection::Logs;
+        settings.section = section;
         let mut config = Config::default();
         let ctx = egui::Context::default();
         let input = || egui::RawInput {
@@ -1221,7 +1266,11 @@ mod tests {
         let mut output = ctx.run_ui(input(), |ui| {
             let _ = show_settings(ui.ctx(), &mut settings, &mut config);
         });
-        assert!(!output.shapes.is_empty(), "settings panel paints");
+        assert!(
+            !output.shapes.is_empty(),
+            "{} section paints",
+            section.title()
+        );
         output.textures_delta.clear();
     }
 }
