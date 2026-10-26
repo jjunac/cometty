@@ -12,7 +12,7 @@
 #   ./scripts/profile-macos.sh --time-limit 30s -- --theme tokyo-night
 #
 # Output is an Instruments .trace bundle. Open it in Instruments.app to
-# inspect per-type / per-callsite heap usage (see footer message + MEMORY_STUDY.md).
+# inspect per-type / per-callsite heap usage (see docs/memory.md and docs/performance.md).
 set -euo pipefail
 
 TEMPLATE="Allocations"
@@ -53,7 +53,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ "$(uname -s)" == "Darwin" ]] || die "macOS only (uname=$(uname -s)). On Linux use heaptrack/massif, see MEMORY_STUDY.md."
+[[ "$(uname -s)" == "Darwin" ]] || die "macOS only (uname=$(uname -s)). On Linux use heaptrack/massif, see docs/memory.md."
 need_xcode
 
 if [[ "$BUILD" == "1" ]]; then

@@ -4,147 +4,122 @@
 
 # cometty
 
-Single-binary GPU terminal emulator in Rust (`winit` + `wgpu` + `glyphon` + `portable-pty` + `vte`).
+A GPU-accelerated terminal emulator with tabs, themes, searchable scrollback,
+and Unicode support.
 
-## Run
+## Features
 
-```sh
-cargo run -- --theme tokyo-night   # needs display + GPU; see --list-themes
-cargo run -- --config ~/.config/cometty/config.toml
-cargo test                         # headless-safe unit tests
-cargo clippy -- -D warnings
-cargo fmt --check
-```
+- Multiple tabs with command and working-directory labels.
+- Search across your screen and scrollback, with highlighted matches and
+  wrap-around navigation.
+- Three built-in themes: **tokyo-night**, **vscode**, and **tomorrow-night**.
+- Live settings with automatic saving and reset controls.
+- Mouse selection, word/line selection, copy/paste, and clickable links.
+- Truecolor, styled text, emoji, combining characters, and double-width text.
+- Support for terminal applications such as vim, less, and htop, including
+  application mouse input and bracketed paste.
+- A built-in log viewer for troubleshooting.
 
-Linux needs the GUI system deps first (see `.github/workflows/ci.yml`):
+## Install and launch
+
+To install from a downloaded or cloned source checkout, you need a current
+[Rust toolchain](https://rustup.rs/). On Debian/Ubuntu, install these packages first:
 
 ```sh
 sudo apt-get install -y libx11-dev libxkbcommon-dev libgl1-mesa-dev
 ```
 
-On macOS/Linux, closing a tab cancels unsent input and hangs up its shell and
-foreground job. A shell that ignores hangup is force-terminated after a 250 ms
-grace period. Cleanup and child reaping run off the UI thread; detached jobs are
-not recursively hunted. Application exit waits up to two seconds for all PTY
-sessions together.
+From the cometty checkout:
 
-## Config
+```sh
+cargo install --path . --locked
+cometty
+```
 
-TOML file at `$HOME/.config/cometty/config.toml` (missing file or keys = defaults).
-Precedence: `defaults < file < --theme/--config` CLI flags.
+Ensure Cargo's install directory (usually `~/.cargo/bin`) is on your PATH.
+Launching cometty requires a graphical desktop and a working graphics adapter.
+On macOS/Linux, it starts your `$SHELL` in your home directory, falling back to
+`/bin/bash` if needed.
+
+```sh
+cometty --theme tokyo-night
+cometty --list-themes
+cometty --config ~/.config/cometty/config.toml
+cometty --help
+```
+
+## Keyboard and mouse
+
+| Action | macOS | Linux |
+| --- | --- | --- |
+| New tab | Cmd+T | Ctrl+T |
+| Copy / paste | Cmd+C / Cmd+V | Ctrl+Shift+C / Ctrl+Shift+V |
+| Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab | Ctrl+Tab / Ctrl+Shift+Tab |
+| Jump to tab 1–9 | Cmd+1–9 | Super+1–9 |
+| Find / re-focus search | Cmd+F | Ctrl+F |
+| Settings | Cmd+, | Ctrl+, |
+| Logs | Cmd+Shift+L | Ctrl+Shift+L |
+| Page through history | Shift+PageUp / Shift+PageDown | Shift+PageUp / Shift+PageDown |
+| History top / live bottom | Shift+Home / Shift+End | Shift+Home / Shift+End |
+
+While search is open, **Enter** / **Shift+Enter** (or **F3** / **Shift+F3**) moves
+to the next/previous match; **Esc** closes it. Lowercase queries ignore case;
+including an uppercase character makes a query case-sensitive.
+
+Drag to select text, double-click a word, or triple-click a line. Use the wheel
+or scrollbar to browse history. Hold **Shift** to select/scroll locally when an
+application is handling the mouse.
+
+Hold **Cmd** on macOS or **Ctrl** on Linux and click a link to open it. Click a
+tab to switch, its **×** to close, or **+** to open another.
+
+## Preferences
+
+Open Settings with the shortcut above, or edit
+`$HOME/.config/cometty/config.toml`. Missing files or settings use defaults:
 
 ```toml
 [theme]
-name = "tokyo-night"  # tokyo-night | vscode | tomorrow-night
+name = "tokyo-night"
 
 [font]
-family = "monospace"  # monospace | sans | serif | cursive | fantasy
+family = "monospace"
 size = 14.0
-line_height_factor = 1.25
-cell_width_factor = 0.602
-
-[window]
-title = "cometty"
-width = 800
-height = 600
 
 [terminal]
 scrollback_lines = 10000
-scrollback_bytes = 134217728  # 128 MiB retained history per tab (cells + extras + capacity)
-max_cells = 1048576         # live cells per buffer; also capped by max_dim / PTY u16
-min_dim = 1
-max_dim = 1024
-tab_stop = 8
-max_title_chars = 256
-
-[shell]
-shell = ""  # empty = $SHELL or /bin/bash
-term = "xterm-256color"
-cwd = ""    # empty = $HOME
-
-[cursor]
-blink_ms = 530
-default_shape = "block"
-default_blinking = true
-
-[scrollbar]
-track_width = 10.0
-min_thumb = 20.0
-pad = 2.0
-fade_delay_ms = 800
-fade_speed = 5.0
 
 [tabbar]
-height = 38.0
-min_tab_width = 100.0
-max_label_chars = 32
-title_format = "$command | $cwd"  # $title (OSC), $command, $cwd (shell dir: OSC 7 else kernel), $tab; all empty -> "Tab N"
-# + insets, corner radii, reserves, plus-button sizes (see src/config.rs)
-
-[selection]
-double_click_ms = 400
-word_regex = "[A-Za-z0-9_]+"  # double-click match-words pattern; triple-click selects the line
-
-[input]
-copy_key = "c"
-paste_key = "v"
-new_tab_key = "t"
-search_key = "f"
-copy_ctrl_shift = true
-copy_super = true
-paste_ctrl_shift = true
-paste_super = true
-new_tab_ctrl = true
-new_tab_super = true
-search_ctrl = true      # Ctrl+F on Linux/Windows; false on macOS (Cmd+F only)
-search_super = true
-lines_per_tick = 7.0
-
-[links]
-open_modifier = "auto"  # auto (Cmd on macOS, Ctrl elsewhere) | cmd | ctrl | alt | none
-underline = "hover"     # always | hover (while the modifier is held) | never
-detect_urls = true      # also underline/click plain-text http(s)://, www., mailto:, ...
-
-[clipboard]
-osc52 = "write"  # off | write (apps may set the clipboard) | read-write (reads can exfiltrate)
-
-[log]
-level = "debug"        # in-app buffer: cometty's own logs (off | error | warn | info | debug | trace)
-filter = ""            # RUST_LOG-style override, e.g. "cometty=debug,wgpu=debug,warn"
-buffer_lines = 1000    # ring capacity; stderr output still follows RUST_LOG
+title_format = "$command | $cwd"
 ```
 
-## Features
+Settings changes save automatically. File edits take effect on the next launch;
+shell/starting-directory changes in Settings apply to new tabs. `--theme`
+overrides your saved theme for the current session, and `--config` selects a
+different preferences file.
 
-- [x] PTY spawn (`$SHELL` → `/bin/bash`), `TERM=xterm-256color`, read/write threads, resize propagation
-- [x] Window + event loop with deferred resize applied on redraw
-- [x] Text / control handling: print with pending-wrap, `\n` / `\r` / `\b` / `\t`
-- [x] CSI `A/B/C/D/E/F/G/H/J/K/L/M/S/T/d/s/u`, ESC `M/7/8/c`
-- [x] SGR: bold, 16 + bright colors, `38;5` / `48;5`, `38;2` / `48;2` truecolor
-- [x] Grid: scrollback buffer (10k lines, stored), insert/delete lines, erase display/line; per-tab history byte budget, lazy width projection, recycled row storage
-- [x] Input: text passthrough, Enter → `\r`, Backspace → `0x7F`, Esc, arrows, Home/End/PgUp/PgDn/Ins/Del, Ctrl+letter, Ctrl+Space
-- [x] Rendering: per-cell fg/bold/underline + bg quads, cursor shapes (block/underline/bar) + blink, version-cache to skip rebuild, surface-loss recovery
-- [x] Themes (`tokyo-night` default, `vscode`, `tomorrow-night`) via `--theme NAME` / `--list-themes`
-- [x] Alt screen (`?1049h/l`) + DECSET/DECRST (`?25`, `?2004`, …) for `vim` / `less` / `htop`
-- [x] Scrollback viewing (Shift+PgUp/Dn = page-minus-1, Shift+Home/End = top/bottom, mouse wheel)
-- [x] Scrollbar UI (graphical overlay in `src/scrollbar.rs`: fade/thumb geometry, mouse wheel, Shift+PgUp/Dn page, Shift+Home/End top/bottom)
-- [x] Selection + copy/paste (mouse drag + double-click word, Ctrl+Shift+C/V, bracketed paste)
-- [x] Tabs (Ctrl+T / Cmd+T, Ghostty-style strip hidden for 1 tab: inset pill, equal-width tabs down to min then scroll, click to switch, hover × on left to close, + for new, ⌘1-9 hints, OSC title labels)
-- [x] Underline rendering + cursor shape (`?25`, `DECSCUSR` block/underline/bar, steady/blink) + window title (OSC `0/1/2`)
-- [x] Consistent erase semantics (BCE: `ED/EL/IL/DL`/scroll fill use current pen bg)
-- [x] Full keyboard: F1–F12, Ctrl/Shift+arrows, Alt+key → `ESC` prefix, keypad (+`DECCKM`/`DECKPAM`, `Ctrl+Tab` reserved, Opt+arrows word jump, Cmd+arrows line edges)
-- [x] Unicode: double-width / emoji / combining chars (CJK wide, ZWJ sequences, flags, skin tones, VS16, combining marks; cluster cells with continuation placeholders)
-- [x] Scroll regions (`CSI r`), origin / insert / auto-wrap modes
-- [x] Exit behavior: last shell exit closes the window, other exits close just that tab
-- [x] User config: TOML file (`$HOME/.config/cometty/config.toml`) for theme/font/window/terminal/shell/cursor/scrollbar/tabbar/selection/input/log (see `src/config.rs`); CLI `--theme` / `--config` override file
-- [x] Settings UI (`Ctrl+,` / `Cmd+,` or the Settings button: sidebar panel, live-apply, debounced auto-save to `config.toml` via an ordered worker with flush on shutdown, per-field/section/global reset)
-- [x] Log viewer (`Ctrl+Shift+L` / `Cmd+Shift+L` or Cometty > Logs…: in-memory ring, level + text filter, follow, clear/copy; every detected OSC sequence is logged — handled or not — with a compact payload summary; records by target so dependency debug spam stays out while their warnings still show, bounded by `[log] filter`/`level`/`buffer_lines`; incremental visible-only filtering and coalesced wakeups; stderr keeps following `RUST_LOG`)
-- [x] Mouse reporting (`1000/1002/1003/1006-SGR`) + focus (`1004`) + synced output (`2026`); `Shift`-override keeps local selection
-- [x] Char ops + queries: `ICH/DCH/ECH` (`@/P/X`), `REP`, `DA`/`CPR`, `DECRQM` stub
-- [x] Full SGR: dim / italic / inverse / strike / overline, underline styles + `58/59` colors, colon `38:2:r:g:b` form
-- [x] Tab switching: `Ctrl+Tab` / `Ctrl+Shift+Tab` + `Cmd+1-9` wired to tab switch
-- [x] Search: `Cmd+F` on macOS / `Ctrl+F` on Linux/Windows (override with `[input] search_key`/`search_ctrl`/`search_super`) overlay (top-right find bar), smart-case match highlight over scrollback + screen (current match brighter), `Enter`/`Shift+Enter` (or `F3`/`Shift+F3`) next/prev with wrap-around, `Esc` close
-- [x] Hyperlinks: `OSC 8` runs stored per cell; hold the open modifier (`Cmd` on macOS, `Ctrl` elsewhere; `[links] open_modifier`) to underline every link — plus detected plain-text URLs — and click to open in the OS browser (scheme allowlist `http/https/ftp/mailto` — `file` is refused so untrusted output can't open local paths; no shell involved on macOS/Linux, and URIs with `cmd` metacharacters are refused on Windows); `[links] underline` (`always`/`hover`/`never`) and `detect_urls` tune the hints
-- [x] Clipboard: `OSC 52` writes from tmux/nvim/… gated by `[clipboard] osc52` (`off`/`write`/`read-write`); reads are opt-in because a `?` request can exfiltrate the clipboard; decoded bytes and final UTF-8 text are capped at 1 MiB and redacted in the log panel; paste is normalized/wrapped in one pass and admitted through a byte-bounded, nonblocking input queue (explicit notice on overflow, never a silent drop)
-- [x] Bounded OSC parsing: every OSC (including unsupported commands and when OSC 52 is off) has a hard 2 MiB wire-byte limit after `ESC ]`, excluding its terminator; overflow discards the whole command through termination/cancellation, then normal parsing resumes, with one size-only overflow warning per tab. Parser storage is released after completed/cancelled OSCs longer than 64 KiB; smaller sequences reuse capacity. A normal base64-encoded 1 MiB clipboard transfer, including line wrapping, fits the raw limit.
-- [ ] Bell (visual flash; currently ignored) + font zoom (`Ctrl +/-/0`) + confirm-close on dirty foreground process
+See the [configuration reference](docs/configuration.md) for all options,
+custom shortcuts, tab labels, and logging preferences.
+
+## Clipboard, links, and closing tabs
+
+- Applications can set your clipboard by default, but cannot read it. Set
+  `[clipboard] osc52 = "off"` to disable application clipboard access. Only enable
+  `"read-write"` if you trust applications—including remote ones—to read your
+  clipboard.
+- Web, FTP, and email links can open; local `file` links are refused.
+- An input-full or oversized-paste notice means that input was **not sent**.
+  Wait for the program to read, then retry with a smaller paste.
+- Closing a tab on macOS/Linux ends its shell and requests that its foreground
+  job stop. Unsent input is discarded. There is currently **no confirmation for
+  running work**, so save or finish it first. Closing the last shell closes the
+  window.
+
+## Current limitations
+
+- No audible/visual bell, keyboard font zoom, or running-job close confirmation.
+- Search does not span displayed row boundaries; wrapped plain-text links are
+  detected separately on each row.
+- Font choice currently uses generic families rather than individual font names.
+- Large histories, many tabs, and dense searches can use substantial memory;
+  scrollback limits are per tab, not an application-wide RAM limit.

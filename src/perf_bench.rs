@@ -1,5 +1,5 @@
 //! Opt-in, headless release measurements of production code. Run only the
-//! ignored `headless_release` test, with one test thread; see docs/benchmarking.md.
+//! ignored `headless_release` test, with one test thread; see docs/performance.md.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
