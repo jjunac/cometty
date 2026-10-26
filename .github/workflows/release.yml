@@ -1,0 +1,53 @@
+name: release
+
+# Tag pushes build the universal .app and open a draft GitHub release.
+# CI publishes ad-hoc-signed builds. For Developer ID/notarized artifacts,
+# add the signing credentials as secrets and pass --identity/--notary-profile
+# to scripts/bundle-macos.sh in the "Build bundle" step.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Verify tag matches Cargo.toml
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [[ "v${version}" != "${GITHUB_REF_NAME}" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"
+            exit 1
+          fi
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build bundle
+        run: ./scripts/bundle-macos.sh
+        env:
+          BUNDLE_VERSION: ${{ github.run_number }}
+
+      - name: Create draft release
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/*.zip dist/*.sha256 --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/*.zip dist/*.sha256 \
+              --title "cometty ${GITHUB_REF_NAME#v}" \
+              --generate-notes \
+              --draft \
+              --verify-tag
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}

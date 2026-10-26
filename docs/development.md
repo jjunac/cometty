@@ -28,6 +28,24 @@ Do not launch `cargo run` in a headless session. `--help`/`--list-themes` resolv
 before GUI setup; ordinary app startup creates a window, GPU surface, and shell.
 For automated headless verification prefer the commands below.
 
+## Packaging a macOS release
+
+[`scripts/bundle-macos.sh`](../scripts/bundle-macos.sh) builds a universal
+(Apple Silicon + Intel) binary, assembles `dist/Cometty.app` from
+[`packaging/macos/Info.plist`](../packaging/macos/Info.plist), signs it ad-hoc
+by default, and writes `Cometty-<version>-macos-universal.zip` plus a SHA-256
+file. Pass `--identity "Developer ID Application: ..."` and
+`--notary-profile NAME` for a hardened, notarized build; create the notary
+profile once with `xcrun notarytool store-credentials NAME --apple-id ... --team-id ...`.
+The script reads the version from `Cargo.toml`; bump it before tagging.
+[`release.yml`](../.github/workflows/release.yml) runs the same script on `v*`
+tags and opens a draft GitHub release.
+
+The bundle icon is [`assets/AppIcon.icns`](../assets/AppIcon.icns), generated
+once from `logo.svg` via `assets/icon-1024.png`; the embedded 128px icon is
+used only for unbundled runs. Keep `LSMinimumSystemVersion` in the plist and
+the macOS floor in the README in sync.
+
 ## Routine checks
 
 ```sh

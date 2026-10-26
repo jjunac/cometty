@@ -22,7 +22,26 @@ and Unicode support.
 
 ## Install and launch
 
-To install from a downloaded or cloned source checkout, you need a current
+### macOS (prebuilt app)
+
+Download the latest `Cometty-<version>-macos-universal.zip` from the
+[releases page](https://github.com/jjunac/cometty/releases/latest), unzip it,
+and move `Cometty.app` to `/Applications`. The build is universal (Apple
+Silicon and Intel) and targets macOS 13 or later.
+
+The bundled app starts your shell as a login shell, so Finder launches see your
+normal login PATH and profiles. Set `shell.shell` explicitly if you prefer a
+non-login shell.
+
+Release builds are ad-hoc signed, so macOS blocks the first launch. Try opening
+Cometty once, then open **System Settings → Privacy & Security** and click
+**Open Anyway** next to Cometty. Builds are not notarized yet.
+
+Prebuilt releases currently cover macOS only.
+
+### From source
+
+To build from a source checkout, you need a current
 [Rust toolchain](https://rustup.rs/). On Debian/Ubuntu, install these packages first:
 
 ```sh

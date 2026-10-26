@@ -13,11 +13,16 @@ supervisor owns child handles and worker completion. Dropping a child wrapper or
 the UI's master alone cannot clean up worker-owned descriptors or a blocked write.
 
 The shell comes from `[shell] shell`, otherwise `$SHELL` (`COMSPEC` on Windows)
-with a platform fallback. Shell command splitting supports quotes/backslash
-grouping, not variable expansion or a shell-evaluated command string. A failed
-spawn tries `/bin/bash` and logs the failure. TERM defaults to `xterm-256color`;
-cwd defaults to `$HOME` or `/` (a restored tab passes its saved directory).
-Geometry uses the same clamp as the terminal.
+with a platform fallback. An explicit `[shell] shell` is used verbatim. When
+cometty runs from its macOS `.app` bundle, the auto-detected shell starts with
+`-l`: Finder launches inherit launchd's minimal environment, and login profiles
+(notably `/etc/zprofile` → `path_helper`) establish PATH. Unbundled runs and
+non-macOS builds keep the non-login default. Shell command splitting supports
+quotes/backslash grouping, not variable expansion or a shell-evaluated command
+string. A failed spawn tries `/bin/bash` (with `-l` when the bundle default was
+login) and logs the failure. TERM defaults to `xterm-256color`; cwd defaults to
+`$HOME` or `/` (a restored tab passes its saved directory). Geometry uses the
+same clamp as the terminal.
 
 Children get `TERM_PROGRAM=cometty` and never inherit the identity of the
 terminal that launched cometty (`TERM_SESSION_ID`, iTerm/kitty/WezTerm/tmux

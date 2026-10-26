@@ -192,8 +192,13 @@ impl PtySession {
         #[cfg(not(unix))]
         let writer = pair.master.take_writer()?;
 
-        let shell = configured_shell(&config.shell);
-        let (program, shell_args) = split_shell_command(&shell);
+        // A Finder-launched bundle inherits launchd's minimal PATH; the
+        // default shell therefore starts as a login shell so it reads
+        // /etc/zprofile (path_helper) and the user's profile. An explicit
+        // [shell] shell is used verbatim.
+        let login_default =
+            config.shell.shell.trim().is_empty() && crate::platform::launched_from_app_bundle();
+        let (program, shell_args) = configured_shell(&config.shell, login_default);
         let term = if config.shell.term.is_empty() {
             "xterm-256color".to_string()
         } else {
@@ -213,6 +218,9 @@ impl PtySession {
                 // log panel. Only the total failure below still errors.
                 log::warn!("failed to spawn {program:?}: {e:#}; falling back to /bin/bash");
                 let mut fallback = CommandBuilder::new("/bin/bash");
+                if login_default {
+                    fallback.arg("-l");
+                }
                 apply_terminal_env(&mut fallback, &term);
                 fallback.cwd(&cwd);
                 pair.slave.spawn_command(fallback).map_err(|e2| {
@@ -379,11 +387,27 @@ impl Drop for PtySession {
     }
 }
 
-fn configured_shell(shell_config: &crate::config::ShellConfig) -> String {
-    if !shell_config.shell.trim().is_empty() {
-        return shell_config.shell.clone();
+/// Resolve the shell program and arguments.
+///
+/// An explicit `[shell] shell` is split and used verbatim. Otherwise the
+/// platform default shell (`$SHELL` or a fallback) is split the same way;
+/// when cometty was launched from its macOS app bundle, `login_default` adds
+/// `-l` so the shell reads login profiles (including `/etc/zprofile` →
+/// `path_helper`) instead of inheriting launchd's minimal PATH.
+fn configured_shell(
+    shell_config: &crate::config::ShellConfig,
+    login_default: bool,
+) -> (String, Vec<String>) {
+    let explicit = shell_config.shell.trim();
+    if !explicit.is_empty() {
+        return split_shell_command(explicit);
     }
-    default_shell()
+
+    let (program, mut args) = split_shell_command(&default_shell());
+    if login_default && !args.iter().any(|arg| arg == "-l" || arg == "--login") {
+        args.push("-l".to_string());
+    }
+    (program, args)
 }
 
 /// Split a configured shell string (`[shell] shell` or `$SHELL`) into
@@ -753,6 +777,39 @@ mod tests {
         let (program, args) = split_shell_command("   ");
         assert!(!program.is_empty());
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn default_shell_is_login_only_for_bundled_launch() {
+        let config = crate::config::ShellConfig::default();
+        let (expected_program, expected_args) = split_shell_command(&default_shell());
+
+        let (program, args) = configured_shell(&config, false);
+        assert_eq!(program, expected_program);
+        assert_eq!(args, expected_args);
+
+        let (program, args) = configured_shell(&config, true);
+        assert_eq!(program, expected_program);
+        let mut expected_login_args = expected_args;
+        if !expected_login_args
+            .iter()
+            .any(|arg| arg == "-l" || arg == "--login")
+        {
+            expected_login_args.push("-l".to_string());
+        }
+        assert_eq!(args, expected_login_args);
+    }
+
+    #[test]
+    fn explicit_shell_ignores_bundle_login_default() {
+        let config = crate::config::ShellConfig {
+            shell: "/bin/zsh --norc".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            configured_shell(&config, true),
+            ("/bin/zsh".to_string(), vec!["--norc".to_string()])
+        );
     }
 
     #[test]

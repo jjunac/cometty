@@ -107,9 +107,14 @@ If no referenced variable has a value, the label is `Tab N`.
 | `terminal.min_dim`, `terminal.max_dim` | `1`, `1024` | Requested minimum/maximum rows or columns, also subject to total-cell limits |
 | `terminal.tab_stop` | `8` | Tab-stop interval |
 | `terminal.max_title_chars` | `256` | Maximum application title/cwd-label characters |
-| `shell.shell` | `""` | Empty chooses `$SHELL` or `/bin/bash` on Unix; `$COMSPEC` or `cmd.exe` on Windows |
+| `shell.shell` | `""` | Empty chooses `$SHELL` or `/bin/bash` on Unix; `$COMSPEC` or `cmd.exe` on Windows. The macOS app adds `-l` to this default; explicit values are verbatim |
 | `shell.term` | `"xterm-256color"` | TERM advertised to programs |
 | `shell.cwd` | `""` | Empty starts in `$HOME`, or `/` if unset |
+
+When `shell.shell` is empty and cometty runs from its macOS app bundle, the
+shell starts as a login shell (`-l`) so Finder launches read login profiles and
+`path_helper` instead of launchd's minimal PATH. Set `shell.shell` explicitly
+(for example `"/bin/zsh"`) to force a non-login shell.
 
 History retains fewer rows if its storage budget is reached first. Lowering
 limits can discard old output or constrain terminal dimensions. Neither history

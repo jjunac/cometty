@@ -39,16 +39,22 @@ pub(crate) fn load_window_icon() -> Option<winit::window::Icon> {
     }
 }
 
-/// Set the macOS Dock tile from the embedded PNG.
+/// Set the macOS Dock tile from the embedded PNG for unbundled runs.
 ///
-/// `winit`'s window icon is ignored on macOS (icons come from the app
-/// bundle), so this calls `NSApplication::setApplicationIconImage` directly.
-/// Works for unbundled runs (`cargo run`); a bundled `.app` uses its
-/// `Info.plist`/`Assets.car` icon instead. Non-fatal: logs and returns on
-/// any failure. Must run on the main thread (winit's `resumed` qualifies).
+/// `winit`'s window icon is ignored on macOS, so unbundled runs (`cargo run`)
+/// call `NSApplication::setApplicationIconImage` explicitly. A bundled `.app`
+/// already gets its 1024px `AppIcon.icns` from `Info.plist`; overriding that
+/// with the embedded 128px development asset would soften the Dock icon, so
+/// bundled launches leave it alone. Non-fatal: logs and returns on any
+/// failure. Must run on the main thread (winit's `resumed` qualifies).
 #[cfg(target_os = "macos")]
 pub(crate) fn set_dock_icon() {
     use objc2::AnyThread as _;
+
+    if crate::platform::launched_from_app_bundle() {
+        log::debug!("using the app bundle icon for the Dock");
+        return;
+    }
 
     let Some(mtm) = objc2::MainThreadMarker::new() else {
         log::warn!("dock icon unavailable (not on main thread)");

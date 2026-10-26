@@ -41,7 +41,7 @@ This distinction matters when diagnosing memory or invalidating shared caches.
 | [`config.rs`](../src/config.rs), [`theme.rs`](../src/theme.rs) | Typed settings/defaults and resolved colors |
 | [`logbuf.rs`](../src/logbuf.rs), [`logging.rs`](../src/logging.rs), [`perf.rs`](../src/perf.rs) | Bounded logs and opt-in aggregate diagnostics |
 | [`tabbar.rs`](../src/tabbar.rs), [`scrollbar.rs`](../src/scrollbar.rs) | Testable chrome geometry and animation decisions |
-| [`procinfo.rs`](../src/procinfo.rs), [`menu.rs`](../src/menu.rs), [`icon.rs`](../src/icon.rs) | Best-effort OS integration |
+| [`procinfo.rs`](../src/procinfo.rs), [`menu.rs`](../src/menu.rs), [`icon.rs`](../src/icon.rs), [`platform.rs`](../src/platform.rs) | Best-effort OS integration and launch-context detection |
 
 Panel state belongs in `app/`; egui widgets belong in `renderer/`. Platform
 clipboard access stays in the app, not in the terminal parser.

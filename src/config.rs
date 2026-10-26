@@ -285,7 +285,8 @@ impl Default for TerminalConfig {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ShellConfig {
-    /// Empty = auto (`$SHELL` or `/bin/bash`, `COMSPEC` on Windows).
+    /// Empty = auto (`$SHELL` or `/bin/bash`, `COMSPEC` on Windows); bundled
+    /// macOS launches start this default as a login shell.
     #[serde(default = "d_shell")]
     pub shell: String,
     #[serde(default = "d_term")]

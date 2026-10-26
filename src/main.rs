@@ -10,6 +10,7 @@ mod menu;
 mod perf;
 #[cfg(test)]
 mod perf_bench;
+mod platform;
 mod procinfo;
 mod pty;
 mod renderer;
@@ -136,9 +137,10 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
-        // macOS ignores `with_window_icon`; set the Dock tile directly so
-        // unbundled runs (`cargo run`) still show the logo. Main thread
-        // here (same requirement as the native menu above).
+        // macOS ignores `with_window_icon`; set the Dock tile directly for
+        // unbundled runs so `cargo run` still shows the logo. Bundled apps
+        // use their Info.plist icon instead. Main thread here (same
+        // requirement as the native menu above).
         #[cfg(target_os = "macos")]
         icon::set_dock_icon();
         let restored = self.session.take_restored();

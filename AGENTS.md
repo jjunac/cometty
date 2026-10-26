@@ -34,6 +34,7 @@ tests or headless timings with native-memory, GUI-latency, or energy verificatio
 | Parser / grid / history | `src/term.rs`, `src/term/parser.rs`, `src/grid/` | [Terminal model](docs/terminal.md) |
 | Transport / shutdown | `src/pty.rs`, `src/pty/`, `src/app/pty_io.rs` | [PTY lifecycle](docs/pty.md) |
 | Text / GPU / chrome | `src/renderer/`, `src/theme.rs`, `src/scrollbar.rs`, `src/tabbar.rs` | [Rendering](docs/rendering.md) |
+| macOS release bundle | `scripts/bundle-macos.sh`, `packaging/macos/`, `.github/workflows/release.yml` | [Development](docs/development.md#packaging-a-macos-release) |
 | Input / search / links / titles | `src/app/{keyboard,mouse,search,links,tab}.rs`, pure `src/{input,search,selection,links,procinfo}.rs` | [Interaction](docs/interaction.md) |
 | Storage limits / diagnostics | History, input, parser, search and renderer ownership | [Memory](docs/memory.md), [profiling](docs/performance.md) |
 
@@ -56,6 +57,9 @@ tests or headless timings with native-memory, GUI-latency, or energy verificatio
   parsing/replies/exits progress independently of presentation. Input admission is
   nonblocking and capacity-accounted through in-flight writes. Preserve reply
   headroom/progress wakes, FIFO paste transactions, and visible rejection notices.
+- **macOS launch:** a bundled `.app` keeps its Info.plist Dock icon; the embedded
+  128px PNG is only for unbundled runs. The default shell gets `-l` only when
+  launched from the bundle; explicit `[shell] shell` stays verbatim.
 - **Shutdown:** tab close cancels unsent input; ordinary sender drop drains it.
   Unix poll cancellation cannot be replaced by a stop flag/cross-thread fd close.
   Never wait/kill synchronously/join live workers on the UI thread. The supervisor
