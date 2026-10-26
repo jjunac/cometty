@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{Read as _, Write as _};
+use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -258,20 +258,18 @@ fn valid_scrollback_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
-/// Read the dump `name` referenced by the snapshot at `path`. Missing is
-/// silent; unreadable or oversized dumps are logged and skipped (the tab
-/// still opens).
-pub fn load_scrollback(path: &Path, name: &str) -> Option<Vec<u8>> {
+/// Open the dump `name` referenced by the snapshot at `path` for streamed
+/// replay (no whole-dump buffer). Missing is silent; unreadable or oversized
+/// dumps are logged and skipped (the tab still opens). Size is checked up
+/// front, so an oversized dump is never partially replayed.
+pub fn open_scrollback(path: &Path, name: &str) -> Option<impl Read> {
     let file = scrollback_dir(path).join(name);
-    let read = || -> std::io::Result<Option<Vec<u8>>> {
-        let mut bytes = Vec::new();
-        File::open(&file)?
-            .take(MAX_SCROLLBACK_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)?;
-        Ok((bytes.len() <= MAX_SCROLLBACK_BYTES).then_some(bytes))
+    let open = || -> std::io::Result<Option<File>> {
+        let dump = File::open(&file)?;
+        Ok((dump.metadata()?.len() <= MAX_SCROLLBACK_BYTES as u64).then_some(dump))
     };
-    match read() {
-        Ok(Some(bytes)) => Some(bytes),
+    match open() {
+        Ok(Some(dump)) => Some(dump.take(MAX_SCROLLBACK_BYTES as u64)),
         Ok(None) => {
             log::warn!("skipping oversized scrollback {}", file.display());
             None
@@ -390,6 +388,14 @@ pub fn position_on_monitor(position: (i32, i32), monitors: &[MonitorRect]) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn load_scrollback(path: &Path, name: &str) -> Option<Vec<u8>> {
+        let mut bytes = Vec::new();
+        open_scrollback(path, name)?
+            .read_to_end(&mut bytes)
+            .unwrap();
+        Some(bytes)
+    }
 
     fn tab(cwd: &str) -> TabState {
         TabState {

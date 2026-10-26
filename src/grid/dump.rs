@@ -172,8 +172,8 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn replay_reproduces_history_and_screen() {
+    /// History plus a screen mixing styles, links, wide/combining text.
+    fn rich() -> (Terminal, usize) {
         let mut a = Terminal::new(20, 5, Theme::default());
         for i in 0..30 {
             a.feed(format!("line {i}\r\n").as_bytes());
@@ -185,10 +185,28 @@ mod tests {
         a.feed(b"\x1b[2;7;9;53mattrs\x1b[0m\r\n");
         a.feed(format!("{}\r\n{}\r\n", "x".repeat(20), "y".repeat(25)).as_bytes());
         let count = a.grid().scrollback_len() + a.grid().cursor().y;
+        (a, count)
+    }
 
+    /// At most 1–7 bytes per read, so escapes and UTF-8 straddle chunks.
+    struct Trickle<'a>(&'a [u8], usize);
+
+    impl std::io::Read for Trickle<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.1 = self.1 % 7 + 1;
+            let n = self.1.min(buf.len()).min(self.0.len());
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn replay_reproduces_history_and_screen() {
+        let (a, count) = rich();
         let dump = a.dump_scrollback();
         let mut b = Terminal::new(20, 5, Theme::default());
-        b.replay(&dump);
+        b.replay(dump.as_slice()).unwrap();
         assert_eq!(lines(&b, count), lines(&a, count));
         let link = b.grid().hyperlink_id_at(count - 6, 0).expect("link kept");
         assert_eq!(b.grid().hyperlink_uri(link), Some("https://example.com"));
@@ -223,13 +241,43 @@ mod tests {
         assert!(!fed.take_response().is_empty(), "a live feed does reply");
 
         let mut t = Terminal::new(20, 5, Theme::default());
-        t.replay(hostile);
+        t.replay(&hostile[..]).unwrap();
         assert!(t.take_response().is_empty());
         assert!(t.take_clipboard().is_empty());
         assert_eq!(t.grid().current_hyperlink(), None);
         assert_eq!(t.grid().pen(), t.grid().default_pen());
-        t.replay(b"\x1b]0;unterminated");
+        t.replay(&b"\x1b]0;unterminated"[..]).unwrap();
         t.feed(b"ok");
         assert_eq!(t.grid().cell(4, 0).unwrap().ch, 'o', "printing resumes");
+    }
+
+    #[test]
+    fn chunked_replay_matches_whole_replay() {
+        let (a, count) = rich();
+        let dump = a.dump_scrollback();
+        let mut whole = Terminal::new(20, 5, Theme::default());
+        whole.replay(dump.as_slice()).unwrap();
+        let mut chunked = Terminal::new(20, 5, Theme::default());
+        chunked.replay(Trickle(&dump, 0)).unwrap();
+        assert_eq!(lines(&chunked, count), lines(&whole, count));
+        assert_eq!(chunked.grid().cursor().x, whole.grid().cursor().x);
+        assert_eq!(chunked.grid().cursor().y, whole.grid().cursor().y);
+        let link = chunked
+            .grid()
+            .hyperlink_id_at(count - 6, 0)
+            .expect("link kept");
+        assert_eq!(
+            chunked.grid().hyperlink_uri(link),
+            Some("https://example.com")
+        );
+    }
+
+    #[test]
+    fn split_replies_and_clipboard_requests_are_still_dropped() {
+        let hostile = b"\x1b[6n\x1b[c\x1b]52;c;aGk=\x07text";
+        let mut t = Terminal::new(20, 5, Theme::default());
+        t.replay(Trickle(hostile, 0)).unwrap();
+        assert!(t.take_response().is_empty());
+        assert!(t.take_clipboard().is_empty());
     }
 }

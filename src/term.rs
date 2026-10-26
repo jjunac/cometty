@@ -508,15 +508,30 @@ impl Terminal {
         self.grid.dump_primary()
     }
 
-    /// Feed a saved dump into a fresh terminal. It is not program output:
-    /// any reply or clipboard request it provokes is dropped (a tampered
-    /// file must not type into the shell), and an unterminated string or
-    /// open style/link ends with it.
-    pub fn replay(&mut self, dump: &[u8]) {
-        self.feed(dump);
+    /// Feed a saved dump into a fresh terminal, streamed in 64 KiB chunks
+    /// (`feed` handles arbitrary splits). It is not program output: any
+    /// reply or clipboard request it provokes is dropped after every chunk
+    /// (a tampered file must not type into the shell), and an unterminated
+    /// string or open style/link ends with it, even when a read error stops
+    /// the replay early.
+    pub fn replay(&mut self, mut dump: impl std::io::Read) -> std::io::Result<()> {
+        let mut chunk = [0u8; 64 * 1024];
+        let result = loop {
+            match dump.read(&mut chunk) {
+                Ok(0) => break Ok(()),
+                Ok(n) => {
+                    self.feed(&chunk[..n]);
+                    self.pending_response.clear();
+                    self.pending_clipboard.clear();
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => break Err(e),
+            }
+        };
         self.feed(b"\x1b\\\x1b[0m\x1b]8;;\x1b\\");
         self.pending_response = Vec::new();
         self.pending_clipboard = Vec::new();
+        result
     }
 
     /// Take queued PTY reply bytes (DA / CPR / DSR / DECRQM).

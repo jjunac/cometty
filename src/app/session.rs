@@ -97,14 +97,17 @@ impl App {
                     continue;
                 }
                 let dump = match (&self.session.path, &saved.scrollback) {
-                    (Some(path), Some(name)) if replay => session::load_scrollback(path, name),
+                    (Some(path), Some(name)) if replay => session::open_scrollback(path, name),
                     _ => None,
                 };
                 if let Some(tab) = self.tabs.last_mut() {
-                    if let Some(dump) = &dump {
-                        tab.terminal.replay(dump);
+                    let replayed = dump.is_some();
+                    if let Some(dump) = dump
+                        && let Err(e) = tab.terminal.replay(dump)
+                    {
+                        log::warn!("scrollback replay stopped early ({e})");
                     }
-                    let banner = restored.banner(tab.terminal.cols(), dump.is_some());
+                    let banner = restored.banner(tab.terminal.cols(), replayed);
                     tab.terminal.feed(banner.as_bytes());
                 }
             }
@@ -296,9 +299,9 @@ mod tests {
             .scrollback
             .as_deref()
             .expect("dump referenced");
-        let dump = session::load_scrollback(&path, name).unwrap();
+        let dump = session::open_scrollback(&path, name).unwrap();
         let mut replayed = crate::term::Terminal::new(20, 2, crate::theme::Theme::default());
-        replayed.replay(&dump);
+        replayed.replay(dump).unwrap();
         let got: Vec<_> = (0..3)
             .map(|i| replayed.grid().global_line_cells(i).unwrap())
             .collect();

@@ -164,9 +164,12 @@ owner-only `scrollback/` directory.
   soft-wrap flag, so a narrower restoring window wraps long rows.
   `Terminal::replay` drops any reply or OSC 52 request the dump provokes (a
   tampered file must not type into the shell) and closes open strings, styles,
-  and links. Dumps and reads are capped at 64 MiB per tab; names are bare
-  `*.vt` files (anything else in the snapshot is ignored). Encoding runs on the
-  UI thread in `exiting`; its latency for many full tabs is unmeasured.
+  and links. Replay streams the file through `feed` in 64 KiB chunks (no
+  whole-dump buffer, so restore holds no dump-sized allocation). Dumps are
+  capped at 64 MiB per tab when written and, by file size, before replay; an
+  oversized dump is skipped whole. Names are bare `*.vt` files (anything else
+  in the snapshot is ignored). Encoding runs on the UI thread in `exiting`; its
+  latency for many full tabs is unmeasured.
 - **Dump commit order:** dumps get fresh names, are written first, then the
   snapshot is atomically renamed, then every unreferenced dump is deleted. A
   crash leaves either the old pair or the new one. Removal deletes the snapshot
