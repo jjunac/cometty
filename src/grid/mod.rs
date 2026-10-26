@@ -9,12 +9,12 @@ mod style;
 pub mod unicode;
 
 pub use alt::MouseMode;
-pub use cell::{Cell, Cursor, CursorShape, CursorStyle, Pen, UnderlineStyle};
+pub use cell::{Cell, CellRef, Cursor, CursorShape, CursorStyle, Pen, UnderlineStyle};
 pub use history::RowView;
 pub use link::MAX_HYPERLINK_URI;
 pub use row::Row;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::theme::Theme;
 
@@ -23,10 +23,9 @@ pub struct Grid {
     rows: usize,
     theme: Theme,
     cells: Vec<Row>,
-    scrollback: VecDeque<history::HistoryRow>,
+    scrollback: history::History,
     max_scrollback: usize,
     max_history_bytes: usize,
-    history_cell_bytes: usize,
     history_projection_bytes: usize,
     history_dropped: u64,
     history_cohort: u64,
@@ -142,10 +141,9 @@ impl Grid {
             cells: (0..rows)
                 .map(|_| Row::new(vec![blank.clone(); cols]))
                 .collect(),
-            scrollback: VecDeque::new(),
+            scrollback: history::History::default(),
             max_scrollback: config.terminal.scrollback_lines,
             max_history_bytes: config.terminal.scrollback_bytes,
-            history_cell_bytes: 0,
             history_projection_bytes: 0,
             history_dropped: 0,
             history_cohort: 0,
@@ -529,13 +527,13 @@ mod tests {
         assert_eq!(g.scrollback_len(), 1);
         assert_eq!(g.scroll_offset(), 0);
         // Live view: b, c rows
-        assert_eq!(g.view_rows()[0][0].ch, 'b');
+        assert_eq!(g.view_rows()[0].get(0).unwrap().ch, 'b');
         assert!(g.scroll_by(5));
         assert_eq!(g.scroll_offset(), 1);
         // Scrolled up one: a, b rows
         let view = g.view_rows();
-        assert_eq!(view[0][0].ch, 'a');
-        assert_eq!(view[1][0].ch, 'b');
+        assert_eq!(view[0].get(0).unwrap().ch, 'a');
+        assert_eq!(view[1].get(0).unwrap().ch, 'b');
         assert!(!g.scroll_by(5));
         assert!(g.scroll_to_bottom());
         assert_eq!(g.scroll_offset(), 0);
@@ -1009,8 +1007,8 @@ mod tests {
         g.put_char('b');
         g.scroll_up(7);
         assert_eq!(g.scrollback_len(), 7);
-        assert_eq!(g.global_line(0).unwrap()[0].ch, 'a');
-        assert_eq!(g.global_line(1).unwrap()[0].ch, 'b');
+        assert_eq!(g.global_line(0).unwrap().get(0).unwrap().ch, 'a');
+        assert_eq!(g.global_line(1).unwrap().get(0).unwrap().ch, 'b');
         g.enter_alt(true);
         g.scroll_up(usize::MAX);
         assert_eq!(g.scrollback_len(), 7, "alt scrolling never adds history");

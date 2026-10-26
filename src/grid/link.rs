@@ -55,7 +55,7 @@ impl Grid {
     pub fn hyperlink_id_at(&self, global: usize, col: usize) -> Option<u16> {
         let row = self.global_line(global)?;
         let mut x = col.min(row.len().checked_sub(1)?);
-        if row[x].width == 0 && x > 0 {
+        if row.get(x)?.width == 0 && x > 0 {
             x -= 1;
         }
         row.get(x).and_then(|c| c.hyperlink)
@@ -117,9 +117,17 @@ mod tests {
         g.put_char('z');
         assert_eq!(g.current_hyperlink(), None);
         let row = g.global_line(0).unwrap();
-        let id = row[0].hyperlink.expect("x is linked");
-        assert_eq!(row[1].hyperlink, Some(id), "same URI reuses the id");
-        assert_eq!(row[2].hyperlink, None, "ended link stamps nothing");
+        let id = row.get(0).unwrap().hyperlink.expect("x is linked");
+        assert_eq!(
+            row.get(1).unwrap().hyperlink,
+            Some(id),
+            "same URI reuses the id"
+        );
+        assert_eq!(
+            row.get(2).unwrap().hyperlink,
+            None,
+            "ended link stamps nothing"
+        );
         assert_eq!(g.hyperlink_uri(id), Some("https://a.b"));
     }
 
@@ -131,8 +139,8 @@ mod tests {
         g.set_hyperlink(Some(""));
         g.put_char('y');
         let row = g.global_line(0).unwrap();
-        assert!(row[0].hyperlink.is_some());
-        assert!(row[1].hyperlink.is_none());
+        assert!(row.get(0).unwrap().hyperlink.is_some());
+        assert!(row.get(1).unwrap().hyperlink.is_none());
     }
 
     #[test]
@@ -141,9 +149,9 @@ mod tests {
         g.set_hyperlink(Some("https://a.b"));
         g.put_char('中');
         let row = g.global_line(0).unwrap();
-        assert_eq!(row[1].width, 0);
-        assert_eq!(row[0].hyperlink, row[1].hyperlink);
-        assert_eq!(g.hyperlink_id_at(0, 1), row[0].hyperlink);
+        assert_eq!(row.get(1).unwrap().width, 0);
+        assert_eq!(row.get(0).unwrap().hyperlink, row.get(1).unwrap().hyperlink);
+        assert_eq!(g.hyperlink_id_at(0, 1), row.get(0).unwrap().hyperlink);
     }
 
     #[test]
@@ -164,7 +172,7 @@ mod tests {
         let huge = format!("https://x/{}", "a".repeat(MAX_HYPERLINK_URI));
         g.set_hyperlink(Some(&huge));
         g.put_char('x');
-        assert_eq!(g.global_line(0).unwrap()[0].hyperlink, None);
+        assert_eq!(g.global_line(0).unwrap().get(0).unwrap().hyperlink, None);
         assert_eq!(g.current_hyperlink(), None);
         // The table fills up; further links are dropped without panicking.
         for i in 0..MAX_HYPERLINKS + 8 {

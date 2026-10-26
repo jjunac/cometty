@@ -1,6 +1,7 @@
 //! Cell + pen types and blank-cell constructors.
 
 use crate::theme::{Rgb, Theme};
+use std::ops::Deref;
 
 use super::Grid;
 
@@ -47,6 +48,118 @@ pub struct Cell {
     /// OSC 8 hyperlink id into the grid's interned URI table
     /// (`None` = not part of a link). Continuations inherit their lead's id.
     pub hyperlink: Option<u16>,
+}
+
+/// Appearance is independent of a cell's text, including on blank columns.
+/// Compact history shares consecutive equal styles across row boundaries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellStyle {
+    pub fg: Rgb,
+    pub bg: Rgb,
+    pub bold: bool,
+    pub dim: bool,
+    pub italic: bool,
+    pub inverse: bool,
+    pub strikethrough: bool,
+    pub overline: bool,
+    pub underline: UnderlineStyle,
+    pub underline_color: Option<Rgb>,
+    pub hyperlink: Option<u16>,
+}
+
+impl From<&Cell> for CellStyle {
+    fn from(c: &Cell) -> Self {
+        Self {
+            fg: c.fg,
+            bg: c.bg,
+            bold: c.bold,
+            dim: c.dim,
+            italic: c.italic,
+            inverse: c.inverse,
+            strikethrough: c.strikethrough,
+            overline: c.overline,
+            underline: c.underline,
+            underline_color: c.underline_color,
+            hyperlink: c.hyperlink,
+        }
+    }
+}
+
+/// Borrowed text plus inline appearance. Unlike `&Cell`, this can refer to a
+/// compact row without allocating a `Box<str>` for every cluster tail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellRef<'a> {
+    pub ch: char,
+    pub extra: Option<&'a str>,
+    pub width: u8,
+    pub style: CellStyle,
+}
+
+impl<'a> From<&'a Cell> for CellRef<'a> {
+    fn from(c: &'a Cell) -> Self {
+        Self {
+            ch: c.ch,
+            extra: c.extra.as_deref(),
+            width: c.width,
+            style: c.into(),
+        }
+    }
+}
+
+impl Deref for CellRef<'_> {
+    type Target = CellStyle;
+    fn deref(&self) -> &CellStyle {
+        &self.style
+    }
+}
+
+impl CellRef<'_> {
+    pub fn to_cell(self) -> Cell {
+        let s = self.style;
+        Cell {
+            ch: self.ch,
+            extra: self.extra.map(Into::into),
+            width: self.width,
+            fg: s.fg,
+            bg: s.bg,
+            bold: s.bold,
+            dim: s.dim,
+            italic: s.italic,
+            inverse: s.inverse,
+            strikethrough: s.strikethrough,
+            overline: s.overline,
+            underline: s.underline,
+            underline_color: s.underline_color,
+            hyperlink: s.hyperlink,
+        }
+    }
+
+    pub fn cluster(self) -> String {
+        if self.width == 0 {
+            return " ".into();
+        }
+        let mut text = String::with_capacity(self.ch.len_utf8() + self.extra.map_or(0, str::len));
+        text.push(self.ch);
+        if let Some(extra) = self.extra {
+            text.push_str(extra);
+        }
+        text
+    }
+
+    pub fn copy_into(self, dst: &mut Cell) {
+        // Reuse an unchanged owned tail in the viewport snapshot.
+        let extra = if dst.extra.as_deref() == self.extra {
+            dst.extra.take()
+        } else {
+            self.extra.map(Into::into)
+        };
+        *dst = Self {
+            extra: None,
+            ..self
+        }
+        .to_cell();
+        dst.extra = extra;
+    }
 }
 
 impl Cell {

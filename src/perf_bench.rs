@@ -214,6 +214,39 @@ fn history(dense: bool) -> Grid {
     grid
 }
 
+fn history_memory_case(cols: usize, dense: bool) {
+    let row = format!("{}\r\n", "a".repeat(if dense { cols - 1 } else { 1 }));
+    let mut retained = None;
+    let counts = allocation_stats(|| {
+        let mut terminal = Terminal::new(cols, 60, Theme::default());
+        for _ in 0..20_000 {
+            terminal.feed(row.as_bytes());
+        }
+        retained = Some(terminal);
+    });
+    let terminal = retained.as_mut().unwrap();
+    let growth = allocation_stats(|| {
+        for _ in 0..20_000 {
+            terminal.feed(row.as_bytes());
+        }
+    });
+    println!(
+        "PERF history_memory cols={cols} dense={dense} rows={} accounted_bytes={} live_requested_bytes={} peak_requested_bytes={} later_live_delta={} later_peak_delta={}",
+        terminal.grid().scrollback_len(),
+        terminal.grid().history_bytes(),
+        counts.live_delta,
+        counts.peak_delta,
+        growth.live_delta,
+        growth.peak_delta,
+    );
+    assert!(
+        growth.live_delta.abs() < 512 * 1024,
+        "history still plateaus across fixed-size output"
+    );
+    let freed = allocation_stats(|| drop(retained));
+    assert_eq!(counts.live_delta + growth.live_delta + freed.live_delta, 0);
+}
+
 #[test]
 #[ignore = "manual release benchmark; not a wall-clock CI gate"]
 // Runtime guard, not a const assertion: debug test binaries must still build.
@@ -258,6 +291,11 @@ fn headless_release() {
 
     for dense in [false, true] {
         let grid = history(dense);
+        println!(
+            "PERF history dense={dense} rows={} accounted_bytes={}",
+            grid.scrollback_len(),
+            grid.history_bytes()
+        );
         for query in ["missing", "a"] {
             let name = format!(
                 "search_{}_{}",
@@ -307,6 +345,12 @@ fn headless_release() {
                 black_box(panel.view(black_box(&grid)));
             },
         );
+    }
+
+    for cols in [80, 200, 400, 1024] {
+        for dense in [false, true] {
+            history_memory_case(cols, dense);
+        }
     }
 
     let config = Config::default();

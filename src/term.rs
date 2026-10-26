@@ -1948,24 +1948,31 @@ mod tests {
         let mut t = test_terminal(20, 2);
         feed_str(&mut t, "\x1b]8;;https://example.com\x07cli\x1b]8;;\x07ck");
         let row = t.grid().global_line(0).unwrap();
-        let id = row[0].hyperlink.expect("c is linked");
+        let id = row.get(0).unwrap().hyperlink.expect("c is linked");
         assert_eq!(t.grid().hyperlink_uri(id), Some("https://example.com"));
-        assert_eq!(row[1].hyperlink, Some(id));
-        assert_eq!(row[2].hyperlink, Some(id));
-        assert_eq!(row[3].hyperlink, None, "empty URI ends the link");
+        assert_eq!(row.get(1).unwrap().hyperlink, Some(id));
+        assert_eq!(row.get(2).unwrap().hyperlink, Some(id));
+        assert_eq!(
+            row.get(3).unwrap().hyperlink,
+            None,
+            "empty URI ends the link"
+        );
         // `id=` params are accepted and ignored; BEL or ST both work.
         feed_str(&mut t, "\x1b]8;id=42;https://a.b\x1b\\x");
         let row = t.grid().global_line(0).unwrap();
-        assert!(row[5].hyperlink.is_some());
+        assert!(row.get(5).unwrap().hyperlink.is_some());
         // SGR does not clear an active hyperlink (spec behavior).
         feed_str(&mut t, "\x1b]8;;https://c.d\x07\x1b[0my");
         let row = t.grid().global_line(0).unwrap();
-        assert!(row[6].hyperlink.is_some(), "SGR 0 keeps the link open");
+        assert!(
+            row.get(6).unwrap().hyperlink.is_some(),
+            "SGR 0 keeps the link open"
+        );
         // Full reset (ESC c) drops the link state and clears cells.
         feed_str(&mut t, "\x1bc");
         feed_str(&mut t, "z");
         let row = t.grid().global_line(0).unwrap();
-        assert_eq!(row[0].hyperlink, None);
+        assert_eq!(row.get(0).unwrap().hyperlink, None);
     }
 
     #[test]

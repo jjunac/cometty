@@ -11,8 +11,9 @@
 > handler-side allocation limits; see [the follow-up results](#14-follow-up-batch-2-osc-bounds).
 > [Batch 3](#15-follow-up-batch-3-failed-frame-uploads) repairs failed-frame upload
 > submission; native GPU verification is still blocked by device creation here.
-> Whole-application budgets, search, cluster tails, and renderer high-water
-> storage remain separate follow-ups.
+> [Compact history chunks](#16-follow-up-compact-history-chunks) now replace
+> ordinary dense scrollback storage. Whole-application budgets, search-result
+> limits, cluster tails, and renderer high-water storage remain separate follow-ups.
 
 ## Executive summary
 
@@ -760,6 +761,97 @@ cargo test --locked --offline renderer::gpu_tests::failed_frame_uploads_are_recl
 
 The next action-plan item is whole-application memory telemetry/accounting and
 a documented budget policy, not a claim that this batch bounds total RAM.
+
+## 16. Follow-up: compact history chunks
+
+Implemented on 2026-10-26, separately from the historical audit above. This is
+an in-memory representation change, **not general-purpose compression or an
+application-wide budget**. Dependencies and configured history limits are unchanged.
+
+### Storage and access policy
+
+- [`src/grid/history/storage.rs`](../src/grid/history/storage.rs) accumulates
+  at most **32 rows or 256 KiB of source cell capacities and cluster tails**
+  per ordinary batch. It seals before a different width/cohort, at the row
+  threshold, or under byte pressure. A pending dense tail is bounded and
+  accounted even when output stops. An individual oversized row stays dense;
+  its payload is not copied just to try packing it.
+- [`packed.rs`](../src/grid/history/packed.rs) preflights each bounded batch.
+  Packing must save at least one eighth of its allocation, otherwise the
+  original dense rows stay in place. Compact chunks share a UTF-8 text buffer,
+  indexed row records, sparse records for nontrivial clusters and consecutive
+  style runs that coalesce across row boundaries. A plain-space text suffix
+  is implicit, but its colors, decorations and hyperlink IDs remain explicit.
+  Widths and cluster boundaries are stored, never inferred again from text.
+- Rendering/search/copy/links still consume the same projected `RowView`.
+  `CellRef` borrows cluster tails instead of boxing them while scanning.
+  Compact ASCII search uses projected text directly (byte offsets are columns);
+  neither path expands the entire history. Rendering decodes visible rows
+  directly into the existing shared viewport snapshot; the live grid and
+  dense snapshot-copy path are unchanged.
+- Sealing preserves row identities/revisions. Existing cohort projections
+  still implement destructive shrink, growth-time padding colors and wide-edge
+  repair without rewriting sealed payloads. Eviction expires individual rows;
+  a partially expired oldest chunk is fully charged until its last row leaves.
+- Released dense cell buffers, one empty row-header deque and one evicted
+  compact chunk are reused with hard bounds. All capacities, expired prefixes,
+  pools and projections count against `scrollback_bytes`. Byte pressure drops
+  reusable storage before evicting live history; clear/zero caps release it all.
+
+### Headless measurements
+
+The committed release harness now creates a 60-row terminal, feeds 20,000 lines
+and then another 20,000 with reusable input. Sparse rows contain `a`; dense
+rows contain `columns - 1` copies of `a`; both end in CRLF. The counting window
+includes terminal construction/storage, excludes the reusable input string,
+and uses the same test-only thread-local allocator as the OSC regression tests.
+These are **requested Rust bytes, not RSS, physical footprint or native/GPU bytes**.
+
+| Columns | Retained rows | Sparse terminal live heap | Dense terminal live heap |
+| ---: | ---: | ---: | ---: |
+| 80 | 10,000 | 764,572 B (0.73 MiB) | 1,545,820 B (1.47 MiB) |
+| 200 | 10,000 | 1,251,989 B (1.19 MiB) | 3,235,355 B (3.09 MiB) |
+| 400 | 10,000 | 1,897,682 B (1.81 MiB) | 5,881,662 B (5.61 MiB) |
+| 1,024 | 10,000 | 3,863,696 B (3.68 MiB) | 14,083,696 B (13.43 MiB) |
+
+All eight cases showed **zero later live-byte growth and zero additional
+relative live-byte peak** over the second 20,000 lines. Terminal drop balanced
+all counted allocations. Batch phase affects exact retained bytes; the sampled
+pending batch and recycling pools are included. The historical 200-column
+dense-cell representation retained about 93 MiB even for sparse text; these
+new measurements do not claim an equivalent process-RAM reduction.
+
+Quiet-logging same-host release comparisons against the saved pre-change test
+binary showed ASCII missing-query scans falling from roughly 15 ms to 1.5–1.8 ms,
+and the dense `a` scan from roughly 132–147 ms to 69–70 ms, with identical results.
+Packing does cost CPU: `scroll_recycle_1000` increased from approximately
+1.6–2.1 ms to 4.0 ms per 1,000 blank-line scrolls. Both implementations requested
+zero allocations in that warmed case; new ASCII/CRLF feed cases also retain zero
+allocation requests. Output timings are noisy and can regress with the extra
+packing work; these results establish neither GUI scrolling latency nor FPS.
+
+Tests cover arbitrary text/width/attribute round trips, multi-chunk resize/theme
+equivalence, mixed forward/reverse iteration, exact row-cap eviction, tiny and
+lowered byte caps, oversized-row non-copying, zero-cap release, stable IDs,
+ASCII search equivalence/clipping, link detection and direct viewport copying.
+`cargo test --locked --offline grid::history::` needs no GPU; the release memory
+cases run with the existing `perf_bench::headless_release` opt-in command in
+[`benchmarking.md`](benchmarking.md#compact-history-checks).
+
+Validation: debug and release suites each passed **424 tests, 4 opt-in probes
+ignored**; `cargo check --locked --offline`, all-target Clippy with `-D warnings`,
+`cargo fmt --check` and `git diff --check` passed. Both default/quiet logging
+release harness runs passed. Their logs, host/compiler metadata and exact Rust
+source snapshot are under ignored `target/perf/20261025T233802Z/`; the initial
+comparison logs and saved pre-change test executable are under
+`target/compact-history-*`. No GUI/GPU verification was performed for this change.
+
+**Remaining limits:** the live grid, search results and graphics allocations
+are not bounded by compact history. Wider histories can now retain all 10,000
+configured rows where the old byte cap retained fewer, so dense search can
+produce **more matches and larger result vectors**. Whole-application accounting,
+an explicit search-result policy, live cluster-tail limits and display-backed
+verification remain separate follow-ups.
 
 ## Bottom line (audited revision)
 

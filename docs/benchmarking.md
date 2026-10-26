@@ -112,8 +112,8 @@ allocations larger than 1 MiB; small capacities may be reused.
 Use the same release harness for the added cases:
 
 - `resize_lazy_200_201`, `scroll_recycle_1000` — 10,100-row history; resize
-  storage must not be rewritten, and steady scroll must recycle evicted rows
-  under the byte budget.
+  sealed storage must not be rewritten, and steady scroll must reuse dense
+  buffers and evicted compact chunks under the byte budget.
 - `paste_build_1m` — one-pass CRLF normalization + bracketed wrapping, no
   intermediate `String` replacements.
 - `log_index_slice`, `log_index_unchanged`, `log_index_full_scan` — 100,000-entry
@@ -129,6 +129,32 @@ selection rebase/cancel, ignored-versus-queued input admission, parser-reply
 headroom, bracketed-paste transaction integrity, debounced/ordered config saves,
 and log-ID eviction. Wall-clock thresholds remain manual, same-machine A/B
 checks rather than CI gates.
+
+## Compact history checks
+
+`cargo test --locked --offline grid::history::` covers the bounded 32-row /
+256 KiB batches, sparse cluster metadata and cross-row style runs, adaptive
+dense fallback, row-level eviction within chunks, complete byte accounting,
+unchanged resize projections/identities, Unicode/style/link round trips,
+direct ASCII search, viewport copies, zero caps and zero-allocation steady
+scrolling. Source sizes include cell capacities and cluster tails; exceptionally
+large rows stay dense without copying their payload into a packer.
+
+The release harness also prints `history_memory` for 80/200/400/1,024 columns,
+60 live rows, default history limits and sparse/dense ASCII output. Each case
+feeds 20,000 lines, then another 20,000 with reusable input. Counters show
+accounted history bytes, terminal-owned requested Rust live/peak bytes and
+later growth. Dropping each terminal must balance all counted allocations.
+These are **not RSS, allocator overhead or native/GPU memory**. The prebuilt
+input string is outside the counting window. A bounded unfinished dense batch
+and recycling pools remain included; counts depend on the sampled batch phase.
+
+Compare `scroll_recycle_1000` and output cases as well as memory: batching
+trades additional CPU work for lower retention. ASCII compact history has a
+direct projected-text search path; nontrivial clusters use borrowed cell views
+without allocating owned tails per scanned cell. Search results still store
+every match, and wider histories may now retain more rows within the same byte
+cap. See the [memory-study follow-up](memory_study.md#16-follow-up-compact-history-chunks).
 
 ## OSC memory regression checks
 

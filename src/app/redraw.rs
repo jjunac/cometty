@@ -90,13 +90,7 @@ impl App {
                     continue;
                 }
                 let dst = &mut self.snapshot_rows[i];
-                let cells = row.materialize();
-                dst.truncate(cells.len());
-                let existing = dst.len();
-                for (d, s) in dst.iter_mut().zip(cells.iter()) {
-                    d.clone_from(s);
-                }
-                dst.extend_from_slice(&cells[existing..]);
+                row.copy_into(dst);
                 crate::perf::add(crate::perf::Metric::SnapshotCells, row.len());
                 if i < self.snapshot_keys.len() {
                     self.snapshot_keys[i] = key;

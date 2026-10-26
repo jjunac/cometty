@@ -4,7 +4,7 @@
 //! unit-testable: the app owns a [`crate::app::search::SearchPanel`], the
 //! renderer paints a [`SearchView`] it is given.
 
-use crate::grid::{Cell, Grid};
+use crate::grid::{CellRef, Grid};
 
 /// One search hit: global line index (`0` = oldest scrollback line) and an
 /// inclusive column range. A wide cluster is covered through its
@@ -78,38 +78,49 @@ pub fn find_matches(grid: &Grid, query: &str) -> Vec<Match> {
     // Reused across rows so a full-buffer scan doesn't allocate per cell.
     let mut hay = String::new();
     let mut spans: Vec<Span> = Vec::new();
-    // A lazily projected history row materializes through this buffer, so a
-    // full scan after a width step still allocates at most one row.
-    let mut scratch: Vec<Cell> = Vec::new();
     for line in first..grid.total_lines() {
-        let Some(view) = grid.global_line(line) else {
+        let Some(row) = grid.global_line(line) else {
             continue;
         };
-        let row: &[Cell] = match view.as_slice() {
-            Some(row) => row,
-            None => {
-                scratch.clear();
-                scratch.extend(view.iter().cloned());
-                &scratch
+        if row.len() == 0 {
+            continue;
+        }
+        if let Some(text) = row.ascii_text() {
+            let text = if sensitive {
+                text
+            } else {
+                hay.clear();
+                hay.push_str(text);
+                hay.make_ascii_lowercase();
+                &hay
+            };
+            let mut from = 0;
+            while let Some(rel) = text[from..].find(&needle) {
+                let start = from + rel;
+                let end = start + needle.len();
+                out.push(Match {
+                    line,
+                    start,
+                    end: end - 1,
+                });
+                from = end;
             }
-        };
-        if row.is_empty() {
             continue;
         }
         hay.clear();
         spans.clear();
         let mut end = row.len();
-        while end > 0 && is_blank(&row[end - 1]) {
+        while end > 0 && is_blank(row.get(end - 1).expect("search column")) {
             end -= 1;
         }
         let mode = if sensitive {
             FoldMode::Raw
-        } else if row[..end].iter().all(cell_is_ascii) {
+        } else if row.iter().take(end).all(cell_is_ascii) {
             FoldMode::AsciiFold
         } else {
             FoldMode::UnicodeFold
         };
-        for (col, cell) in row[..end].iter().enumerate() {
+        for (col, cell) in row.iter().take(end).enumerate() {
             // Continuations carry no text of their own; their lead's span
             // covers the extra column.
             if cell.width == 0 {
@@ -119,7 +130,7 @@ pub fn find_matches(grid: &Grid, query: &str) -> Vec<Match> {
             match mode {
                 FoldMode::Raw | FoldMode::AsciiFold => {
                     hay.push(cell.ch);
-                    if let Some(extra) = cell.extra.as_deref() {
+                    if let Some(extra) = cell.extra {
                         hay.push_str(extra);
                     }
                 }
@@ -287,20 +298,20 @@ pub fn reveal_offset(
 }
 
 /// True for a narrow, unstyled blank cell (trailing-blank trimming).
-fn is_blank(cell: &Cell) -> bool {
+fn is_blank(cell: CellRef<'_>) -> bool {
     cell.width == 1 && cell.ch == ' ' && cell.extra.is_none()
 }
 
 /// True when the cell's cluster folds with plain ASCII byte mapping.
-fn cell_is_ascii(cell: &Cell) -> bool {
-    cell.ch.is_ascii() && cell.extra.as_deref().is_none_or(str::is_ascii)
+fn cell_is_ascii(cell: CellRef<'_>) -> bool {
+    cell.ch.is_ascii() && cell.extra.is_none_or(str::is_ascii)
 }
 
 /// Append a cell's cluster folded with `char::to_lowercase`.
 /// A fold can expand (e.g. `İ`), which is fine: the span table is keyed to
 /// the folded byte length.
-fn push_folded(out: &mut String, cell: &Cell) {
-    for ch in std::iter::once(cell.ch).chain(cell.extra.as_deref().unwrap_or("").chars()) {
+fn push_folded(out: &mut String, cell: CellRef<'_>) {
+    for ch in std::iter::once(cell.ch).chain(cell.extra.unwrap_or("").chars()) {
         for folded in ch.to_lowercase() {
             out.push(folded);
         }

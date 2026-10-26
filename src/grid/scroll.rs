@@ -17,7 +17,7 @@ impl Grid {
             .map(|i| {
                 let global = sb - off + i;
                 if global < sb {
-                    self.history_row_view(&self.scrollback[global])
+                    self.history_row_view(global).expect("visible history row")
                 } else {
                     Self::live_row_view(&self.cells[global - sb])
                 }
@@ -58,9 +58,7 @@ impl Grid {
     pub fn global_line(&self, global: usize) -> Option<RowView<'_>> {
         let sb = self.scrollback.len();
         if global < sb {
-            self.scrollback
-                .get(global)
-                .map(|row| self.history_row_view(row))
+            self.history_row_view(global)
         } else {
             self.cells.get(global - sb).map(Self::live_row_view)
         }
