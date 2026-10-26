@@ -190,3 +190,56 @@ incremental search, or atlas policy from traces rather than stacking caches
 speculatively. Preserve invariants in [rendering](rendering.md),
 [terminal model](terminal.md), and [interaction](interaction.md). Do not trade them
 for unbounded queues, forced polling, key-batching sleeps, or unexplained cache clears.
+
+## Long-session stress results (measured)
+
+These numbers come from one display-backed run on 2026-10-26. They are **measurements
+on one host**, not guarantees or CI thresholds. Re-measure before you rely on them for
+a different revision, host, font, or DPI.
+
+- **Setup:** Apple M3 Pro, macOS 26 (Darwin 25.6.0), release build. The CPU and
+  restore rows were measured at `fdbf3cd`. The other rows were measured at `06a3e0a`
+  with the idle-spin fix applied.
+- **Driver:** the real GUI, driven by `osascript` keystrokes. `HOME` and
+  `XDG_STATE_HOME` were isolated, and `/bin/zsh` ran with a minimal rc.
+- **Metrics:** only the cometty **parent** PID was sampled, using `footprint`,
+  `vmmap`, `ps` (RSS, threads, CPU time), `lsof` fd counts, child counts, and
+  `COMETTY_PERF=1` stderr.
+- **Harness:** the scripts lived under the ignored `target/stress/` directory and
+  are not committed. Keystroke injection mistypes `~`, so avoid special characters
+  in injected commands.
+
+| Check | Result |
+| --- | --- |
+| Idle, 1 tab | ~1% of a core (0.22 s CPU per 20 s, cursor blink only); startup ≈ 0.33 s CPU |
+| Idle, 10 full tabs | ~1.5% CPU, ~2 presents/s (blink), memory stable for 3 min |
+| Tab churn (450 + 180 + 270 open/close) | ~0.9 s CPU per 9-tab batch; threads return to 11 and fds to 57 (+2 after the first batch, then flat); no leftover children |
+| Tab churn, footprint | Flat at 216 MB over 30 batches with both log sinks off. Default logging creeps ~25 KB per batch while the bounded log ring fills |
+| Resize churn (2400×1300 ↔ 700×450) | ~200 ms per round trip, including AppleScript overhead |
+| Quit/restore, 10 full tabs | 15/15 cycles restored all tabs and 9/9 non-home cwds; quit 0.63–0.89 s with ~84 MB of dumps; all 10 shells up in ~1.3 s; dumps pruned after commit |
+
+Single-tab throughput, timed from the producer's completion. This includes up to one
+PTY queue of lag but not presentation:
+
+| Workload | Rate |
+| --- | --- |
+| ASCII, 80 columns | ~130k lines/s (~10.6 MB/s) |
+| SGR 256-color fg+bg on every cell | ~18k lines/s (~30 MB/s) |
+| CJK + ZWJ emoji + combining marks | ~23k lines/s |
+| OSC 8, unique link per line | ~70k lines/s |
+
+[Memory](memory.md#measured-footprint-one-host) has the memory results from the same
+run.
+
+Gaps in this run:
+
+- It used one host and took no Instruments traces, so GPU memory is not attributed.
+- Search was not tested at the multi-million-match scale. The synchronous
+  full-history scan is still unmeasured under load.
+- Accessibility-driven focus forces runs to be serial.
+
+Regression guard: an idle instance that uses a whole core, or tab-churn CPU that
+grows with the number of tabs ever opened, means something is cloning
+`EventLoopProxy` on a per-turn or per-tab path again. See the
+[event-loop decisions](architecture.md#decisions-that-shape-the-event-loop). Use
+`sample PID` to confirm. The spinning main thread sits in `CFRunLoopAddSource`.

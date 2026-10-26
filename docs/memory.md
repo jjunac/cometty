@@ -2,8 +2,10 @@
 
 cometty has bounded history, transport queues, OSC storage, and logs, but **no
 application-wide RAM ceiling**. Several tabs and open searches multiply per-tab
-storage; graphics/native resources and allocator retention are separate. This
-page describes current ownership, not measurements of an installed binary's RSS.
+storage; graphics/native resources and allocator retention are separate. Most of
+this page describes current ownership. The one exception is
+[measured footprint](#measured-footprint-one-host), which records measurements
+from a single host.
 
 ## Owned storage and enforced bounds
 
@@ -71,6 +73,49 @@ does not use one `Cell` per stored column. Similarly, each background rectangle
 currently uses 120 vertex bytes, and decorations can add several rectangles per
 cell. Logical cell limits are not renderer-byte limits.
 
+## Measured footprint (one host)
+
+These results come from the display-backed stress run described in
+[performance](performance.md#long-session-stress-results-measured) (Apple M3 Pro,
+macOS, release build, 2026-10-26). Values are macOS `footprint` for the parent PID.
+They describe that host and revision, not a bound.
+
+- **Fixed GPU cost dominates idle.** A fresh 1-tab instance has a 207 MB footprint,
+  broken down as:
+  - 156 MB "owned physical footprint (graphics)";
+  - 22 MB IOSurface (drawables);
+  - 14 MB malloc.
+
+  The graphics share does not scale with tabs (161 MB at 10 tabs).
+  `MemoryHints::MemoryUsage` made no measurable difference in an A/B run. For
+  comparison, iTerm2 on the same host showed 98 MB graphics plus 173 MB IOSurface.
+- **Per-tab history is the main multi-tab cost.** These are the deltas for one
+  saturated 10,000-row tab:
+
+  | Content | Footprint delta |
+  | --- | --- |
+  | ASCII | +7 MB |
+  | SGR on every cell (dense fallback) | +27 MB |
+  | CJK/emoji | +18 MB |
+  | OSC 8 | +6 MB |
+
+  Ten tabs of mixed ASCII+SGR reached 455 MB (≈22 MB per tab). After
+  saturation, every content type plateaued: repeated batches added 0–3 MB.
+- **Retention, not leaks:**
+  - **`ESC[3J`:** RSS is not returned to the OS after clearing, but a refill reuses
+    it without growth.
+  - **Resize churn:** large↔small resizing left IOSurface at 30 MB (from 22 MB)
+    after the window returned to small, then plateaued on repeats.
+  - **Search:** open/close cycles and a search left open on an inactive tab showed
+    no measurable retention. That workload did not reach dense full-history scale.
+- **Restore:** replay streams each dump in 64 KiB chunks (see
+  [session persistence](architecture.md#session-persistence)), so restore leaves no dump-sized
+  allocation behind. With 10 full tabs, the footprint was 368 MB before quit, 361 MB
+  after the first restore, and 347 MB after the fifth. A single SGR-heavy tab went
+  from 240 MB to 238 MB with no `MALLOC_LARGE` region. Reading a whole dump at once
+  instead leaves a dirty, freed `MALLOC_LARGE (empty)` region about the size of
+  the dump, and `footprint` counts it.
+
 ## Remaining limits and follow-up work
 
 These are **not implemented policies** or promises of future performance:
@@ -83,6 +128,7 @@ These are **not implemented policies** or promises of future performance:
 | Cooperative parser scheduling | REP and history-producing scroll can expand short sequences into long callbacks | Bound or resume expanded work without dropping required terminal semantics |
 | Live/snapshot/geometry/atlas high-water storage | Exceptional windows, Unicode, styles, or font/DPI changes can keep large reachable allocations | Add accounting and measured hysteresis/batching; coordinate atlas recreation with prepared-key invalidation/pins |
 | Opener child ownership | `links::open` drops the spawned child without an explicit wait | Review Unix reaping separately; PTY supervisor ownership does not cover opener children |
+| Unattributed fixed GPU footprint | ~156 MB of graphics memory (≈75% of an idle 1-tab footprint on one Apple-silicon host), independent of tab count | Attribute it with an Instruments Metal/VM Tracker trace before changing atlas, surface, or buffer policy |
 | Incomplete whole-process telemetry | History usage and phase counters do not explain the entire process total | Add per-tab capacities/tails/results/queues and shared snapshot/geometry/atlas/lifecycle counters at existing work boundaries |
 
 Compaction can retain **more history rows** within the same byte budget than dense
@@ -125,6 +171,7 @@ Do not reuse old dense-history tables or repaired findings as current behavior.
 Use committed [headless probes](performance.md) before inventing external test
 programs. Never run unbounded/unterminated payload generators in an important
 session. Heap traces, output recordings, paths, and clipboard captures can contain
-secrets; redact before sharing. Historical headless graphics attempts could not
-create a working device, so those studies established **no native/RSS plateau or
-display-backed latency result**. Record GPU-probe skips/failures explicitly.
+secrets; redact before sharing. Headless graphics attempts could not create a
+working device, so they established **no native/RSS plateau or display-backed
+latency result**. The single-host plateaus above come from a display-backed run.
+Record GPU-probe skips/failures explicitly.
