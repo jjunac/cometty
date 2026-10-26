@@ -71,6 +71,7 @@ budget is cooperative, not an end-to-end latency guarantee.
 | Decision | Rationale and required behavior |
 | --- | --- |
 | Sleep when idle (`Wait`/`WaitUntil`) | Do not introduce permanent polling to improve throughput or animation. Wake only for input, queued work, or an actual deadline. |
+| One shared event-loop proxy | `App` holds one `Arc<EventLoopProxy>`; wakers clone the `Arc`. On macOS (winit 0.30) every proxy clone wakes the loop and registers a run-loop source that is never removed, so per-turn paths must not create or clone a proxy (a per-turn clone once kept idle at 100% CPU). |
 | Separate parsing progress from presentation | Occlusion, selection dragging, synchronized output, and hidden cursors must not strand bytes, replies, or exits. |
 | One drain allowance per event-loop turn | `new_events` resets it; user-event, redraw, and pre-wait drains share the allowance. Fair order survives exhaustion and tab removal. |
 | Defer resize until redraw | Coalesce window events; update renderer, terminal, then PTY before feeding that visible frame. All tabs use the same geometry clamp. |

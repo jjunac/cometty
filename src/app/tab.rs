@@ -515,7 +515,7 @@ impl App {
     }
 
     fn waker(&self) -> impl Fn() + Send + Sync + 'static {
-        let proxy: Option<winit::event_loop::EventLoopProxy<UserEvent>> = self.proxy.clone();
+        let proxy = self.proxy.clone();
         move || {
             if let Some(p) = proxy.as_ref() {
                 let _ = p.send_event(UserEvent::PtyAvailable);

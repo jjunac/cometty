@@ -137,9 +137,9 @@ impl ConfigSaver {
         self.deadline
     }
 
-    /// `make_wake` runs only when the worker is first created: on macOS each
-    /// winit `EventLoopProxy` clone adds a run-loop source and wakes the loop,
-    /// so building one per call would keep `about_to_wait` spinning.
+    /// `make_wake` runs only when the worker is first created, so this
+    /// per-turn call builds no waker (and, on macOS, never creates an
+    /// `EventLoopProxy`, whose creation wakes the loop).
     pub fn dispatch<W: Fn() + Send + 'static>(
         &mut self,
         now: Instant,

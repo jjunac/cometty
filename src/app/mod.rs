@@ -55,7 +55,10 @@ pub struct App {
     pub(crate) next_tab_id: u64,
     pub(crate) pty_schedule: scheduling::DrainSchedule,
     pub(crate) last_slow_drain: Option<Instant>,
-    pub(crate) proxy: Option<winit::event_loop::EventLoopProxy<UserEvent>>,
+    /// The app's single event-loop proxy. Clone the `Arc`, never the proxy:
+    /// on macOS each winit `EventLoopProxy` clone registers a run-loop source
+    /// that is never removed and wakes the loop.
+    pub(crate) proxy: Option<Arc<winit::event_loop::EventLoopProxy<UserEvent>>>,
     pub(crate) theme: Theme,
     pub(crate) config: Config,
     pub(crate) modifiers: ModifiersState,
@@ -124,7 +127,7 @@ impl App {
             next_tab_id: 0,
             pty_schedule: scheduling::DrainSchedule::default(),
             last_slow_drain: None,
-            proxy,
+            proxy: proxy.map(Arc::new),
             theme,
             config,
             modifiers: ModifiersState::empty(),
