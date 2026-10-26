@@ -28,6 +28,25 @@ Do not launch `cargo run` in a headless session. `--help`/`--list-themes` resolv
 before GUI setup; ordinary app startup creates a window, GPU surface, and shell.
 For automated headless verification prefer the commands below.
 
+## Releasing
+
+`make release` turns the current tree into a release:
+
+- bumps the `Cargo.toml` version (`RELEASE_BUMP=patch|minor|major`, default
+  patch, or set `RELEASE_VERSION=X.Y.Z`),
+- refreshes `Cargo.lock`,
+- runs `make verify`,
+- commits `chore: release vX.Y.Z`,
+- creates the annotated `vX.Y.Z` tag.
+
+It refuses tracked worktree changes, a detached HEAD, or an existing tag.
+`RELEASE_DRY_RUN=1` prints the plan without touching the tree;
+`RELEASE_SKIP_VERIFY=1` skips the gate. Nothing is pushed unless
+`RELEASE_PUSH=1` (remote `RELEASE_REMOTE`, default `origin`); otherwise the
+target prints the two `git push` commands. Pushing the tag triggers
+[`release.yml`](../.github/workflows/release.yml), which tests, builds the
+macOS bundle, and opens a draft release.
+
 ## Packaging a macOS release
 
 [`scripts/bundle-macos.sh`](../scripts/bundle-macos.sh) builds a universal
@@ -37,9 +56,9 @@ by default, and writes `Cometty-<version>-macos-universal.zip` plus a SHA-256
 file. Pass `--identity "Developer ID Application: ..."` and
 `--notary-profile NAME` for a hardened, notarized build; create the notary
 profile once with `xcrun notarytool store-credentials NAME --apple-id ... --team-id ...`.
-The script reads the version from `Cargo.toml`; bump it before tagging.
-[`release.yml`](../.github/workflows/release.yml) runs the same script on `v*`
-tags and opens a draft GitHub release.
+The script reads the version from `Cargo.toml`, so run `make release` before
+building a bundle for a tag. [`release.yml`](../.github/workflows/release.yml)
+runs the same script on `v*` tags and opens a draft GitHub release.
 
 The bundle icon is [`assets/AppIcon.icns`](../assets/AppIcon.icns), generated
 once from `logo.svg` via `assets/icon-1024.png`; the embedded 128px icon is
@@ -48,6 +67,8 @@ the macOS floor in the README in sync.
 
 ## Routine checks
 
+`make verify` runs the local gate in order:
+
 ```sh
 cargo test --locked
 cargo check --locked
@@ -55,6 +76,11 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 git diff --check
 ```
+
+`make fmt` rewrites formatting; `verify` only checks it. `make help` lists the
+remaining targets: build/run, release tagging, the headless benchmark, opt-in
+probes, profiling, bundling, and locked dependency inventories. Those preserve
+the commands and limitations documented here and in [performance](performance.md).
 
 [CI](../.github/workflows/ci.yml) runs `cargo test`,
 `cargo clippy -- -D warnings`, and `cargo fmt --check` on Linux and macOS.
