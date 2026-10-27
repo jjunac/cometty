@@ -15,6 +15,13 @@ FILTER ?=
 TEST_ARGS ?=
 
 BENCH_OUT ?=
+COMPARE_TERMINALS ?=
+COMPARE_SUITES ?=
+COMPARE_RUNS ?=
+COMPARE_OUT ?=
+COMPARE_ARGS ?=
+COMPARE_FLAGS = $(if $(strip $(COMPARE_TERMINALS)),--terminals '$(COMPARE_TERMINALS)') $(if $(strip $(COMPARE_SUITES)),--suites '$(COMPARE_SUITES)') $(if $(strip $(COMPARE_RUNS)),--runs '$(COMPARE_RUNS)') $(if $(strip $(COMPARE_OUT)),--out '$(COMPARE_OUT)') $(COMPARE_ARGS)
+
 PROFILE_TEMPLATE ?= Allocations
 PROFILE_TIME ?= 60s
 PROFILE_OUT ?= target/profile/allocations.trace
@@ -34,7 +41,7 @@ RELEASE_FLAGS = $(if $(strip $(RELEASE_VERSION)),--version '$(RELEASE_VERSION)',
 
 # Every target is a command rather than an artifact name.
 .PHONY: help build release run run-release test test-release check clippy fmt \
-	fmt-check diff-check verify bench probe-scheduling probe-retained-glyphs \
+	fmt-check diff-check verify bench bench-compare probe-scheduling probe-retained-glyphs \
 	probe-uploads profile bundle deps clean
 
 help: ## Show this target index
@@ -45,6 +52,7 @@ help: ## Show this target index
 	@printf '  make release RELEASE_DRY_RUN=1\n'
 	@printf '  make release RELEASE_BUMP=minor RELEASE_PUSH=1\n'
 	@printf '  make bench BENCH_OUT=target/perf/run1\n'
+	@printf '  make bench-compare COMPARE_TERMINALS=cometty,ghostty COMPARE_SUITES=throughput,memory COMPARE_RUNS=1\n'
 	@printf '  make profile PROFILE_TEMPLATE="Time Profiler" PROFILE_TIME=60s PROFILE_OUT=target/profile/cpu.trace\n'
 	@printf '  make bundle BUNDLE_IDENTITY="Developer ID Application: ..." BUNDLE_NOTARY=profile-name\n'
 
@@ -82,6 +90,9 @@ verify: test check clippy fmt-check diff-check ## Local gate: the AGENTS.md rout
 
 bench: ## Headless release benchmark; BENCH_OUT=dir (see docs/performance.md)
 	bash scripts/bench-headless.sh $(BENCH_OUT)
+
+bench-compare: ## macOS GUI comparison vs other terminals; COMPARE_TERMINALS=, COMPARE_SUITES=, COMPARE_RUNS=, COMPARE_OUT=, COMPARE_ARGS=
+	bash scripts/compare/compare.sh $(COMPARE_FLAGS)
 
 probe-scheduling: ## Opt-in probe: fair scheduling under load
 	COMETTY_PERF=0 $(CARGO) test --release $(CARGO_FLAGS) pty::tests::fair_drain_under_load -- --ignored --exact --nocapture --test-threads=1

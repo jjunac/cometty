@@ -191,6 +191,75 @@ speculatively. Preserve invariants in [rendering](rendering.md),
 [terminal model](terminal.md), and [interaction](interaction.md). Do not trade them
 for unbounded queues, forced polling, key-batching sleeps, or unexplained cache clears.
 
+## Cross-terminal comparison (macOS)
+
+[`scripts/compare/`](../scripts/compare/) benchmarks the real GUI against
+Terminal.app, iTerm2, Ghostty, and kitty on one Mac. The procedure is fully scripted:
+
+```sh
+make bench-compare                                   # all terminals and suites, 3 runs
+make bench-compare COMPARE_TERMINALS=cometty,kitty COMPARE_SUITES=throughput COMPARE_RUNS=1
+bash scripts/compare/compare.sh --help               # every option
+bash scripts/compare/compare.sh --report DIR         # re-render (and publish) a summary
+make bench-compare COMPARE_RUNS=1 COMPARE_ARGS=--no-publish   # smoke run, keep BENCHMARK.md
+```
+
+Run it from a terminal that is **not** being measured. A separate cometty works,
+because the benchmark runs a private copy of the bundle with an isolated `HOME`.
+Grant Accessibility to that host terminal, and Screen Recording too for the latency
+suite. The harness refuses targets that are already running or that host the run.
+`--quit-running` asks before it quits them. Keep the Mac on AC power and leave it
+alone during a run: the harness moves focus and posts key events.
+
+**Control model.** Every window and tab runs `driver.py agent` instead of a shell.
+There are no rc files and no typed commands. The agent blocks on a FIFO, so it adds
+no idle wakeups. It executes JSON ops (`throughput`, `fill`, `flood`, `latency`)
+and writes their results to files. `termlat` (Swift, built into `target/compare/bin/`)
+waits for windows and places them through AX. It also measures key-to-pixel latency.
+`procstat.py` reads `proc_pid_rusage` for every terminal-owned process: the app and
+its helpers, such as iTermServer or kitten, but never the agents.
+
+**Normalization.** All terminals use Menlo 14, which is what cometty's generic
+`monospace` resolves to on macOS. They also share the same 1000×700-point window,
+10,000 history lines, no cursor blink, no bells or ligatures, and no session
+restore or user config. The resulting grid differs slightly per terminal, and the
+report lists it. Known non-equivalences:
+
+- Ghostty limits history by bytes, set to 10 MB.
+- Line height and padding follow each terminal's defaults.
+- iTerm2 and Terminal.app windows come from AppleScript or a profile.
+
+Terminal.app and iTerm2 preferences are exported before the run. After the run,
+added keys are deleted and the backup is imported again. The temporary iTerm2
+Dynamic Profile is removed too.
+
+| Suite | Measures | Does not include |
+| --- | --- | --- |
+| `startup` | Launch command → first on-screen window, and → child start (wall clock, includes LaunchServices/AppleScript) | First painted prompt |
+| `idle` | CPU %, interrupt + package-idle wakeups/s, and `ri_energy_nj` over 60 s with one focused window | Display/GPU power outside the process |
+| `throughput` | MiB/s and terminal CPU s/MiB for ASCII, dense 256-color SGR, CJK/ZWJ/combining, DECSTBM scrolling, alternate-screen redraws. Timing runs from the first write to the DA1 reply, so the terminal has **parsed** everything | Presentation of those bytes |
+| `memory` | `phys_footprint` (includes attributed GPU/IOSurface memory) at fresh → 10k ASCII → 10k SGR → N filled tabs → back to 1 tab, plus lifetime peak; `footprint` breakdown per checkpoint | Memory of other processes (WindowServer) |
+| `latency` | Synthetic key post → display time of the first ScreenCaptureKit frame that shows a toggled block. Measured idle and while another tab floods output | A hardware photodiode measurement: capture quantization (≈8 ms at 120 Hz) and the compositor path are common to all terminals, so compare the numbers, don't read them as absolute |
+
+Results go to `target/compare/<UTC>/`:
+
+- `summary.md` and `summary.csv`: medians and min–max ranges.
+- `raw/*.jsonl`: every sample.
+- `footprint/`: per-checkpoint breakdowns.
+- `config/`: the exact configs used.
+- `environment.txt`, `source.patch`, and copies of the scripts.
+
+The summary is also copied to [`BENCHMARK.md`](../BENCHMARK.md) at the repository root.
+Its header records the date, host, power source and cometty revision. A run on
+battery power gets a warning. `--no-publish` leaves the copy untouched, so use it
+for smoke or partial runs.
+
+These are host-specific measurements. They are not CI thresholds. Re-run on the same
+host when you compare revisions.
+
+Validation status: every adapter has run every suite in short smoke runs. A full
+multi-run comparison has not been recorded in this document.
+
 ## Long-session stress results (measured)
 
 These numbers come from one display-backed run on 2026-10-26. They are **measurements
