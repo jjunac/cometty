@@ -107,7 +107,8 @@ of **existing event-loop activity**. Counters introduce no wake timer or log-rin
 feedback and are off by default. They aggregate:
 
 - CPU-side elapsed phases: drain, parse, search/projection, snapshot, rebuild,
-  background, overlay, acquire, glyph prepare, encode/submit, present.
+  background, overlay, acquire, glyph prepare, encode/submit, present, history
+  sealing, title/process-fact refresh, and the complete redraw callback.
 - Parsed bytes, refreshed snapshot cells, shaped rows, prepare reuse/advance
   misses, PTY wakes/coalescing, redraws, actual presents/skips, drain yields,
   output queue wait/high-water bytes, and upload-only cleanup submissions.
@@ -119,6 +120,10 @@ Interpretation rules:
 - Phases **nest**; do not sum them and call the result frame time. Elapsed time
   includes waits/preemption; acquire/present can wait on the platform. These are
   neither process CPU time nor GPU execution timings.
+- `interval_us` gives the actual reporting interval. `history_seal` nests inside
+  parsing; `title_refresh` nests inside draining; `redraw_total` includes any
+  drain performed by that callback as well as rendering. Do not add these to
+  their parents. A short run can end before the ten-second reporting boundary.
 - `p99_us_le` is an approximate percentile **upper bound** from fixed log2
   microsecond buckets, not an exact p99. Untimed counters have zero timing fields;
   `max_value` records high-water values.
@@ -146,7 +151,8 @@ cargo test --release --locked renderer::gpu_tests::failed_frame_uploads_are_recl
   event-loop dispatch, rendering, and display; not GUI echo latency or a CI timer gate.
 - **Retained glyphs:** offscreen pixel comparison against fresh preparation while
   changing glyphs/styles and growing/reusing the atlas. Checks lifetime correctness,
-  not speed.
+  not speed. Also compares bounded cached advanced shaping against fresh uncached
+  layouts with named-font CJK, combining, emoji/ZWJ, Arabic and Indic text.
 - **Failed uploads:** positive control for unsubmitted staging, then thousands of
   skipped/error outcomes through the production boundary with real texture/geometry
   writes. Test-only completion waits inspect native counters against a warmed
@@ -259,6 +265,73 @@ host when you compare revisions.
 
 Validation status: every adapter has run every suite in short smoke runs. A full
 multi-run comparison has not been recorded in this document.
+
+### Diagnosing throughput, rather than ranking terminals
+
+DA1 establishes a **parsing completion point**, not parser-only execution.
+Cometty's UI thread also shapes text and acquires/presents surfaces while the
+producer is writing. Those operations delay subsequent parsing even though the
+final DA1 reply does not wait for final presentation. See the
+[measured throughput diagnosis](throughput.md) for causal controls and findings.
+
+Two headless ignored tests use the exact generators from `compare/driver.py`:
+
+```sh
+python3 scripts/bench-throughput.py target/perf/replay-example
+COMETTY_BENCH_CASE=ascii,unicode COMETTY_BENCH_SAMPLES=15 python3 scripts/bench-throughput.py --layout target/perf/layout-example
+```
+
+The runner refuses an existing output directory and preserves source, lockfile,
+environment, corpus sizes/checksums, raw samples, and separate allocation counts.
+`--mib` controls corpus/sample size (default 2); `--generate-only` skips execution.
+Both tests run release/locked, with counters off and no installed logger:
+
+- **Replay:** `vte` with counted callbacks, the OSC `guard` with the same callbacks,
+  and real terminals with `history`, `no_history`, or an initial `alt` screen.
+  History warms through the line cap before timing. `ascii_overwrite`, `cjk`,
+  `combining`, and `zwj` are controlled diagnostic variants, not comparison scores.
+  Redraw already enters/exits alternate storage, so its `alt` lane is not a
+  continuously alternate-screen variant.
+- **Layout:** capture the generated final viewport (before redraw's final alt
+  exit), then force every visible line through production construction/layout.
+  Reports build/layout milliseconds, allocation traffic per viewport, installed
+  face count, generic-family availability, and actual glyph fonts. `default`,
+  `resolved_mono`, and `named` compare font-selection policies without disabling
+  advanced shaping or changing cell metrics. `production` uses the shipping
+  generic-to-named resolution and bounded final-shaping cache, reporting its
+  entry count and accounted retained bytes. Reference lanes disable that cache.
+  This deliberately excludes row-hash
+  reuse, rendering/GPU/PTY work, and font discovery/startup time.
+
+Filters/settings: `COMETTY_BENCH_CASE` and `COMETTY_BENCH_LANE` take comma-separated
+names; `COMETTY_BENCH_SAMPLES`, `COLS`, `ROWS`, and `CHUNK` have the same prefix.
+Layout defaults to physical font size 28 (Menlo 14 at 2×); use
+`COMETTY_BENCH_FONT_SIZE` and `COMETTY_BENCH_FONT` (default `Menlo`) on other setups.
+Missing override fonts are explicitly skipped. Both tests use the test allocator
+wrapper described above, not the application's allocator. Replay's
+`COMETTY_BENCH_PROFILE_SECONDS` repeats a selected case/lane and prints its PID
+for a native sampler. Allocation counting is off during timed/profiled work.
+
+For a real GUI/PTY control on macOS, without changing any other terminal's
+preferences or posting keys:
+
+```sh
+cargo build --release --locked
+python3 scripts/compare/diagnose-throughput.py target/perf/gui-visible
+python3 scripts/compare/diagnose-throughput.py --minimize target/perf/gui-minimized
+python3 scripts/compare/diagnose-throughput.py --perf --sample-seconds 8 --workloads ascii,unicode target/perf/gui-profile
+```
+
+Each case starts its own isolated Cometty and agent, uses Menlo-resolution
+`monospace` 14 / 1000×700 / 10k history, and cleans up only its own process.
+All runs need a display/GPU; `--minimize` additionally needs Accessibility.
+Default: one warm-up, three 8 MiB samples, phase counters and native sampling off.
+`--binary`, `--workloads`, `--mib`, `--samples`, and `--timeout` are configurable.
+Artifacts include exact source/config/ops (including local dependency patches),
+binary/lockfile hashes, per-sample
+process CPU, DA1 success, and optional stderr/native samples. Instrumented runs
+are diagnostic evidence, not headline comparison scores. None of these commands
+publishes or overwrites `BENCHMARK.md`.
 
 ## Long-session stress results (measured)
 

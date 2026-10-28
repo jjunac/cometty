@@ -13,6 +13,9 @@ mkdir -p "$OUTPUT/source"
 # measurements taken while iterating. Never copy target/ or user config.
 cp -R src "$OUTPUT/source/src"
 cp -R assets "$OUTPUT/source/assets"
+if [[ -d vendor ]]; then
+  cp -R vendor "$OUTPUT/source/vendor"
+fi
 cp Cargo.toml Cargo.lock "$OUTPUT/source/"
 cp scripts/bench-headless.sh "$OUTPUT/bench-headless.sh"
 git diff --binary > "$OUTPUT/source.patch"

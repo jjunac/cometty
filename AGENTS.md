@@ -21,7 +21,7 @@ profiling, packaging, and dependency targets.
 
 CI runs tests, Clippy (`-D warnings`), and rustfmt on Linux/macOS. Ordinary tests
 are headless-safe; Unix PTY lifecycle tests spawn and clean up local children.
-Four ignored probes need explicit opt-in; two require a working GPU. See
+Six ignored probes need explicit opt-in; two require a working GPU. See
 [development](docs/development.md) and [performance](docs/performance.md).
 
 `cargo run` launches the GUI and requires a display/GPU—do not run it headless.

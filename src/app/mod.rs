@@ -54,6 +54,7 @@ pub struct App {
     pub(crate) active: usize,
     pub(crate) next_tab_id: u64,
     pub(crate) pty_schedule: scheduling::DrainSchedule,
+    pub(crate) output_presentation: scheduling::OutputPresentation,
     pub(crate) last_slow_drain: Option<Instant>,
     /// The app's single event-loop proxy. Clone the `Arc`, never the proxy:
     /// on macOS each winit `EventLoopProxy` clone registers a run-loop source
@@ -126,6 +127,7 @@ impl App {
             active: 0,
             next_tab_id: 0,
             pty_schedule: scheduling::DrainSchedule::default(),
+            output_presentation: scheduling::OutputPresentation::default(),
             last_slow_drain: None,
             proxy: proxy.map(Arc::new),
             theme,
@@ -181,6 +183,7 @@ impl App {
     /// Successful input clears a stale backpressure notice. Only a key gets
     /// a latency stamp; paste is intentionally not treated as an echo probe.
     pub(crate) fn accept_input_feedback(&mut self, key: bool) {
+        self.output_presentation.input();
         let cleared = self.active_tab_mut().is_some_and(|tab| {
             if key {
                 tab.last_key_write = Some(Instant::now());

@@ -25,6 +25,14 @@ impl App {
     /// Returns true when no tabs remain (shell of the last tab exited)
     /// and the caller should exit the event loop.
     pub(crate) fn drain_pty(&mut self) -> bool {
+        self.drain_pty_inner(true)
+    }
+
+    pub(crate) fn drain_pty_before_frame(&mut self) -> bool {
+        self.drain_pty_inner(false)
+    }
+
+    fn drain_pty_inner(&mut self, request_frame: bool) -> bool {
         let mut notice_changed = false;
         for (i, tab) in self.tabs.iter_mut().enumerate() {
             if let Some(notice) = tab.pty.take_input_notice() {
@@ -36,6 +44,7 @@ impl App {
             }
         }
         if notice_changed
+            && request_frame
             && !self.visuals_suspended()
             && let Some(w) = self.window.as_ref()
         {
@@ -230,11 +239,13 @@ impl App {
             && self.active_tab().is_some_and(|tab| {
                 tab.visual_dirty && !tab.selecting && !tab.sync.blocked(Instant::now())
             });
-        if !self.visuals_suspended()
-            && (visible_changed || chrome_changed || removed)
-            && let Some(w) = self.window.as_ref()
-        {
-            w.request_redraw();
+        if request_frame && !self.visuals_suspended() {
+            let output_due = visible_changed && self.output_presentation.dirty(Instant::now());
+            if (output_due || chrome_changed || removed)
+                && let Some(w) = self.window.as_ref()
+            {
+                w.request_redraw();
+            }
         }
         false
     }

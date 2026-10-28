@@ -36,9 +36,12 @@ pub(crate) enum Metric {
     CoalescedWake,
     DrainYield,
     UploadFlush,
+    HistorySeal,
+    TitleRefresh,
+    RedrawTotal,
 }
 
-const NAMES: [&str; 26] = [
+const NAMES: [&str; 29] = [
     "drain",
     "parse",
     "search",
@@ -65,6 +68,9 @@ const NAMES: [&str; 26] = [
     "coalesced_wake",
     "drain_yield",
     "upload_flush",
+    "history_seal",
+    "title_refresh",
+    "redraw_total",
 ];
 
 #[derive(Clone, Copy, Default)]
@@ -210,18 +216,23 @@ pub(crate) fn report_due(now: Instant) {
     let Some(state) = state() else {
         return;
     };
-    let (samples, tabs) = {
+    let (interval, samples, tabs) = {
         let mut metrics = state.lock().unwrap_or_else(|e| e.into_inner());
-        if now.saturating_duration_since(metrics.since) < Duration::from_secs(10) {
+        let interval = now.saturating_duration_since(metrics.since);
+        if interval < Duration::from_secs(10) {
             return;
         }
         metrics.since = now;
         (
+            interval,
             std::mem::replace(&mut metrics.samples, [Sample::default(); NAMES.len()]),
             std::mem::take(&mut metrics.tabs),
         )
     };
-    let mut report = String::from("cometty-perf (CPU-side elapsed, interval counters):");
+    let mut report = format!(
+        "cometty-perf (CPU-side elapsed, interval counters) interval_us={}:",
+        interval.as_micros()
+    );
     use std::fmt::Write;
     for (name, sample) in NAMES.iter().zip(samples) {
         if sample.count > 0 || sample.value_max > 0 {

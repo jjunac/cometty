@@ -196,6 +196,7 @@ impl Tab {
             self.foreground.cwd_baseline = self.terminal.cwd_version();
         }
         let elapsed = start.elapsed();
+        crate::perf::duration(crate::perf::Metric::TitleRefresh, elapsed);
         if elapsed >= Duration::from_millis(2) {
             log::debug!("slow refresh_title {elapsed:?}");
         }

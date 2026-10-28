@@ -84,6 +84,16 @@ at the live bottom, and not presentation-suspended. A settled scrollbar requests
 no immediate frame; a pending fade schedules its deadline, and a changing opacity
 requests animation frames based on elapsed time.
 
+Output-driven presentation has its own coalescing deadline, separate from the
+unchanged 256 KiB / 4 ms per-turn parsing allowance. Ordinary output is capped at
+60 frames/s; after an expensive frame it leaves up to one measured frame's UI
+cost (maximum 50 ms) before another output frame. Parsing continuations still
+wake immediately while work remains. Keyboard/paste echo urgency and explicit
+input/chrome/resize redraws bypass output pacing. A frame's own drain does not
+request a redundant successor. The deadline exists only for dirty pending output,
+so final output is presented without a permanent idle timer. Sync-output guards
+and transient GPU recovery still apply; no GPU lifetime boundary is bypassed.
+
 egui repaint requests have two paths, both required:
 
 - Forward `EventResponse::repaint` for input events, **except**

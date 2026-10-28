@@ -56,7 +56,7 @@ restore = "tabs"
 | Section / key | Default | Meaning |
 | --- | --- | --- |
 | `theme.name` | `"tokyo-night"` | `tokyo-night`, `vscode`, or `tomorrow-night` |
-| `font.family` | `"monospace"` | Generic family: `monospace`, `sans`, `serif`, `cursive`, or `fantasy`; arbitrary installed font names are not selected |
+| `font.family` | `"monospace"` | Installed family name, or generic `monospace`, `sans`/`sans-serif`, `serif`, `cursive`, `fantasy`. Generic monospace resolves to an installed platform-appropriate family; missing glyphs/names use fallback |
 | `font.size` | `14.0` | Logical font size |
 | `font.line_height_factor` | `1.25` | Line height relative to font size |
 | `font.cell_width_factor` | `0.602` | Column width relative to font size |

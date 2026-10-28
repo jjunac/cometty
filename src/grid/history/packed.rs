@@ -27,18 +27,37 @@ struct Special {
     extra: bool,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 struct StyleRun {
     end: u32,
     style: CellStyle,
 }
 
-#[derive(Default)]
+// Most scrolling batches have only one/two styles. Retain their already-scanned
+// runs in bounded stack scratch rather than extracting/comparing every style a
+// second time while packing. Diverse batches keep the old dense/adaptive path.
+const PREFLIGHT_STYLES: usize = 64;
+
 pub(super) struct Estimate {
     rows: usize,
     text: usize,
     special: usize,
     styles: usize,
+    ends: [u32; super::storage::BATCH_ROWS],
+    runs: [Option<StyleRun>; PREFLIGHT_STYLES],
+}
+
+impl Default for Estimate {
+    fn default() -> Self {
+        Self {
+            rows: 0,
+            text: 0,
+            special: 0,
+            styles: 0,
+            ends: [0; super::storage::BATCH_ROWS],
+            runs: [None; PREFLIGHT_STYLES],
+        }
+    }
 }
 
 impl Estimate {
@@ -72,23 +91,39 @@ fn special(c: &crate::grid::Cell) -> bool {
 impl PackedChunk {
     pub fn estimate(rows: &VecDeque<Row>) -> Option<Estimate> {
         let cols = rows.front()?.len();
+        if rows.len() > super::storage::BATCH_ROWS {
+            return None;
+        }
         u32::try_from(cols.checked_mul(rows.len())?).ok()?;
         let mut estimate = Estimate {
             rows: rows.len(),
             ..Estimate::default()
         };
         let mut last_style = None;
-        for row in rows {
+        let mut column = 0;
+        for (index, row) in rows.iter().enumerate() {
             if row.len() != cols {
                 return None;
             }
             let end = text_cols(row);
+            estimate.ends[index] = end as u32;
             for (col, c) in row.iter().enumerate() {
                 let style = CellStyle::from(c);
                 if last_style != Some(style) {
+                    if let Some(Some(last)) = estimate
+                        .styles
+                        .checked_sub(1)
+                        .and_then(|i| estimate.runs.get_mut(i))
+                    {
+                        last.end = column;
+                    }
+                    if let Some(run) = estimate.runs.get_mut(estimate.styles) {
+                        *run = Some(StyleRun { end: 0, style });
+                    }
                     estimate.styles += 1;
                     last_style = Some(style);
                 }
+                column += 1;
                 if col < end {
                     estimate.text = estimate
                         .text
@@ -97,6 +132,13 @@ impl PackedChunk {
                     estimate.special += usize::from(special(c));
                 }
             }
+        }
+        if let Some(Some(last)) = estimate
+            .styles
+            .checked_sub(1)
+            .and_then(|i| estimate.runs.get_mut(i))
+        {
+            last.end = column;
         }
         u32::try_from(estimate.text).ok()?;
         Some(estimate)
@@ -109,27 +151,36 @@ impl PackedChunk {
         self.text.reserve_exact(estimate.text);
         self.special.reserve_exact(estimate.special);
         self.styles.reserve_exact(estimate.styles);
-        let mut column = 0;
-        for row in rows {
+        if estimate.styles <= PREFLIGHT_STYLES {
+            self.styles.extend(
+                estimate.runs[..estimate.styles]
+                    .iter()
+                    .map(|r| r.expect("preflight style")),
+            );
+        } else {
+            let mut column = 0;
+            for row in rows {
+                for c in row.iter() {
+                    column += 1;
+                    let style = CellStyle::from(c);
+                    if let Some(last) = self.styles.last_mut().filter(|r| r.style == style) {
+                        last.end = column;
+                    } else {
+                        self.styles.push(StyleRun { end: column, style });
+                    }
+                }
+            }
+        }
+        for (index, row) in rows.iter().enumerate() {
             let mut record = PackedRow {
                 id: row.id,
                 revision: row.revision,
                 text_start: self.text.len() as u32,
-                text_cols: text_cols(row) as u32,
+                text_cols: estimate.ends[index],
                 special_start: self.special.len() as u32,
                 special_end: 0,
             };
-            for (col, c) in row.iter().enumerate() {
-                column += 1;
-                let style = CellStyle::from(c);
-                if let Some(last) = self.styles.last_mut().filter(|r| r.style == style) {
-                    last.end = column;
-                } else {
-                    self.styles.push(StyleRun { end: column, style });
-                }
-                if col >= record.text_cols as usize {
-                    continue;
-                }
+            for (col, c) in row[..record.text_cols as usize].iter().enumerate() {
                 let start = self.text.len() as u32;
                 self.text.push(c.ch);
                 if let Some(extra) = &c.extra {
@@ -292,6 +343,40 @@ mod tests {
     use super::*;
     use crate::grid::{Cell, UnderlineStyle};
     use crate::theme::Rgb;
+
+    #[test]
+    fn preflight_styles_cover_the_exact_fast_path_boundary_and_styled_blank_suffixes() {
+        for runs in [
+            1,
+            2,
+            PREFLIGHT_STYLES - 1,
+            PREFLIGHT_STYLES,
+            PREFLIGHT_STYLES + 1,
+        ] {
+            let rows: VecDeque<_> = (0..2)
+                .map(|row| {
+                    Row::new(
+                        (0..128)
+                            .map(|col| Cell {
+                                ch: if col < 8 { 'x' } else { ' ' },
+                                bg: Rgb::new(((row * 128 + col).min(runs - 1) % 2) as u8, 7, 9),
+                                ..Cell::default()
+                            })
+                            .collect(),
+                    )
+                })
+                .collect();
+            let estimate = PackedChunk::estimate(&rows).unwrap();
+            let mut packed = PackedChunk::default();
+            packed.pack(&rows, &estimate);
+            assert_eq!(packed.bytes(), estimate.bytes());
+            for (i, row) in rows.iter().enumerate() {
+                for (col, cell) in row.iter().enumerate() {
+                    assert_eq!(packed.row(i).get(col), CellRef::from(cell), "runs={runs}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn ascii_and_blank_tails_share_chunk_storage_and_styles() {

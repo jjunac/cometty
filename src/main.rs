@@ -449,6 +449,13 @@ impl ApplicationHandler<UserEvent> for App {
             next = app::scheduling::earlier(next, sync_at);
         }
         if !suspended && sync_at.is_none() {
+            if self.output_presentation.take_due(now) {
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            } else {
+                next = app::scheduling::earlier(next, self.output_presentation.deadline(now));
+            }
             let search_at = self
                 .active_tab()
                 .and_then(|t| t.search.rescan_at(t.terminal.grid(), now));

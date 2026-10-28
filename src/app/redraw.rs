@@ -18,6 +18,8 @@ fn egui_deadline(now: Instant, delay: Duration) -> Option<Instant> {
 
 impl App {
     pub(crate) fn on_redraw(&mut self) {
+        let _timing = crate::perf::measure(crate::perf::Metric::RedrawTotal);
+        self.output_presentation.begin_frame();
         crate::perf::add(crate::perf::Metric::Redraw, 1);
         if self.visuals_suspended() {
             // Keep transport/replies/exits live while skipping visual work.
@@ -33,7 +35,7 @@ impl App {
             self.apply_resize(w, h, scale);
         }
         // Preserve resize-before-feed ordering for visible frames.
-        if self.drain_pty() {
+        if self.drain_pty_before_frame() {
             return;
         }
         if let Some(tab) = self.active_tab_mut() {
@@ -47,6 +49,7 @@ impl App {
                 return;
             }
         }
+        let frame_start = Instant::now();
         // Defensive: alt switches always drop the selection.
         if let Some(tab) = self.active_tab() {
             let alt_now = tab.terminal.grid().is_alt();
@@ -189,7 +192,7 @@ impl App {
                 return;
             };
             let rows = &self.snapshot_rows;
-            let out = match renderer.render(
+            let result = renderer.render(
                 rows,
                 renderer::CursorCtx {
                     pos: (cursor.x, cursor.y),
@@ -218,7 +221,10 @@ impl App {
                     search: &mut tab.search,
                     input_notice: tab.input_notice.as_deref(),
                 },
-            ) {
+            );
+            self.output_presentation
+                .finish_frame(frame_start, Instant::now());
+            let out = match result {
                 Ok(o) => o,
                 Err(e) => {
                     // Surface lost / outdated is recoverable via resize.

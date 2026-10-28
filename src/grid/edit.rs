@@ -12,9 +12,19 @@ impl Grid {
         if c == '\0' {
             return None;
         }
-        // Fast path: explicit joining modifiers always attach when there is
-        // a previous cell.
+        let (lx, py) = self.previous_lead()?;
         let joining = is_joining_modifier(c);
+        // Blank filler cells can take a mark on the same row, but not across
+        // a fresh line start. Prepend/ZWJ/flag cases retain full boundary logic.
+        let lead = &self.cells[py][lx];
+        let blank = lead.ch == ' ' && lead.extra.is_none();
+        if joining {
+            return (!blank || py == self.cursor.y).then_some((lx, py));
+        }
+        (!blank && continues_cell(lead, c)).then_some((lx, py))
+    }
+
+    fn previous_lead(&self) -> Option<(usize, usize)> {
         // Locate the previous cell (same row, or end of previous row when at
         // column zero, mirroring xterm's combining-at-margin behavior).
         let (px, py) = if self.cursor.x > 0 {
@@ -40,32 +50,38 @@ impl Grid {
         } else if self.cells[py][px].width != 1 && self.cells[py][px].width != 2 {
             return None;
         }
-        // Blank filler cells never take combining marks from a fresh line
-        // start: e.g. a lone combining char at column zero starts its own
-        // cell instead of attaching across lines to unrelated content.
-        // (A real base such as `e` or `👨` always appends, including the
-        // ZWJ-continuation case where `c` itself is wide.)
-        let lead = &self.cells[py][lx];
-        let is_blank_filler = lead.ch == ' ' && lead.extra.is_none();
-        if joining {
-            if is_blank_filler {
-                // Attaching a combining mark to a blank still renders better
-                // than dropping it: keep the blank base, record the mark.
-                // But don't reach across lines for blanks.
-                if py != self.cursor.y {
-                    return None;
-                }
-                return Some((lx, py));
+        Some((lx, py))
+    }
+
+    /// Common scalar write, after Terminal has excluded pending wrap. No width
+    /// lookup, grapheme segmentation, split-wide repair, or repeated row mutation
+    /// for an ordinary ASCII pair. Everything unusual uses the general path.
+    pub(crate) fn try_put_ascii(&mut self, ch: char) -> bool {
+        debug_assert!(matches!(ch, ' '..='~'));
+        let (x, y) = (self.cursor.x, self.cursor.y);
+        if self.insert_mode
+            || self.scroll_offset != 0
+            || y >= self.rows
+            || x + 1 >= self.cols
+            || self.cells[y][x].width != 1
+        {
+            return false;
+        }
+        if let Some((px, py)) = self.previous_lead() {
+            let prev = &self.cells[py][px];
+            if !prev.ch.is_ascii() || prev.extra.is_some() {
+                return false;
             }
-            return Some((lx, py));
         }
-        if is_blank_filler {
-            return None;
-        }
-        if continues_cell(lead, c) {
-            return Some((lx, py));
-        }
-        None
+        let cell = super::Cell {
+            ch,
+            width: 1,
+            ..self.placeholder_cell()
+        };
+        self.cells[y][x] = cell;
+        self.cursor.x += 1;
+        self.bump();
+        true
     }
 
     /// Append `c` to the cluster at `(x, y)` (resolving a continuation to
@@ -94,18 +110,9 @@ impl Grid {
         }
         // Joining modifiers attach even to blanks (lone mark fallback).
         let lead = &mut self.cells[y][lx];
-        let mut s = lead.cluster();
-        s.push(c);
-        let mut chars = s.chars();
-        if let Some(first) = chars.next() {
-            let rest: String = chars.collect();
-            lead.ch = first;
-            lead.extra = if rest.is_empty() {
-                None
-            } else {
-                Some(rest.into_boxed_str())
-            };
-        }
+        lead.extra
+            .get_or_insert_with(|| String::with_capacity(c.len_utf8()))
+            .push(c);
         self.bump();
         true
     }
@@ -118,21 +125,12 @@ impl Grid {
             return false;
         };
         let lead = &mut self.cells[ly][lx];
-        let mut s = lead.cluster();
-        s.push(c);
         // Keep width stable (no 1->2 promotion): wide ZWJ sequences stay 2,
         // narrow bases with VS16 stay 1 and let the shaper ligate. This
         // avoids retroactive placeholder growth at the margin.
-        let mut chars = s.chars();
-        if let Some(first) = chars.next() {
-            let rest: String = chars.collect();
-            lead.ch = first;
-            lead.extra = if rest.is_empty() {
-                None
-            } else {
-                Some(rest.into_boxed_str())
-            };
-        }
+        lead.extra
+            .get_or_insert_with(|| String::with_capacity(c.len_utf8()))
+            .push(c);
         self.bump();
         true
     }

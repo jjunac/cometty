@@ -170,6 +170,7 @@ impl History {
         let Storage::Dense(dense) = &chunk.storage else {
             return;
         };
+        let _timing = crate::perf::measure(crate::perf::Metric::HistorySeal);
         // Do not duplicate a giant cluster or exceptionally wide row just to
         // discover it is incompressible. The ordinary batch's source is bounded.
         if dense.cell_bytes > BATCH_BYTES {
@@ -313,14 +314,14 @@ mod tests {
     fn chunks_are_bounded_by_rows_bytes_and_cohorts() {
         let mut history = History::default();
         for _ in 0..100 {
-            history.push(Row::new(vec![Cell::default(); 160]), 0);
+            history.push(Row::new(vec![Cell::default(); 128]), 0);
         }
         assert_eq!(history.chunks.len(), 4);
         for chunk in history.chunks.iter().take(3) {
             assert!(matches!(chunk.storage, Storage::Packed { .. }));
             assert_eq!(chunk.len(), BATCH_ROWS);
         }
-        history.push(Row::new(vec![Cell::default(); 160]), 1);
+        history.push(Row::new(vec![Cell::default(); 128]), 1);
         assert_eq!(history.chunks.len(), 5);
         assert!(history.chunks[3].sealed);
         assert_accounting(&history);
@@ -340,10 +341,7 @@ mod tests {
         for _ in 0..2 {
             history.push(
                 Row::new(vec![Cell {
-                    extra: Some(
-                        "x".repeat(BATCH_BYTES / 2 - size_of::<Cell>())
-                            .into_boxed_str(),
-                    ),
+                    extra: Some("x".repeat(BATCH_BYTES / 2 - size_of::<Cell>())),
                     ..Cell::default()
                 }]),
                 0,
@@ -391,7 +389,7 @@ mod tests {
 
     #[test]
     fn oversized_rows_and_incompressible_batches_stay_dense_without_giant_copy() {
-        let huge = "x".repeat(BATCH_BYTES + 1).into_boxed_str();
+        let huge = "x".repeat(BATCH_BYTES + 1);
         let row = Row::new(vec![Cell {
             extra: Some(huge),
             ..Cell::default()
@@ -413,7 +411,7 @@ mod tests {
                 (0..80)
                     .map(|col| Cell {
                         ch: '🦀',
-                        extra: Some("\u{301}".into()),
+                        extra: Some("漢".repeat(32)),
                         width: 2,
                         fg: crate::theme::Rgb::new(col, i as u8, 1),
                         ..Cell::default()

@@ -8,28 +8,39 @@ use super::cell::UnderlineStyle;
 impl Grid {
     // Pen / SGR (flat wrapper for tests + `ESC c` reset).
     pub fn sgr(&mut self, params: &[u16]) {
-        if params.is_empty() {
-            self.pen = self.default_pen();
-            self.bump();
-            return;
+        self.sgr_with(|i| params.get(i).map(std::slice::from_ref));
+    }
+
+    pub(crate) fn sgr_params(&mut self, params: &vte::Params) {
+        // vte has at most 32 parameters (including subparameters). Borrow its
+        // groups into a stack index so color lookahead remains O(1), without
+        // copying either the parameter values or their colon grouping.
+        let mut groups = [&[][..]; 32];
+        let mut len = 0;
+        for group in params {
+            groups[len] = group;
+            len += 1;
         }
-        let groups: Vec<Vec<u16>> = params.iter().map(|&p| vec![p]).collect();
-        self.sgr_groups(&groups);
+        self.sgr_with(|i| groups[..len].get(i).copied());
     }
 
     /// SGR with subparam grouping preserved (`:` stays in one group).
     /// Each group is one `;`-separated param; `CSI 4:3 m` arrives as
     /// `[[4, 3]]` (curly) while `CSI 4;3 m` arrives as `[[4], [3]]`
     /// (underline + italic).
+    #[allow(dead_code)]
     pub fn sgr_groups(&mut self, groups: &[Vec<u16>]) {
-        if groups.is_empty() {
+        self.sgr_with(|i| groups.get(i).map(Vec::as_slice));
+    }
+
+    fn sgr_with<'a>(&mut self, group: impl Fn(usize) -> Option<&'a [u16]>) {
+        if group(0).is_none() {
             self.pen = self.default_pen();
             self.bump();
             return;
         }
         let mut idx = 0;
-        while idx < groups.len() {
-            let g = &groups[idx];
+        while let Some(g) = group(idx) {
             if g.is_empty() {
                 self.pen = self.default_pen();
                 idx += 1;
@@ -61,26 +72,27 @@ impl Grid {
                 // [[38,2],[r],[g],[b]].
                 if g[1] == 5
                     && g.len() == 2
-                    && idx + 1 < groups.len()
-                    && let Some(&n) = groups[idx + 1].first()
+                    && let Some(&n) = group(idx + 1).and_then(|g| g.first())
                 {
                     let col = self.extended_palette(n.min(255) as u8);
                     Self::apply_extended(&mut self.pen, p, col);
                     idx += 2;
                     continue;
                 }
-                if g[1] == 2 && idx + 1 < groups.len() {
-                    let mut vals: Vec<u16> = Vec::new();
+                if g[1] == 2 {
+                    let mut vals = [0; 3];
+                    let mut count = 0;
                     let mut look = idx + 1;
-                    while look < groups.len() && vals.len() < 3 {
-                        if let Some(&v) = groups[look].first() {
-                            vals.push(v);
+                    while count < 3 {
+                        if let Some(&v) = group(look).and_then(|g| g.first()) {
+                            vals[count] = v;
+                            count += 1;
                         } else {
                             break;
                         }
                         look += 1;
                     }
-                    if vals.len() == 3 {
+                    if count == 3 {
                         let col = Rgb::new(
                             vals[0].min(255) as u8,
                             vals[1].min(255) as u8,
@@ -127,11 +139,10 @@ impl Grid {
                 // swallows `2` instead of turning on dim; leftover values
                 // that are real codes (e.g. `1` in `38;2;1`) still apply.
                 38 | 48 | 58 => {
-                    if !self.consume_semicolon_color(groups, &mut idx) {
-                        let swallow_mode = matches!(
-                            groups.get(idx + 1).and_then(|g| g.first()),
-                            Some(2) | Some(5)
-                        ) && groups.get(idx + 1).is_some_and(|g| g.len() == 1);
+                    if !self.consume_semicolon_color(&group, &mut idx) {
+                        let swallow_mode =
+                            matches!(group(idx + 1).and_then(|g| g.first()), Some(2) | Some(5))
+                                && group(idx + 1).is_some_and(|g| g.len() == 1);
                         idx += if swallow_mode { 2 } else { 1 };
                     }
                     continue;
@@ -205,17 +216,22 @@ impl Grid {
     /// Try `38;5;n` / `38;2;r;g;b` (and `48`/`58`) from following groups.
     /// Returns true when a color was applied (advancing `idx` past the
     /// consumed groups); false leaves `idx` untouched for normal handling.
-    fn consume_semicolon_color(&mut self, groups: &[Vec<u16>], idx: &mut usize) -> bool {
-        let target = groups[*idx][0];
-        let mode = match groups.get(*idx + 1).and_then(|g| g.first()) {
+    fn consume_semicolon_color<'a>(
+        &mut self,
+        group: &impl Fn(usize) -> Option<&'a [u16]>,
+        idx: &mut usize,
+    ) -> bool {
+        let target = group(*idx).expect("current SGR group")[0];
+        let mode_group = group(*idx + 1).unwrap_or_default();
+        let mode = match mode_group.first() {
             Some(&m) => m,
             None => return false,
         };
         // Require singleton mode group to avoid eating a colon group like
         // `[4, 3]` as a color mode.
-        if groups[*idx + 1].len() != 1 {
+        if mode_group.len() != 1 {
             // Allow `[2, r, g, b]` colon tail after `;` (e.g. `38;2:10:20:30`).
-            let ng = &groups[*idx + 1];
+            let ng = mode_group;
             if ng.len() >= 4 && ng[0] == 2 {
                 let col = if ng.len() >= 5 {
                     Rgb::new(
@@ -243,8 +259,8 @@ impl Grid {
             return false;
         }
         if mode == 5 {
-            let n = match groups.get(*idx + 2).and_then(|g| g.first()) {
-                Some(&n) if groups[*idx + 2].len() == 1 => n,
+            let n = match group(*idx + 2) {
+                Some([n]) => *n,
                 _ => return false,
             };
             let col = self.extended_palette(n.min(255) as u8);
@@ -252,11 +268,7 @@ impl Grid {
             *idx += 3;
             true
         } else if mode == 2 {
-            let (r, g, b) = match (
-                groups.get(*idx + 2),
-                groups.get(*idx + 3),
-                groups.get(*idx + 4),
-            ) {
+            let (r, g, b) = match (group(*idx + 2), group(*idx + 3), group(*idx + 4)) {
                 (Some(r), Some(g), Some(b)) if r.len() == 1 && g.len() == 1 && b.len() == 1 => {
                     (r[0], g[0], b[0])
                 }

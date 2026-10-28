@@ -201,6 +201,7 @@ pub struct Renderer {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     font_system: FontSystem,
+    resolved_font: String,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
@@ -351,6 +352,8 @@ impl Renderer {
         let format = config.format;
 
         let mut font_system = FontSystem::new();
+        text::configure_shaping_cache(&mut font_system);
+        let resolved_font = text::resolved_font_name(&font_system, &user_config.font.family);
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &cache);
@@ -426,6 +429,7 @@ impl Renderer {
             surface,
             config,
             font_system,
+            resolved_font,
             swash_cache,
             viewport,
             atlas,
@@ -502,6 +506,7 @@ impl Renderer {
             return;
         }
         self.base_font_size = config.font.size;
+        self.resolved_font = text::resolved_font_name(&self.font_system, &config.font.family);
         let (font_size, line_height, cell_width) =
             scaled_metrics(self.base_font_size, self.scale_factor, &config.font);
         self.font_size = font_size;
@@ -509,6 +514,7 @@ impl Renderer {
         self.cell_width = cell_width;
         // Family/size may have changed: drop cached natural advances.
         self.advance_cache.clear();
+        self.font_system.shape_run_cache.clear();
         // Metrics feed every span's advance: hashes would falsely hit.
         self.shaped_hashes.clear();
         self.last_grid_version = u64::MAX;
@@ -589,6 +595,7 @@ impl Renderer {
         self.cell_width = cell_width;
         // Scaled size changed: drop cached natural advances.
         self.advance_cache.clear();
+        self.font_system.shape_run_cache.clear();
         // Metrics feed every span's advance: hashes would falsely hit.
         self.shaped_hashes.clear();
         self.last_grid_version = u64::MAX;
@@ -1244,7 +1251,7 @@ mod tests {
         let rest: String = chars.collect();
         let lead = Cell {
             ch: first,
-            extra: Some(rest.into_boxed_str()),
+            extra: Some(rest),
             width: 2,
             ..Default::default()
         };

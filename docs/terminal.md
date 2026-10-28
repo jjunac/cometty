@@ -72,9 +72,22 @@ Continuation cells carry no independent searchable/rendered text.
 [`grid/unicode.rs`](../src/grid/unicode.rs) and
 [`grid/edit.rs`](../src/grid/edit.rs) handle combining marks, ZWJ, regional
 indicators, variation selectors, and skin tones. Ordinary nonjoining ASCII pairs
-avoid allocation; non-ASCII boundary cases keep full grapheme logic. Terminal
+avoid allocation; non-ASCII boundary cases keep full grapheme logic. Boundary
+inspection uses `GraphemeCursor` over stack-encoded scalars and a borrowed tail,
+not owned/concatenated strings. Checking the first boundary preserves behavior
+even for cells whose explicit width-zero append contains several graphemes.
+Tails are `String`s, appended in place with amortized growth; history charges
+their retained **capacity**, not length. Terminal
 writes resolve continuation once, then use `put_fresh_char`; direct `put_char`
 remains append-aware.
+
+Ordinary ASCII overwrites have a guarded scalar path that avoids repeated width,
+join and split-wide work and mutates a row once. Pending wrap, insert mode,
+nontrivial previous clusters, wide targets and scrolled views take the general
+path. It does not bypass the parser or change BCE, attributes, OSC 8, row IDs or
+wrap semantics. SGR borrows vte's groups through a 32-slot stack index (vte 0.15's
+complete parameter bound), including colon subparameters; color lookahead uses
+fixed scratch rather than nested vectors. Reset still leaves OSC 8 active.
 
 Pending wrap is deliberate: a fresh write can leave `Grid`'s cursor at `cols`.
 `Terminal::print` holds a visual cursor at the margin and wraps only for the next
@@ -140,6 +153,12 @@ Otherwise it keeps the original rows. Packed chunks contain:
   decoding never resegments text or guesses widths.
 - Consecutive style runs that can coalesce across rows, including hyperlink IDs.
 - Implicit narrow-space text suffixes, while retaining their full styles.
+
+Preflight retains per-row text ends and up to 64 style runs in bounded stack
+scratch. Common batches copy those runs directly, and pack only the text prefix,
+avoiding a second full style scan and repeated suffix trimming. Higher-diversity
+batches use the general packer/adaptive dense decision. There is no new retained
+pool, eager resize rewrite, or relaxed source/savings budget.
 
 Indexed lookup uses admission order. Eviction expires **individual rows**, not
 whole chunks for the line cap. One partially expired oldest compact chunk remains

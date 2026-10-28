@@ -33,7 +33,7 @@ impl UnderlineStyle {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
-    pub extra: Option<Box<str>>,
+    pub extra: Option<String>,
     pub width: u8,
     pub fg: Rgb,
     pub bg: Rgb,
@@ -86,7 +86,7 @@ impl From<&Cell> for CellStyle {
 }
 
 /// Borrowed text plus inline appearance. Unlike `&Cell`, this can refer to a
-/// compact row without allocating a `Box<str>` for every cluster tail.
+/// compact row without allocating a `String` for every cluster tail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellRef<'a> {
     pub ch: char,

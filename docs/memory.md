@@ -21,6 +21,7 @@ from a single host.
 | Search, per tab | Every non-overlapping match; close releases result capacity >1 MiB plus identities/projection | No open-search result-byte limit; old/new results coexist during refresh |
 | Log ring, shared | Count cap; `min(lines × 1 KiB, 16 MiB)` entry-byte budget; messages truncated around 8 KiB | Arc/deque/allocator overhead, pre-truncation formatting, single-oversized-entry exception |
 | Advance cache, shared | 4,096 single / 1,024 cluster entries, 128 KiB cluster keys, 512-byte keys | Font-system/native resources, final viewport shaping |
+| Final shaped runs, shared | 512 entries and 2 MiB of accounted capacities; oversized entries bypass, generation eviction; clear on font/metrics/database changes | Transient shaping/layout, opaque six-plan cache, font/native resources and allocator overhead |
 | Config saver, shared | One write + one replaceable pending snapshot + one result | User-configured string sizes, shutdown filesystem wait |
 
 Sources: [`grid/history.rs`](../src/grid/history.rs),
@@ -66,8 +67,11 @@ not currently shrink explicitly. `TextAtlas::trim()` unpins entries, not frees
 texture storage. Do not clear/shrink everything every frame to improve an RSS
 number: allocation churn and latency can worsen without fixing a lifecycle bug.
 
-On a 64-bit layout where a `Cell` is 48 bytes, dense storage alone is roughly
-`48 × rows × columns`, excluding cluster tails and vector slack. Verify type
+On the measured 64-bit layout a `Cell` is now **56 bytes** (formerly 48): growable
+`String` tails avoid repeated whole-cluster reconstruction but add one capacity
+word per dense cell. Dense storage alone is roughly `56 × rows × columns`,
+excluding tail **capacities** and vector slack. Packed payloads are unchanged;
+source-batch accounting uses the actual type size and tail capacities. Verify type
 sizes on the target before treating this as a byte contract; compact history
 does not use one `Cell` per stored column. Similarly, each background rectangle
 currently uses 120 vertex bytes, and decorations can add several rectangles per
@@ -124,7 +128,7 @@ These are **not implemented policies** or promises of future performance:
 | --- | --- | --- |
 | No cross-tab/shared memory budget | Individually bounded tabs/caches can still produce large totals | Account evictable history/caches separately from active/in-flight state; never silently drop input |
 | Synchronous, unbudgeted search results | Dense queries allocate millions of matches; rescan temporarily retains two lists; inactive tabs retain open searches | Define count/navigation UI semantics before capping results; consider compact per-row storage and cancellable/budgeted scans |
-| Unbounded live cluster tails | Repeated whole-cluster appends cause quadratic copying; tails also amplify snapshot/search/shaping costs | Specify a hard per-cluster byte/scalar and overflow policy while preserving normal combining/ZWJ/wide/pending-wrap behavior |
+| Unbounded live cluster tails | Appends now grow amortized, but long boundary scans and repeated snapshot/search/shaping still cost unbounded work/space | Specify a hard per-cluster byte/scalar and overflow policy while preserving normal combining/ZWJ/wide/pending-wrap behavior |
 | Cooperative parser scheduling | REP and history-producing scroll can expand short sequences into long callbacks | Bound or resume expanded work without dropping required terminal semantics |
 | Live/snapshot/geometry/atlas high-water storage | Exceptional windows, Unicode, styles, or font/DPI changes can keep large reachable allocations | Add accounting and measured hysteresis/batching; coordinate atlas recreation with prepared-key invalidation/pins |
 | Opener child ownership | `links::open` drops the spawned child without an explicit wait | Review Unix reaping separately; PTY supervisor ownership does not cover opener children |
@@ -171,7 +175,7 @@ Do not reuse old dense-history tables or repaired findings as current behavior.
 Use committed [headless probes](performance.md) before inventing external test
 programs. Never run unbounded/unterminated payload generators in an important
 session. Heap traces, output recordings, paths, and clipboard captures can contain
-secrets; redact before sharing. Headless graphics attempts could not create a
+secrets; redact before sharing. Earlier headless graphics attempts could not create a
 working device, so they established **no native/RSS plateau or display-backed
 latency result**. The single-host plateaus above come from a display-backed run.
 Record GPU-probe skips/failures explicitly.

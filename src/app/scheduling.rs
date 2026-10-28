@@ -7,6 +7,60 @@ pub(crate) const MAX_DRAIN_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_DRAIN_TIME: Duration = Duration::from_millis(4);
 pub(crate) const SYNC_TIMEOUT: Duration = Duration::from_millis(150);
 
+/// Output frames coalesce independently of the fair parser allowance. Leave at
+/// least one frame's measured UI cost for parsing/input before another output
+/// frame; ordinary output is capped at 60 Hz. Explicit UI redraws bypass this.
+#[derive(Default)]
+pub(crate) struct OutputPresentation {
+    not_before: Option<Instant>,
+    pending: bool,
+    input: bool,
+}
+
+impl OutputPresentation {
+    pub(crate) fn input(&mut self) {
+        self.input = true;
+    }
+
+    pub(crate) fn dirty(&mut self, now: Instant) -> bool {
+        self.pending = true;
+        self.take_due(now)
+    }
+
+    pub(crate) fn deadline(&self, now: Instant) -> Option<Instant> {
+        self.pending.then_some(if self.input {
+            now
+        } else {
+            self.not_before.unwrap_or(now)
+        })
+    }
+
+    pub(crate) fn take_due(&mut self, now: Instant) -> bool {
+        if self.deadline(now).is_some_and(|at| at <= now) {
+            self.pending = false;
+            self.input = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn begin_frame(&mut self) {
+        // An explicit UI frame also includes the latest output. Do not leave
+        // a trailing timer after it, or consume urgency before the echo arrives.
+        self.pending = false;
+    }
+
+    pub(crate) fn finish_frame(&mut self, start: Instant, end: Instant) {
+        let cost = end.saturating_duration_since(start);
+        let interval = Duration::from_micros(16_667);
+        let gap = interval
+            .saturating_sub(cost)
+            .max(cost.min(Duration::from_millis(50)));
+        self.not_before = end.checked_add(gap);
+    }
+}
+
 pub(crate) fn drain_budget_exceeded(bytes: usize, elapsed: Duration) -> bool {
     bytes >= MAX_DRAIN_BYTES || elapsed >= MAX_DRAIN_TIME
 }
@@ -136,6 +190,51 @@ pub(crate) fn blink_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_frames_coalesce_without_a_timer_at_idle_or_an_extra_drain_allowance() {
+        let now = Instant::now();
+        let mut pacing = OutputPresentation::default();
+        assert_eq!(pacing.deadline(now), None);
+        assert!(pacing.dirty(now));
+        pacing.begin_frame();
+        pacing.finish_frame(now, now + Duration::from_millis(5));
+        assert_eq!(pacing.deadline(now), None);
+        let mut schedule = DrainSchedule::default();
+        for turn in 1..=3 {
+            let at = now + Duration::from_millis(turn * 3 + 5);
+            schedule.begin_turn();
+            schedule.add_bytes(MAX_DRAIN_BYTES);
+            assert!(schedule.exhausted(Duration::ZERO));
+            assert!(!pacing.dirty(at));
+        }
+        let deadline = pacing.deadline(now).unwrap();
+        assert_eq!(deadline, now + Duration::from_micros(16_667));
+        assert!(pacing.take_due(deadline)); // final output cannot be stranded
+        assert_eq!(pacing.deadline(deadline), None);
+        assert!(!pacing.take_due(deadline));
+    }
+
+    #[test]
+    fn expensive_frames_leave_parse_time_but_never_hold_input_or_explicit_ui_redraws() {
+        let now = Instant::now();
+        let mut pacing = OutputPresentation::default();
+        pacing.finish_frame(now, now + Duration::from_millis(30));
+        assert!(!pacing.dirty(now + Duration::from_millis(31)));
+        assert_eq!(pacing.deadline(now), Some(now + Duration::from_millis(60)));
+        pacing.input();
+        assert!(pacing.take_due(now + Duration::from_millis(32)));
+        assert_eq!(pacing.deadline(now), None);
+        assert!(!pacing.dirty(now + Duration::from_millis(33)));
+        // A mouse/resize/chrome frame bypasses the deadline and consumes output.
+        pacing.begin_frame();
+        assert_eq!(pacing.deadline(now), None);
+        // An early input-triggered repaint must not consume urgency before echo.
+        pacing.input();
+        pacing.begin_frame();
+        pacing.finish_frame(now, now + Duration::from_millis(40));
+        assert!(pacing.dirty(now + Duration::from_millis(41)));
+    }
 
     #[test]
     fn shared_turn_budget_is_not_reset_by_another_call_site() {

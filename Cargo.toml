@@ -12,7 +12,7 @@ egui = "0.36"
 egui-winit = "0.36"
 egui-wgpu = "0.36"
 glyphon = "0.12"
-cosmic-text = "0.19"
+cosmic-text = { version = "0.19", features = ["shape-run-cache"] }
 portable-pty = "0.9"
 vte = "0.15"
 # OSC guard keeps ordinary output on vte's bulk path (already a vte dependency).
@@ -57,3 +57,8 @@ libc = "0.2"
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
+
+# 0.19's final-shaping cache needs capacity admission and a direction-aware key.
+# Shared with glyphon; see vendor/cosmic-text/PATCHES.md for removal/update steps.
+[patch.crates-io]
+cosmic-text = { path = "vendor/cosmic-text" }

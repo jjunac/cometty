@@ -1,5 +1,10 @@
 mod parser;
 
+#[cfg(test)]
+mod throughput_bench;
+#[cfg(test)]
+mod throughput_tests;
+
 use base64::Engine as _;
 use parser::BoundedParser;
 use vte::Params;
@@ -727,8 +732,8 @@ impl Terminal {
     }
 }
 
-impl vte::Perform for Terminal {
-    fn print(&mut self, c: char) {
+impl Terminal {
+    fn print_scalar(&mut self, c: char) {
         // DECAWM off: no pending wrap; Grid clamps to the last column.
         if !self.grid.auto_wrap() {
             self.pending_wrap = false;
@@ -774,6 +779,16 @@ impl vte::Perform for Terminal {
             // the margin keeps the visual cursor on its lead cell.
         } else if !self.grid.auto_wrap() {
             self.pending_wrap = false;
+        }
+    }
+}
+
+impl vte::Perform for Terminal {
+    fn print(&mut self, c: char) {
+        if !self.pending_wrap && matches!(c, ' '..='~') && self.grid.try_put_ascii(c) {
+            self.last_graphic = Some(c);
+        } else {
+            self.print_scalar(c);
         }
     }
 
@@ -914,8 +929,7 @@ impl vte::Perform for Terminal {
                 self.grid.erase_in_line(mode);
             }
             'm' => {
-                let groups: Vec<Vec<u16>> = params.iter().map(|p| p.to_vec()).collect();
-                self.grid.sgr_groups(&groups);
+                self.grid.sgr_params(params);
             }
             's' => self.grid.save_cursor(),
             'u' => self.grid.restore_cursor(),

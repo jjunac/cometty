@@ -24,7 +24,6 @@ import tty
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import procstat  # noqa: E402
 
 DA1 = b"\x1b[c"
 
@@ -171,6 +170,9 @@ def op_ping(op, ctx):
 
 
 def op_throughput(op, ctx):
+    # Keep payload generation importable on non-macOS headless benchmark hosts.
+    import procstat
+
     name = op["workload"]
     build, unit = WORKLOADS[name]
     size = tty_size()

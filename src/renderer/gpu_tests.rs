@@ -1,7 +1,7 @@
 //! Explicit, offscreen GPU correctness check; never part of headless CI.
 
 use super::*;
-use cosmic_text::{Attrs, AttrsList, BufferLine, Family, LineEnding, Shaping, Style, Weight};
+use cosmic_text::{Attrs, AttrsList, BufferLine, LineEnding, Shaping, Style, Weight};
 
 const WIDTH: u32 = 2048;
 const HEIGHT: u32 = 512;
@@ -114,6 +114,8 @@ fn retained_glyphs_match_fresh_preparation_after_atlas_churn() {
     let mut atlas = TextAtlas::new(&device, &queue, &cache, wgpu::TextureFormat::Rgba8UnormSrgb);
     let mut renderer = TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
     let mut fonts = FontSystem::new();
+    let family = text::resolved_font_name(&fonts, "monospace");
+    text::configure_shaping_cache(&mut fonts);
     let mut swash = SwashCache::new();
     let mut buffer = Buffer::new(&mut fonts, Metrics::new(64.0, 80.0));
     buffer.set_wrap(Wrap::None);
@@ -123,11 +125,15 @@ fn retained_glyphs_match_fresh_preparation_after_atlas_churn() {
         // Large, varied glyphs force growth and subsequent eviction/reuse
         // in the initially 256px atlas. Different fonts and sets each pass.
         for line in 0..4 {
-            let text: String = (0..64)
+            let mut content: String = (0..64)
                 .map(|i| char::from(33 + ((i + frame * 17) % 94) as u8))
                 .collect();
+            if line == 3 {
+                content.insert_str(0, "漢あ한 e\u{301} 👨\u{200d}👩 👩🏽 🇫🇷 العربية हिन्दी ");
+            }
             let attrs = Attrs::new()
-                .family(Family::Monospace)
+                .family(text::font_family(&family))
+                .font_features(text::terminal_font_features())
                 .weight(if line % 2 == 0 {
                     Weight::NORMAL
                 } else {
@@ -139,7 +145,7 @@ fn retained_glyphs_match_fresh_preparation_after_atlas_churn() {
                     Style::Italic
                 });
             buffer.lines.push(BufferLine::new(
-                text,
+                content,
                 LineEnding::None,
                 AttrsList::new(&attrs),
                 Shaping::Advanced,
@@ -187,6 +193,22 @@ fn retained_glyphs_match_fresh_preparation_after_atlas_churn() {
                 pixels(&device, &queue, &renderer, &atlas, &viewport)
             );
         }
+        // Rebuild final advanced shaping with caching disabled, not merely
+        // fresh GPU preparation of the same cached BufferLine layouts.
+        fonts.shape_run_cache.set_limits(0, 0);
+        let mut fresh = Buffer::new(&mut fonts, Metrics::new(64.0, 80.0));
+        fresh.set_wrap(Wrap::None);
+        fresh.set_size(Some(WIDTH as f32), Some(HEIGHT as f32));
+        fresh.lines.clear();
+        for (i, line) in buffer.lines.iter().enumerate() {
+            fresh.lines.push(BufferLine::new(
+                line.text(),
+                LineEnding::None,
+                line.attrs_list().clone(),
+                Shaping::Advanced,
+            ));
+            fresh.line_layout(&mut fonts, i);
+        }
         atlas.trim();
         renderer
             .prepare(
@@ -195,7 +217,20 @@ fn retained_glyphs_match_fresh_preparation_after_atlas_churn() {
                 &mut fonts,
                 &mut atlas,
                 &viewport,
-                areas(),
+                [TextArea {
+                    buffer: &fresh,
+                    left: 0.0,
+                    top,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: WIDTH as i32,
+                        bottom: HEIGHT as i32,
+                    },
+                    default_color: glyphon::Color::rgb(220, 190, 170),
+                    custom_glyphs: &[],
+                }],
                 &mut swash,
             )
             .unwrap();
@@ -203,6 +238,7 @@ fn retained_glyphs_match_fresh_preparation_after_atlas_churn() {
             initial,
             pixels(&device, &queue, &renderer, &atlas, &viewport)
         );
+        text::configure_shaping_cache(&mut fonts);
     }
 }
 

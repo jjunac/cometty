@@ -468,7 +468,7 @@ mod tests {
         let mut g = Grid::new_with_config(4, 2, Theme::default(), &cfg);
         for _ in 0..100 {
             g.set_cursor(0, 0);
-            g.cells[0][0].extra = Some("x".repeat(2000).into_boxed_str());
+            g.cells[0][0].extra = Some("x".repeat(2000));
             g.scroll_up(1);
             assert!(g.history_bytes() <= 4096);
         }

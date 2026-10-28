@@ -51,7 +51,7 @@ impl Row {
             + self
                 .cells
                 .iter()
-                .map(|c| c.extra.as_ref().map_or(0, |s| s.len()))
+                .map(|c| c.extra.as_ref().map_or(0, String::capacity))
                 .sum::<usize>()
     }
 }
@@ -73,5 +73,23 @@ impl DerefMut for Row {
 impl AsRef<[Cell]> for Row {
     fn as_ref(&self) -> &[Cell] {
         &self.cells
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retained_tail_capacity_not_just_length_is_charged_and_released() {
+        let mut tail = String::with_capacity(8192);
+        tail.push('\u{301}');
+        let mut row = Row::new(vec![Cell {
+            extra: Some(tail),
+            ..Cell::default()
+        }]);
+        assert_eq!(row.bytes(), row.capacity() * size_of::<Cell>() + 8192);
+        row.recycle(1, &Cell::default());
+        assert_eq!(row.bytes(), row.capacity() * size_of::<Cell>());
     }
 }

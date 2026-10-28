@@ -11,14 +11,56 @@ use crate::grid::Cell;
 
 use super::Renderer;
 
-pub(crate) fn font_family(name: &str) -> Family<'static> {
+pub(crate) fn font_family(name: &str) -> Family<'_> {
     match name.trim().to_ascii_lowercase().as_str() {
         "sans" | "sans-serif" => Family::SansSerif,
         "serif" => Family::Serif,
         "cursive" => Family::Cursive,
         "fantasy" => Family::Fantasy,
-        _ => Family::Monospace,
+        "" | "monospace" => Family::Monospace,
+        _ => Family::Name(name.trim()),
     }
+}
+
+/// Resolve generic monospace once, not through the expensive generic fallback
+/// iterator on every shaped run. Explicit names remain names, including absent
+/// ones: cosmic-text still supplies its full complex-script/emoji fallback.
+pub(crate) fn resolved_font_name(fonts: &FontSystem, name: &str) -> String {
+    if font_family(name) != Family::Monospace {
+        return name.trim().into();
+    }
+    let installed = |name: &str| {
+        fonts
+            .db()
+            .faces()
+            .any(|face| face.monospaced && face.families.iter().any(|(n, _)| n == name))
+    };
+    let generic = fonts.db().family_name(&Family::Monospace);
+    if installed(generic) {
+        return generic.into();
+    }
+    #[cfg(target_os = "macos")]
+    let preferred = ["Menlo", "Monaco"];
+    #[cfg(target_os = "windows")]
+    let preferred = ["Consolas", "Cascadia Mono", "Courier New"];
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let preferred = ["DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono"];
+    if let Some(name) = preferred.into_iter().find(|name| installed(name)) {
+        return name.into();
+    }
+    // Stable selection when the platform's usual fonts aren't installed.
+    fonts
+        .db()
+        .faces()
+        .filter(|face| face.monospaced && !face.post_script_name.contains("Emoji"))
+        .flat_map(|face| face.families.iter().map(|(name, _)| name.as_str()))
+        .min()
+        .unwrap_or("monospace")
+        .into()
+}
+
+pub(crate) fn configure_shaping_cache(fonts: &mut FontSystem) {
+    fonts.shape_run_cache.set_limits(512, 2 * 1024 * 1024);
 }
 
 /// Terminal shaping features: no ligatures/kerning across grid columns.
@@ -109,7 +151,7 @@ pub(crate) struct NormCtx<'a> {
     pub cell_width: f32,
     pub font_size: f32,
     pub line_height: f32,
-    pub family: Family<'static>,
+    pub family: Family<'a>,
     pub features: FontFeatures,
     pub font_system: &'a mut FontSystem,
     pub cache: &'a mut AdvanceCache,
@@ -408,7 +450,7 @@ impl Renderer {
             if !changed.is_empty() {
                 crate::perf::add(crate::perf::Metric::ShapedRows, changed.len());
                 // Shared shaping inputs (family/features resolved once).
-                let family = font_family(&self.user_config.font.family);
+                let family = font_family(&self.resolved_font);
                 let features = terminal_font_features();
                 let (cell_width, font_size, line_height) =
                     (self.cell_width, self.font_size, self.line_height);
@@ -442,7 +484,7 @@ impl Renderer {
         // only quantizes to a sub-pixel grid and must stay off.
         self.buffer.set_monospace_width(None);
         // Shared shaping inputs (family/features resolved once per rebuild).
-        let family = font_family(&self.user_config.font.family);
+        let family = font_family(&self.resolved_font);
         let features = terminal_font_features();
         let (cell_width, font_size, line_height) =
             (self.cell_width, self.font_size, self.line_height);

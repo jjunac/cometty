@@ -20,6 +20,7 @@ inputs and resource-lifetime requirements:
 | Shared app snapshot | Stable tab ID + grid version; each visible row compares `(row ID, revision, projection revision)` before copying |
 | Shaped rows | Per-position hashes of cluster text, width, bold/italic, effective foreground; clear on metrics/theme/viewport changes |
 | Natural advances | Cluster text + weight/style within a font/metrics generation |
+| Final advanced shaping runs | Text + full attributes (including spacing/features/color) + direction, within the shared font database generation; 512 entries / 2 MiB accounted capacities |
 | Prepared glyph instances | Shared text-buffer revision + surface width/height + tab-bar offset + default text color |
 | Background/chrome | Repaint from current cursor, decorations, selection/search/link state and UI; no retained base-geometry cache |
 
@@ -27,6 +28,8 @@ On tab switch, force a content comparison even if both tabs have the same numeri
 grid version. Identical shaped text may reuse preparation if placement/color also
 match. Do not retain a shaped line for all history rows to optimize scrolling:
 current layouts are viewport-sized and tied to positions, not a scroll-aware cache.
+The bounded run cache is position-independent: moved/repeated text can reuse final
+shaping/fallback, but layouts and GPU preparation still follow their own keys.
 
 The snapshot copies only changed visible rows into reusable vectors, decoding
 compact history directly. A changed grid version can still hash every visible
@@ -39,6 +42,16 @@ line-height/cell-width factors (defaults 1.25 / 0.602). Text does not wrap insid
 cosmic-text. Advanced shaping/fallback stays enabled for complex clusters; kern,
 standard/contextual/discretionary ligatures, and contextual alternates are
 disabled to prevent neighboring terminal columns merging or drifting.
+
+Explicit font names stay `Family::Name`, rather than silently becoming generic
+monospace. Generic monospace resolves once to an installed named monospace family:
+the database's mapping if available, then platform preferences, then a stable
+installed-family fallback. An empty font database retains generic fallback.
+This avoids cosmic-text's expensive generic-monospace selection on every run;
+changing only the database's generic mapping is not equivalent. Named fonts still
+use advanced fallback, including CJK, emoji and complex scripts. A fallback face
+may differ from the former generic policy; this is not pixel equivalence to that
+old policy or a cross-platform Menlo requirement.
 
 Line construction:
 
@@ -62,6 +75,19 @@ Separate style maps permit borrowed lookup. Capacity retires a generation rather
 than maintaining an unbounded LRU. Font/metrics changes clear it. Descriptor
 scratch retains at most 4,096 slots; oversized measurement buffers are discarded.
 These limits do **not** bound live cell tails or final complex-text layout cost.
+
+Final shaping uses a small, documented local cosmic-text 0.19 patch (shared with
+glyphon), not a modified Cargo registry: see
+[`vendor/cosmic-text/PATCHES.md`](../vendor/cosmic-text/PATCHES.md). Repeated runs
+reuse the advanced result, avoiding both fallback work and thrashing of the
+upstream six-entry harfrust plan cache. That opaque plan cache is not enlarged.
+The run cache has explicit **512-entry / 2 MiB** admission, charging vector
+capacities, text, nested attributes/features and glyphs. Oversized entries bypass
+retention; capacity pressure retires a generation. Hash matches also compare full
+keys. Font database mutations and font/metrics changes clear it; theme colors are
+part of the key. No all-history layout cache, age-only retention, or GPU resource
+is added. Unique runs still incur fallback/plan construction. The budget excludes
+font/native resources, allocator overhead, and transient shaping work.
 
 ## Decision: retain preparation while keeping atlas pins
 

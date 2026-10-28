@@ -201,3 +201,163 @@ fn advance_keys_have_entry_byte_and_individual_limits() {
     cache.insert_cluster(0, &"x".repeat(MAX_CLUSTER_BYTES + 1), (1.0, 1));
     assert_eq!((cache.cluster_entries, cache.key_bytes), before);
 }
+
+#[test]
+fn font_names_are_not_silently_replaced_with_generic_monospace() {
+    assert_eq!(
+        font_family("  My Custom Mono  "),
+        Family::Name("My Custom Mono")
+    );
+    assert_eq!(font_family("MONOSPACE"), Family::Monospace);
+    assert_eq!(font_family("Sans-Serif"), Family::SansSerif);
+    let fonts = FontSystem::new();
+    assert_eq!(
+        resolved_font_name(&fonts, "Missing Custom Font"),
+        "Missing Custom Font"
+    );
+    let name = resolved_font_name(&fonts, "monospace");
+    if fonts.db().faces().any(|f| f.monospaced) {
+        assert!(matches!(font_family(&name), Family::Name(_)));
+        assert!(
+            fonts
+                .db()
+                .faces()
+                .any(|f| f.monospaced && f.families.iter().any(|(n, _)| *n == name))
+        );
+    }
+}
+
+#[test]
+fn bounded_final_shaping_matches_uncached_complex_layout_and_reduces_allocations() {
+    let mut fonts = FontSystem::new();
+    let family_name = resolved_font_name(&fonts, "monospace");
+    let mut advances = AdvanceCache::new();
+    let mut layout = |fonts: &mut FontSystem, text: &str| {
+        let mut terminal = crate::term::Terminal::new(120, 2, Theme::default());
+        terminal.feed(text.as_bytes());
+        let mut ctx = context(fonts, &mut advances);
+        ctx.family = font_family(&family_name);
+        let line = build_buffer_line(
+            &terminal.grid().visible_rows()[0],
+            &Theme::default(),
+            &mut ctx,
+        );
+        let mut buffer = Buffer::new(ctx.font_system, Metrics::new(16.0, 20.0));
+        buffer.set_wrap(Wrap::None);
+        buffer.set_size(Some(2000.0), Some(100.0));
+        buffer.lines.clear();
+        buffer.lines.push(line);
+        format!("{:?}", buffer.line_layout(ctx.font_system, 0))
+    };
+    for text in [
+        "ASCII ... -> ffi",
+        "漢あ한 e\u{301} 👨\u{200d}👩\u{200d}👧 🇫🇷",
+        "العربية हिन्दी עברית",
+        "abc العربية 123",
+        "العربية abc",
+        "a\u{600}b",
+    ] {
+        fonts.shape_run_cache.set_limits(0, 0);
+        let expected = layout(&mut fonts, text);
+        let uncached = crate::perf_bench::allocation_counts(|| {
+            layout(&mut fonts, text);
+        });
+        configure_shaping_cache(&mut fonts);
+        assert_eq!(layout(&mut fonts, text), expected);
+        let cached = crate::perf_bench::allocation_counts(|| {
+            assert_eq!(layout(&mut fonts, text), expected);
+        });
+        assert!(
+            cached.0 < uncached.0,
+            "{text:?}: cached={cached:?} uncached={uncached:?}"
+        );
+        assert!(fonts.shape_run_cache.retained_bytes() <= 2 * 1024 * 1024);
+    }
+    assert!(!fonts.shape_run_cache.is_empty());
+    fonts.db_mut();
+    assert!(
+        fonts.shape_run_cache.is_empty(),
+        "font generation invalidates shaped results"
+    );
+}
+
+#[test]
+fn final_shaping_cache_charges_capacities_rejects_giant_entries_and_separates_direction() {
+    use cosmic_text::{AttrsOwned, ShapeRunCache, ShapeRunKey};
+    let mut cache = ShapeRunCache::default();
+    let key = |text: String, rtl| ShapeRunKey {
+        rtl,
+        text,
+        default_attrs: AttrsOwned::new(&Attrs::new()),
+        attrs_spans: Vec::new(),
+    };
+    cache.set_limits(8, 16 * 1024);
+    cache.insert(key("same".into(), false), Vec::new());
+    assert!(cache.get(&key("same".into(), false)).is_some());
+    assert!(cache.get(&key("same".into(), true)).is_none());
+    let mut huge = String::with_capacity(32 * 1024);
+    huge.push('x'); // charge capacity, not this one-byte length
+    cache.insert(key(huge, false), Vec::new());
+    assert_eq!(cache.len(), 1);
+    for n in 0..1024 {
+        cache.insert(
+            key(format!("{n}{}", "x".repeat(n % 200)), false),
+            Vec::new(),
+        );
+        assert!(cache.len() <= 8);
+        assert!(cache.retained_bytes() <= 16 * 1024);
+    }
+    let mut cloned = cache.clone();
+    for n in 0..100 {
+        cloned.insert(key(format!("cloned {n}"), false), Vec::new());
+        assert!(cloned.len() <= 8);
+        assert!(cloned.retained_bytes() <= 16 * 1024);
+    }
+    cache.trim(0);
+    cache.trim(0);
+    assert!(cache.is_empty());
+    cache.set_limits(0, 0);
+    assert_eq!(cache.retained_bytes(), 0);
+    cache.insert(key("disabled".into(), false), Vec::new());
+    assert!(cache.is_empty());
+}
+
+#[test]
+fn shaped_run_capacity_budget_bounds_actual_requested_live_storage_and_drop_balances() {
+    use cosmic_text::{AttrsOwned, ShapeRunCache, ShapeRunKey};
+    let budget = 2 * 1024 * 1024;
+    let mut cache = ShapeRunCache::default();
+    let stats = crate::perf_bench::allocation_stats(|| {
+        cache.set_limits(512, budget);
+        for n in 0..1024 {
+            let mut text = String::with_capacity(16 * 1024);
+            use std::fmt::Write;
+            write!(text, "unique {n}").unwrap();
+            cache.insert(
+                ShapeRunKey {
+                    rtl: false,
+                    text,
+                    default_attrs: AttrsOwned::new(&Attrs::new()),
+                    attrs_spans: Vec::new(),
+                },
+                Vec::new(),
+            );
+            assert!(cache.len() <= 512);
+            assert!(cache.retained_bytes() <= budget);
+        }
+    });
+    assert!(
+        stats.live_delta <= budget as i64,
+        "live={}",
+        stats.live_delta
+    );
+    assert!(
+        stats.peak_delta <= (budget + 64 * 1024) as i64,
+        "one incoming key may overlap eviction: peak={}",
+        stats.peak_delta
+    );
+    assert_eq!(
+        crate::perf_bench::allocation_stats(|| drop(cache)).live_delta,
+        -stats.live_delta
+    );
+}

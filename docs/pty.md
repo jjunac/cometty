@@ -67,6 +67,13 @@ occlusion, and disabled blinking. Background output does not dirty the active
 terminal or clear its selection; redraw chrome only if displayed labels change.
 Process/title facts refresh once per touched tab/burst, not per chunk or paint.
 
+Only output-driven repaint requests are paced/coalesced (see
+[event-loop design](architecture.md#decisions-that-shape-the-event-loop)). Fair
+draining, queue sizes and input/reply admission are unchanged. A drain immediately
+before an already requested frame includes output in that frame without asking
+for a redundant next frame. Input urgency bypasses the output deadline, not the
+fair parsing budget or synchronized-output guard.
+
 ## Decision: nonblocking, byte-accounted input admission
 
 Blocking the UI on a full input channel is unacceptable; an unbounded paste queue

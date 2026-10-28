@@ -94,8 +94,9 @@ thread/descriptor assertions execute in an isolated subprocess. Other model,
 egui layout, and frame-boundary tests run headlessly; they are not evidence of
 windowed/GPU correctness.
 
-Four probes are opt-in: release headless benchmarks, scheduling under load,
-retained-glyph pixel equivalence, and failed-upload native-resource recovery.
+Six probes are opt-in: release headless benchmarks, exact-corpus parser and
+layout diagnostics, scheduling under load, retained-glyph pixel equivalence,
+and failed-upload native-resource recovery.
 See [performance](performance.md) for their exact names/commands and limitations.
 Do not run all `--ignored` tests indiscriminately without a working GPU.
 
@@ -106,7 +107,7 @@ Do not run all `--ignored` tests indiscriminately without a working GPU.
 | Terminal parsing / Unicode | `term::`, `grid::`, `input::`: every-byte split equivalence, pending wrap, wide repair, BCE, modes/replies |
 | History / resize | `grid::history::`, `app::geometry::`: eager-reference equivalence, IDs, capacities/pools, row eviction, zero caps, PTY-size agreement |
 | Transport / lifecycle | `pty::`, `app::scheduling::`, `app::pty_io::`: notification races, fairness, shared budget, FIFO/reply reserve, cancellation/reaping |
-| Text / frames | `renderer::`: shaping fingerprints, advance bounds, prepared-key invalidation, pins, upload/submit/free order on every returned outcome |
+| Text / frames | `renderer::`: named-font resolution, cached/uncached complex shaping fingerprints, run/advance capacity bounds, prepared-key invalidation, pins, upload/submit/free order on every returned outcome |
 | Search / selection / links | `search::`, `selection::`, `links::`, `app::search::`, `app::tab::`: projected columns, eviction/recycling, security gates, no background reveal |
 | Panels / settings / logs | `app::settings::`, `app::persistence::`, `logbuf::`, `logging::`, `renderer::log_ui::`: generation ordering, bounded indexing, independent filters, focus and fixed-height rows |
 
