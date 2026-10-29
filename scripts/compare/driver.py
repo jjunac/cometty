@@ -8,7 +8,7 @@ per line from its FIFO RUNDIR/agents/<pid>.fifo and answers each op with
 RUNDIR/agents/<pid>.<seq>.json. Blocking on the FIFO keeps an idle agent at zero
 wakeups. Stdlib only, Python 3.9 compatible.
 
-Ops: ping, throughput, fill, flood, latency, exit (see `OPS`).
+Ops: ping, throughput, fill, flood, latency, tick, exit (see `OPS`).
 
 Throughput timing follows vtebench: write a pre-generated payload, then DA1
 (ESC [ c) and wait for the reply. The reply proves the terminal parsed every
@@ -257,8 +257,47 @@ def op_latency(op, ctx):
     return {"tty": size, "arrival_ns": arrivals}
 
 
+def op_tick(op, ctx):
+    """Small periodic output, like a TUI clock or spinner, until `seconds` pass.
+
+    Rewrites one short status in place every `interval` seconds (absolute
+    deadlines, so the cadence does not drift) and stops early on a `stop` line.
+    Models "idle" screens that still change a few cells now and then. The
+    cursor is hidden, as full-screen TUIs do, unless `cursor` is true. With
+    `fill` (`ascii`, `sgr` or `unicode`), every row above the status line is
+    painted first, so the frame holds a realistic amount of text.
+    """
+    interval = max(float(op.get("interval", 1.0)), 0.001)
+    end = time.monotonic() + float(op.get("seconds", 30))
+    frames, ticks, ctl = "|/-\\", 0, ctx["ctl"]
+    hide = b"" if op.get("cursor") else b"\x1b[?25l"
+    next_at = time.monotonic()
+    with Raw():
+        write_all(hide + b"\x1b[2J\x1b[H")
+        if op.get("fill"):
+            gen = {"ascii": _ascii_line, "sgr": _sgr_line, "unicode": _unicode_line}[op["fill"]]
+            size = tty_size()
+            write_all(b"".join(gen(i, size["cols"]) for i in range(size["rows"] - 1)))
+        while True:
+            now = time.monotonic()
+            if now >= end:
+                break
+            if now >= next_at:
+                write_all(("\r%s tick %08d" % (frames[ticks % 4], ticks)).encode())
+                ticks += 1
+                next_at += interval
+                continue
+            r, _, _ = select.select([ctl], [], [], min(next_at, end) - now)
+            if ctl in r:
+                line = ctx["reader"].readline_nonblock()
+                if line is not None and json.loads(line).get("op") == "stop":
+                    break
+        write_all(b"\x1b[0m\x1b[?25h\r\n")
+    return {"ticks": ticks}
+
+
 OPS = {"ping": op_ping, "throughput": op_throughput, "fill": op_fill,
-       "flood": op_flood, "latency": op_latency}
+       "flood": op_flood, "latency": op_latency, "tick": op_tick}
 
 
 class LineReader:

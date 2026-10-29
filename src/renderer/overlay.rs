@@ -117,6 +117,7 @@ impl Renderer {
 
         let egui_input = self.egui_state.take_egui_input(window);
         let ctx = self.egui_ctx.clone();
+        crate::perf::add(crate::perf::Metric::EguiPass, 1);
         ctx.begin_pass(egui_input);
         if let Some(notice) = input_notice {
             // Passive status, not a focusable control: terminal-owned Tab

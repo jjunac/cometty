@@ -278,6 +278,7 @@ impl App {
         if delay.is_zero() {
             self.egui_repaint_at = None;
             if let Some(w) = self.window.as_ref() {
+                crate::perf::add(crate::perf::Metric::RequestEguiImmediate, 1);
                 w.request_redraw();
             }
         } else {

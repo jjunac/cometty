@@ -244,6 +244,14 @@ impl App {
             if (output_due || chrome_changed || removed)
                 && let Some(w) = self.window.as_ref()
             {
+                crate::perf::add(
+                    if output_due {
+                        crate::perf::Metric::RequestOutput
+                    } else {
+                        crate::perf::Metric::RequestChrome
+                    },
+                    1,
+                );
                 w.request_redraw();
             }
         }

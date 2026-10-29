@@ -107,9 +107,11 @@ For a display-backed run:
 COMETTY_PERF=1 cargo run --release --locked
 ```
 
-[`src/perf.rs`](../src/perf.rs) reports to stderr approximately every ten seconds
-of **existing event-loop activity**. Counters introduce no wake timer or log-ring
-feedback and are off by default. They aggregate:
+[`src/perf.rs`](../src/perf.rs) reports to stderr every ten seconds from a
+dedicated `perf-report` thread, and once more at exit. The thread costs one
+process wakeup per report and never wakes the event loop, so a sleeping loop is
+observable too. Counters add no event-loop timer or log-ring feedback and are
+off by default. They aggregate:
 
 - CPU-side elapsed phases: drain, parse, search/projection, snapshot, rebuild,
   background, overlay, acquire, glyph prepare, encode/submit, present, history
@@ -119,16 +121,36 @@ feedback and are off by default. They aggregate:
   output queue wait/high-water bytes, and upload-only cleanup submissions.
 - At most 64 stable tab IDs per interval: backlogged service gaps,
   input-to-first-output, and oldest unpresented output-to-present.
+- Wake and frame sources (see [idle CPU and energy](idle.md)): `loop_turn`
+  (`about_to_wait` calls), `wake_timer`/`wake_event` (loop wakes by a deadline or
+  by anything else), `window_event`/`pointer_event`, redraw requests by reason
+  (`request_blink`, `request_egui_input`, `request_egui_deadline`,
+  `request_egui_immediate`, `request_output`, `request_output_deadline`,
+  `request_chrome`), full egui passes (`egui_pass`), background vertices per
+  frame (`bg_vertices`: sum and `max_value`), and timed PTY-supervisor waits
+  (`supervisor_poll`).
+- `process`: the whole process's CPU time over the interval (all threads,
+  including Metal/AppKit queues and PTY workers) and, on macOS, its
+  package-idle and interrupt wakeups and retired instructions
+  (`proc_pid_rusage`). Elsewhere it reports voluntary/involuntary context
+  switches; macOS does not maintain those. Compare revisions by instructions:
+  CPU time and energy swing severalfold with performance/efficiency-core
+  placement (see [idle](idle.md#measuring-reliably)).
 
 Interpretation rules:
 
 - Phases **nest**; do not sum them and call the result frame time. Elapsed time
   includes waits/preemption; acquire/present can wait on the platform. These are
   neither process CPU time nor GPU execution timings.
-- `interval_us` gives the actual reporting interval. `history_seal` nests inside
-  parsing; `title_refresh` nests inside draining; `redraw_total` includes any
-  drain performed by that callback as well as rendering. Do not add these to
-  their parents. A short run can end before the ten-second reporting boundary.
+- `interval_us` gives the actual reporting interval and `at_ms` its end since
+  launch. `history_seal` nests inside parsing; `title_refresh` nests inside
+  draining; `redraw_total` includes any drain performed by that callback as well
+  as rendering. Do not add these to their parents. The first report includes
+  startup and the exit report includes shutdown; exclude both from idle rates.
+- Redraw requests coalesce, so request counts can exceed `redraw`. Requests
+  made by keyboard, mouse-button, resize, focus, search and settings paths are
+  not attributed; `redraw` minus the attributed reasons bounds them.
+  `wake_event` also counts run-loop wakes that deliver no winit event.
 - `p99_us_le` is an approximate percentile **upper bound** from fixed log2
   microsecond buckets, not an exact p99. Untimed counters have zero timing fields;
   `max_value` records high-water values.
@@ -338,6 +360,39 @@ process CPU, DA1 success, and optional stderr/native samples. Instrumented runs
 are diagnostic evidence, not headline comparison scores. None of these commands
 publishes or overwrites `BENCHMARK.md`.
 
+### Idle probe (macOS)
+
+[`scripts/compare/idle-probe.py`](../scripts/compare/idle-probe.py) measures what
+an idle, or nearly idle, window costs:
+
+```sh
+cargo build --release --locked
+python3 scripts/compare/idle-probe.py --perf                    # default scenarios
+python3 scripts/compare/idle-probe.py --perf --scenarios blink,steady --seconds 60
+python3 scripts/compare/idle-probe.py --perf --scenarios hover  # manual: move the pointer
+```
+
+Each scenario starts a fresh Cometty with isolated `HOME`/XDG directories and a
+private config. Several tabs are opened by restoring a written session, so no
+keystrokes are posted. Every tab runs the benchmark agent instead of a shell.
+The agent blocks on a FIFO, so it adds no wakeups. Optional agent ops prepare the
+screen: `fill` writes a screen of text, and `tick` rewrites a 15-cell status at a
+fixed rate, like a TUI clock or spinner. After `--settle` seconds the probe diffs
+`proc_pid_rusage` over `--seconds`. It reports retired instructions, process CPU,
+interrupt and package-idle wakeups, and CPU energy (`ri_energy_nj`, which
+excludes GPU and WindowServer work). Use instructions to compare revisions: CPU
+time and energy depend on core placement. With `--perf` it also aggregates the
+periodic counter reports that lie wholly inside the window: frames, wake sources,
+supervisor polls, and per-frame phases. `--sample-seconds N` records a native call
+graph *after* the window, so sampling does not perturb the counters. Artifacts go
+to `target/perf/idle-<UTC>/`.
+
+The probe only cleans up its own processes. Keep the probe windows uncovered,
+and keep the pointer away from them unless the scenario asks for it. An occluded
+window suspends rendering, and pointer motion adds frames; the counters show both.
+Results are host-specific diagnostics. See [idle CPU and energy](idle.md) for
+measured results and their interpretation.
+
 ## Long-session stress results (measured)
 
 These numbers come from one display-backed run on 2026-10-26. They are **measurements
@@ -390,3 +445,5 @@ grows with the number of tabs ever opened, means something is cloning
 `EventLoopProxy` on a per-turn or per-tab path again. See the
 [event-loop decisions](architecture.md#decisions-that-shape-the-event-loop). Use
 `sample PID` to confirm. The spinning main thread sits in `CFRunLoopAddSource`.
+For the steady idle cost (wakeups, frames per second, per-frame CPU), use the
+[idle probe](#idle-probe-macos) instead.

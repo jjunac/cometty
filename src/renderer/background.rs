@@ -338,6 +338,8 @@ impl super::Renderer {
         }
         let vert_count = verts.len();
         self.bg_scratch = verts;
+        crate::perf::add(crate::perf::Metric::BgVertices, vert_count);
+        crate::perf::peak(crate::perf::Metric::BgVertices, vert_count);
 
         if let Some(cap) = next_bg_capacity(self.bg_vertex_capacity, vert_count) {
             self.bg_vertex_capacity = cap;

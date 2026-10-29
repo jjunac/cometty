@@ -40,6 +40,7 @@ tests or headless timings with native-memory, GUI-latency, or energy verificatio
 | Release / macOS bundle | `scripts/{release,bundle-macos}.sh`, `packaging/macos/`, `.github/workflows/release.yml` | [Development](docs/development.md#releasing) |
 | Input / search / links / titles | `src/app/{keyboard,mouse,search,links,tab}.rs`, pure `src/{input,search,selection,links,procinfo}.rs` | [Interaction](docs/interaction.md) |
 | Storage limits / diagnostics | History, input, parser, search and renderer ownership | [Memory](docs/memory.md), [profiling](docs/performance.md) |
+| Idle CPU / wakeups / energy | `src/perf.rs` counters, `scripts/compare/idle-probe.py` (`make bench-idle`) | [Idle CPU and energy](docs/idle.md) |
 
 ## Critical invariants
 

@@ -195,6 +195,9 @@ fn supervise(supervisor: Arc<Supervisor>) {
                         .wait_while(queue, |queue| queue.incoming.is_empty())
                         .unwrap_or_else(|p| p.into_inner())
                 } else {
+                    // Child exit has no notification here: with any job
+                    // alive this is a fixed-rate poll (see docs/idle.md).
+                    crate::perf::add(crate::perf::Metric::SupervisorPoll, 1);
                     supervisor
                         .changed
                         .wait_timeout(queue, POLL_INTERVAL)

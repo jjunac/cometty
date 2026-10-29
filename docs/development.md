@@ -79,7 +79,8 @@ git diff --check
 
 `make fmt` rewrites formatting; `verify` only checks it. `make help` lists the
 remaining targets: build/run, release tagging, the headless benchmark, the
-cross-terminal comparison, opt-in probes, profiling, bundling, and locked dependency inventories. Those preserve
+cross-terminal comparison, the idle probe, opt-in probes, profiling, bundling,
+and locked dependency inventories. Those preserve
 the commands and limitations documented here and in [performance](performance.md).
 
 [CI](../.github/workflows/ci.yml) runs `cargo test`,

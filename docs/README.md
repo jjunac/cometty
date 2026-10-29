@@ -21,6 +21,7 @@ maintaining it.
 | [Interaction](interaction.md) | Keyboard/IME focus, search, selection, links, or tab labels |
 | [Memory](memory.md) | Storage budgets, retained capacity, known gaps, or memory diagnostics |
 | [Performance](performance.md) | Release benchmarks, phase counters, profiling, or interpreting results |
+| [Idle CPU and energy](idle.md) | Idle wakeups, frame sources, per-frame costs, and the plan to reduce them |
 | [Throughput fixes and diagnosis](throughput.md) | Shipped fixes, same-host validation, remaining limits, and the preserved investigation baseline |
 | [Roadmap](roadmap.md) | Planned features and proposed designs (not yet implemented) |
 

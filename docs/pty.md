@@ -118,10 +118,13 @@ On `PtySession::drop`:
    potentially sleeping process-kill helper on the UI thread.
 
 The supervisor independently polls all owned children for natural exit and
-joins **only finished** workers. It sleeps when no jobs exist. A startup guard
-owns the child immediately after spawn and submits the same cleanup if later
-worker creation fails. The parent's slave handle is dropped after spawn so it
-cannot keep EOF from reaching the reader.
+joins **only finished** workers. It sleeps when no jobs exist, but while any job
+exists it polls every 25 ms. That is ~35 wakeups per second for an idle window
+with a shell, the largest idle wakeup source; see
+[idle CPU and energy](idle.md#1-the-pty-supervisors-fixed-poll). A startup
+guard owns the child immediately after spawn and submits the same cleanup if
+later worker creation fails. The parent's slave handle is dropped after spawn so
+it cannot keep EOF from reaching the reader.
 
 Unix close policy:
 

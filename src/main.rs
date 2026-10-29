@@ -112,8 +112,17 @@ pub(crate) fn parse_cli_args(args: &[String]) -> anyhow::Result<CliParsed> {
 }
 
 impl ApplicationHandler<UserEvent> for App {
-    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
         self.pty_schedule.begin_turn();
+        match cause {
+            winit::event::StartCause::ResumeTimeReached { .. } => {
+                perf::add(perf::Metric::WakeTimer, 1);
+            }
+            winit::event::StartCause::WaitCancelled { .. } | winit::event::StartCause::Poll => {
+                perf::add(perf::Metric::WakeEvent, 1);
+            }
+            winit::event::StartCause::Init => {}
+        }
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -285,6 +294,10 @@ impl ApplicationHandler<UserEvent> for App {
         if !win_ok {
             return;
         }
+        perf::add(perf::Metric::WindowEvent, 1);
+        if matches!(event, WindowEvent::CursorMoved { .. }) {
+            perf::add(perf::Metric::PointerEvent, 1);
+        }
         // egui chrome first: scrollbar hover/drag consumes pointer events.
         // Exception: Tab while the terminal owns the keyboard.
         // `egui-winit` marks every Tab consumed (focus navigation), so the
@@ -310,6 +323,7 @@ impl ApplicationHandler<UserEvent> for App {
             && !matches!(event, WindowEvent::RedrawRequested)
             && let Some(w) = self.window.as_ref()
         {
+            perf::add(perf::Metric::RequestEguiInput, 1);
             w.request_redraw();
         }
         match event {
@@ -406,6 +420,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        perf::add(perf::Metric::LoopTurn, 1);
         // Fallback drain in case a wake was coalesced. When the last
         // tab's shell has exited there is nothing left to show.
         if self.drain_pty() {
@@ -443,6 +458,7 @@ impl ApplicationHandler<UserEvent> for App {
             Duration::from_millis(self.config.cursor.blink_ms.max(1)),
         );
         if repaint && let Some(w) = self.window.as_ref() {
+            perf::add(perf::Metric::RequestBlink, 1);
             w.request_redraw();
         }
         if !suspended {
@@ -451,6 +467,7 @@ impl ApplicationHandler<UserEvent> for App {
         if !suspended && sync_at.is_none() {
             if self.output_presentation.take_due(now) {
                 if let Some(w) = self.window.as_ref() {
+                    perf::add(perf::Metric::RequestOutputDeadline, 1);
                     w.request_redraw();
                 }
             } else {
@@ -463,6 +480,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if deadline <= now {
                     if self.egui_repaint_at == Some(deadline) {
                         self.egui_repaint_at = None;
+                        perf::add(perf::Metric::RequestEguiDeadline, 1);
                     }
                     if let Some(w) = self.window.as_ref() {
                         w.request_redraw();
@@ -479,7 +497,6 @@ impl ApplicationHandler<UserEvent> for App {
         }
         next = app::scheduling::earlier(next, self.config_saver.deadline());
         next = app::scheduling::earlier(next, self.session.deadline());
-        perf::report_due(now);
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
@@ -495,10 +512,13 @@ impl ApplicationHandler<UserEvent> for App {
         self.tabs.clear();
         pty::finish_shutdown();
         self.finish_config_saves();
+        perf::report_final();
     }
 }
 
 fn main() -> anyhow::Result<()> {
+    // Opt-in counters: start their clock (and reporter) at launch.
+    perf::start();
     // CLI first: `--help` / `--list-themes` return before any GUI setup.
     let Some((theme_override, config_path)) = resolve_cli()? else {
         return Ok(());
