@@ -1,10 +1,52 @@
 # Idle CPU and energy
 
 This page covers what cometty costs while nothing happens on screen, why, how to
-measure it, and the plan to reduce it. Each statement below is labeled as
-implemented behavior, a measurement (one host, not a guarantee), a modeled
-estimate, or a proposal. The investigation ran on 2026-10-29 at `28d9a69`, plus
-the counters described in [performance](performance.md#application-phase-counters).
+measure it, the plan to reduce it, and the fixes shipped so far. Each statement
+below is labeled as implemented behavior, a measurement (one host, not a
+guarantee), a modeled estimate, or a proposal. The investigation ran on
+2026-10-29 at `28d9a69`, plus the counters described in
+[performance](performance.md#application-phase-counters) (committed as
+`c0b0f78`).
+
+## Shipped fixes (2026-10-29)
+
+The investigation below is preserved as the **pre-fix baseline**. Its
+code-path descriptions refer to that revision, not to current behavior. Each
+[plan](#plan) step is marked shipped or proposed. Implemented so far:
+
+1. **Event-driven PTY supervision (step 1).** Workers start through
+   `Startup::spawn_worker`. Its drop guard, which also runs on panic, counts the
+   worker as finished and wakes the supervisor; close requests publish the same
+   way, under the queue lock. The 25 ms timed wait remains only while a job is
+   closing, has a finished worker not yet joined, or has a finished worker while
+   its child is unreaped. A shell that exits while a background job holds the
+   PTY now stays a zombie until its tab closes; see
+   [PTY lifecycle](pty.md#decision-cancellation-aware-io-supervised-child-cleanup).
+
+### Same-host results
+
+Apple M3 Pro, macOS 26.7.1, AC power, release builds, and the baseline's probe
+settings: a fresh process per scenario, 6 s to settle, a 40 s window, and in-app
+counters from the periodic reports inside it. `before` is `c0b0f78`; each step's
+binary adds that step to the previous ones. Every run had zero pointer events
+and zero skipped frames. These are measurements on one host, not guarantees.
+
+| Scenario | Binary | M instr/s | Interrupt wakeups/s | Frames/s | Supervisor polls/s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `steady` | before | 0.76 | 35.5 | 0 | 35.0 |
+| `steady` | step 1 | 0.05 | 0.4 | 0 | 0 |
+| `steady-5tabs` | before | 1.63 | 35.4 | 0 | 35.1 |
+| `steady-5tabs` | step 1 | 0.05 | 0.4 | 0 | 0 |
+| `blink` | before | 10.17 | 38.0 | 1.87 | 35.1 |
+| `blink` | step 1 | 9.37 | 2.9 | 1.87 | 0 |
+
+Step 1 removes the supervisor's wakeups whatever the tab count: five idle shells
+cost the same as one. Blink frames are untouched by it.
+
+## Investigation baseline (before fixes)
+
+Everything from here to the [plan](#plan) describes the code at `c0b0f78` and
+was measured there.
 
 ## Summary
 
@@ -215,14 +257,15 @@ occlusion pre-check (the wgpu#8309 workaround) can race a window that is being
 hidden. This is not an idle-CPU cost, but parsing and input stall with it. It
 needs its own investigation.
 
-## Plan (proposed)
+## Plan
 
 The steps are ordered by impact per unit of risk. Each preserves the
 [critical invariants](../AGENTS.md#critical-invariants). Verify each one with
 unit tests and an idle-probe A/B on instructions, wakeups, and frames, run on
-the same host.
+the same host. Shipped steps are marked; their results are in
+[shipped fixes](#shipped-fixes-2026-10-29).
 
-### Step 1 — Event-driven child supervision
+### Step 1 — Event-driven child supervision (shipped)
 
 Replace the fixed poll with notifications. The timed poll then runs only while a
 job actually needs time-based steps.
@@ -239,16 +282,16 @@ job actually needs time-based steps.
 - Unchanged: the supervisor owns children until they are reaped, never signals a
   cached PID, never runs a UI-thread wait, and keeps the shared exit deadline.
 - Remaining gap: a shell that exits while a descendant keeps the slave open
-  produces no EOF. It stays a zombie until its tab closes; today it is reaped
-  within 25 ms. Its tab already stays open in that case. If that matters, add
-  exact exit events: kqueue `EVFILT_PROC`/`NOTE_EXIT` on macOS and BSD, or a
+  produces no EOF. It stays a zombie until its tab closes; before step 1 it was
+  reaped within 25 ms. Its tab already stays open in that case. If that matters,
+  add exact exit events: kqueue `EVFILT_PROC`/`NOTE_EXIT` on macOS and BSD, or a
   pidfd on Linux, with today's poll as the fallback elsewhere.
-- **Prototype (measured, not merged).** The diff is +100/−50 lines, mostly
+- **Prototype (measured before merging).** The diff was +100/−50 lines, mostly
   re-indented worker spawning. It passed every PTY test, and the lifecycle tests
   eight times in a row. Those include natural exit reaped before tab drop,
   hangup escalation, and the isolated descriptor and thread baseline.
 
-  | Scenario | Today | Prototype |
+  | Scenario | Baseline | Prototype |
   | --- | --- | --- |
   | `steady` | 0.76 M instr/s, 35.6 wakeups/s, 0.093% CPU | 0.051 M instr/s, 0.45 wakeups/s, 0.004% CPU |
   | `blink` | 9.99 M instr/s, 38.0 wakeups/s, 0.38% CPU | 9.36 M instr/s, 2.9 wakeups/s, 0.29% CPU |
@@ -257,9 +300,14 @@ job actually needs time-based steps.
   reporter itself. A five-tab run was disturbed by pointer activity in one
   interval; its quiet 10 s intervals had no supervisor polls and at most three
   loop turns.
-- Tests to add: an idle-supervisor assertion in the isolated resource probe
-  (no timed waits while one idle child exists), and a lost-wakeup stress test
-  for close requests.
+- **Shipped** with the guard created inside the worker thread (a failed spawn
+  cannot count a worker that never ran) and these tests: the isolated resource
+  probe asserts that one idle child leaves the supervisor in its timer-free wait
+  with no timed waits, and fake-child stress tests race close requests and
+  returning or panicking workers against the supervisor's wait. A test-only hook
+  holds the lock between the idle predicate and the wait, so a wakeup published
+  without the lock hangs those tests instead of needing a nanosecond-wide
+  coincidence.
 
 ### Step 2 — Cursor blink policy
 
@@ -347,7 +395,7 @@ GPU.
 
 ## Expected end state
 
-| Quiet window | Today (measured) | Step 1 (measured prototype) | Steps 1–2 (modeled from `steady`) |
+| Quiet window | Baseline (measured) | Step 1 (shipped, measured) | Steps 1–2 (modeled from `steady`) |
 | --- | --- | --- | --- |
 | Instructions | 10 M/s | 9.4 M/s | ~0.05 M/s |
 | Wakeups | 38/s | 2.9/s | ~0.5/s |

@@ -69,6 +69,9 @@ tests or headless timings with native-memory, GUI-latency, or energy verificatio
   Never wait/kill synchronously/join live workers on the UI thread. The supervisor
   owns children until reaped; never signal a cached PID afterward or recursively
   hunt detached descendants. Preserve data-before-Exit and the shared exit deadline.
+  Start workers with `Startup::spawn_worker`; close requests and worker exits must
+  publish under the supervisor's queue lock before notifying, because it waits
+  without a timer unless a job is closing or has an unjoined/unreaped finished worker.
 - **GPU:** all frame writes/submissions use `renderer::frame`'s returned-outcome
   boundary. Mark upload calls before partial-failure dependencies; flush pending
   uploads on a live-device skip/error and free textures after submission. Keep

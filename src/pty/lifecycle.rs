@@ -1,7 +1,13 @@
 //! One process-wide supervisor reaps children and joins completed PTY workers.
 //! The UI only cancels I/O and requests shutdown; it never waits for a child.
+//!
+//! The supervisor sleeps without a timer unless a job needs time-based steps.
+//! Child exit itself has no notification here; the reader reaching EOF does,
+//! through the finished-worker guard below. Close requests and finished
+//! workers publish under the queue lock before notifying, so a supervisor
+//! between its wait predicate and its wait cannot miss either one.
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -16,12 +22,27 @@ type Child = Box<dyn portable_pty::Child + Send + Sync>;
 struct Queue {
     incoming: Vec<Job>,
     outstanding: usize,
+    /// Test-only: the supervisor is inside its timer-free wait.
+    #[cfg(test)]
+    parked: bool,
 }
 
 #[derive(Default)]
 struct Supervisor {
     queue: Mutex<Queue>,
     changed: Condvar,
+    #[cfg(test)]
+    timed_waits: AtomicUsize,
+}
+
+impl Supervisor {
+    /// Publish a change made outside the queue (an atomic store) under the
+    /// queue lock: a supervisor between its wait predicate and its wait
+    /// cannot miss the notification.
+    fn wake(&self) {
+        drop(self.queue.lock().unwrap_or_else(|p| p.into_inner()));
+        self.changed.notify_all();
+    }
 }
 
 static SUPERVISOR: OnceLock<Result<Arc<Supervisor>, io::Error>> = OnceLock::new();
@@ -29,6 +50,9 @@ static SUPERVISOR: OnceLock<Result<Arc<Supervisor>, io::Error>> = OnceLock::new(
 struct Control {
     closing: AtomicBool,
     foreground: AtomicI32,
+    /// Workers that have returned or panicked, joined or not. A finished
+    /// reader means the child is exiting or the session is closing.
+    finished_workers: AtomicUsize,
     #[cfg(unix)]
     cancellation: Arc<super::unix::Cancellation>,
     #[cfg(test)]
@@ -56,7 +80,7 @@ impl Session {
             self.control.closing.store(true, Ordering::Release);
             #[cfg(unix)]
             self.control.cancellation.cancel();
-            self.supervisor.changed.notify_all();
+            self.supervisor.wake();
         }
     }
 
@@ -80,6 +104,8 @@ impl Session {
 struct Job {
     child: Option<Child>,
     workers: Vec<JoinHandle<()>>,
+    /// Worker handles already joined; compared with `finished_workers`.
+    joined: usize,
     session: Session,
     hangup_at: Option<Instant>,
     forced: bool,
@@ -107,6 +133,7 @@ impl Startup {
             control: Arc::new(Control {
                 closing: AtomicBool::new(false),
                 foreground: AtomicI32::new(0),
+                finished_workers: AtomicUsize::new(0),
                 #[cfg(unix)]
                 cancellation,
                 #[cfg(test)]
@@ -128,6 +155,7 @@ impl Startup {
             job: Some(Job {
                 child: Some(child),
                 workers: Vec::with_capacity(2),
+                joined: 0,
                 session,
                 hangup_at: None,
                 forced: false,
@@ -136,8 +164,38 @@ impl Startup {
         }
     }
 
-    pub(super) fn worker(&mut self, worker: JoinHandle<()>) {
-        self.job.as_mut().unwrap().workers.push(worker);
+    /// Start a supervised worker. Its return, or its panic, is announced to
+    /// the supervisor, which otherwise sleeps without a timer.
+    pub(super) fn spawn_worker(
+        &mut self,
+        name: &str,
+        work: impl FnOnce() + Send + 'static,
+    ) -> io::Result<()> {
+        /// Runs on return and during unwinding. Armed inside the thread, so
+        /// a failed spawn cannot count a worker that never ran.
+        struct Finished(Session);
+        impl Drop for Finished {
+            fn drop(&mut self) {
+                self.0
+                    .control
+                    .finished_workers
+                    .fetch_add(1, Ordering::AcqRel);
+                self.0.supervisor.wake();
+            }
+        }
+        let job = self
+            .job
+            .as_mut()
+            .expect("startup owns its job until activation");
+        let session = job.session.clone();
+        let worker = std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || {
+                let _finished = Finished(session);
+                work();
+            })?;
+        job.workers.push(worker);
+        Ok(())
     }
 
     pub(super) fn activate(mut self) -> Session {
@@ -184,25 +242,42 @@ fn submit(job: Job) {
 }
 
 fn supervise(supervisor: Arc<Supervisor>) {
-    let mut jobs = Vec::new();
+    let mut jobs: Vec<Job> = Vec::new();
     loop {
         {
             let mut queue = supervisor.queue.lock().unwrap_or_else(|p| p.into_inner());
             if queue.incoming.is_empty() {
-                queue = if jobs.is_empty() {
-                    supervisor
-                        .changed
-                        .wait_while(queue, |queue| queue.incoming.is_empty())
-                        .unwrap_or_else(|p| p.into_inner())
-                } else {
-                    // Child exit has no notification here: with any job
-                    // alive this is a fixed-rate poll (see docs/idle.md).
+                queue = if jobs.iter().any(Job::needs_poll) {
+                    // Hangup grace, escalation and reaping an exiting child
+                    // are time-based: poll only while one of them is pending.
                     crate::perf::add(crate::perf::Metric::SupervisorPoll, 1);
+                    #[cfg(test)]
+                    supervisor.timed_waits.fetch_add(1, Ordering::Relaxed);
                     supervisor
                         .changed
                         .wait_timeout(queue, POLL_INTERVAL)
                         .unwrap_or_else(|p| p.into_inner())
                         .0
+                } else {
+                    // New jobs, close requests and finished workers all
+                    // notify under this lock, so an idle wait needs no timer.
+                    #[cfg(test)]
+                    {
+                        queue.parked = true;
+                    }
+                    while queue.incoming.is_empty() && !jobs.iter().any(Job::needs_poll) {
+                        #[cfg(test)]
+                        widen_lost_wakeup_window();
+                        queue = supervisor
+                            .changed
+                            .wait(queue)
+                            .unwrap_or_else(|p| p.into_inner());
+                    }
+                    #[cfg(test)]
+                    {
+                        queue.parked = false;
+                    }
+                    queue
                 };
             }
             jobs.append(&mut queue.incoming);
@@ -232,6 +307,19 @@ fn supervise(supervisor: Arc<Supervisor>) {
 }
 
 impl Job {
+    /// Time-based steps are pending: hangup grace or escalation while closing,
+    /// a finished worker whose handle is not joinable yet, or a finished
+    /// worker (the reader at EOF) while the child is still unreaped. A child
+    /// whose exit produces no EOF (a descendant keeps the slave open) stays
+    /// unreaped until its tab closes.
+    fn needs_poll(&self) -> bool {
+        let control = &self.session.control;
+        let finished = control.finished_workers.load(Ordering::Acquire);
+        control.closing.load(Ordering::Acquire)
+            || finished > self.joined
+            || (finished > 0 && self.child.is_some())
+    }
+
     fn poll(&mut self) -> bool {
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
@@ -266,6 +354,7 @@ impl Job {
         let mut index = 0;
         while index < self.workers.len() {
             if self.workers[index].is_finished() {
+                self.joined += 1;
                 if self.workers.swap_remove(index).join().is_err() {
                     log::warn!("PTY worker panicked");
                 }
@@ -343,9 +432,149 @@ pub(super) fn finish_shutdown() {
     }
 }
 
+/// Test-only view of the process-wide supervisor: supervised jobs, whether
+/// it sits in its timer-free wait, and how many timed waits it has started.
+#[cfg(test)]
+pub(super) fn supervisor_state() -> (usize, bool, usize) {
+    let supervisor = supervisor().expect("PTY supervisor");
+    let queue = supervisor.queue.lock().unwrap_or_else(|p| p.into_inner());
+    (
+        queue.outstanding,
+        queue.parked,
+        supervisor.timed_waits.load(Ordering::Relaxed),
+    )
+}
+
+/// Test-only: while nonzero, an idle supervisor keeps its lock for a moment
+/// between its wait predicate and the wait itself. A wakeup published without
+/// that lock would then be lost often enough for a stress test to hang on it,
+/// instead of needing a nanosecond-wide coincidence.
+#[cfg(test)]
+static WIDEN_LOST_WAKEUP_WINDOW: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+fn widen_lost_wakeup_window() {
+    if WIDEN_LOST_WAKEUP_WINDOW.load(Ordering::Relaxed) > 0 {
+        let until = Instant::now() + Duration::from_micros(20);
+        while Instant::now() < until {
+            std::hint::spin_loop();
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// Child without a process: it exits when `exited` is set or when the
+    /// supervisor kills it (no pid, so the non-signal path is used).
+    #[derive(Debug)]
+    struct FakeChild(Arc<AtomicBool>);
+
+    impl portable_pty::ChildKiller for FakeChild {
+        fn kill(&mut self) -> io::Result<()> {
+            self.0.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(FakeChild(self.0.clone()))
+        }
+    }
+
+    impl portable_pty::Child for FakeChild {
+        fn try_wait(&mut self) -> io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(self
+                .0
+                .load(Ordering::Acquire)
+                .then(|| portable_pty::ExitStatus::with_exit_code(0)))
+        }
+
+        fn wait(&mut self) -> io::Result<portable_pty::ExitStatus> {
+            unreachable!("the supervisor never blocks on a child")
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    fn fake_startup() -> (Startup, Arc<AtomicBool>) {
+        Startup::supervisor().unwrap();
+        let exited = Arc::new(AtomicBool::new(false));
+        let cancellation = Arc::new(super::super::unix::Cancellation::new().unwrap());
+        let child: Child = Box::new(FakeChild(exited.clone()));
+        (Startup::new(child, cancellation), exited)
+    }
+
+    /// Spread the racing request across the supervisor's wake/poll/wait cycle.
+    fn stagger(round: u32) {
+        let until = Instant::now() + Duration::from_nanos(u64::from(round % 97) * 500);
+        while Instant::now() < until {
+            std::hint::spin_loop();
+        }
+    }
+
+    /// Widens the supervisor's predicate-to-wait window while alive; other
+    /// tests sharing the supervisor are only slowed down.
+    struct Widened;
+
+    impl Widened {
+        fn new() -> Self {
+            WIDEN_LOST_WAKEUP_WINDOW.fetch_add(1, Ordering::Relaxed);
+            Self
+        }
+    }
+
+    impl Drop for Widened {
+        fn drop(&mut self) {
+            WIDEN_LOST_WAKEUP_WINDOW.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn close_requests_racing_the_supervisor_wait_are_never_lost() {
+        // Each job's child has exited, so the first poll after the close
+        // finishes it. Without a job that needs a timer, the supervisor waits
+        // untimed: a close published between its predicate and its wait
+        // would hang this job forever, not merely delay it.
+        let _widened = Widened::new();
+        for round in 0..2_000 {
+            let (startup, exited) = fake_startup();
+            let session = startup.activate();
+            stagger(round);
+            exited.store(true, Ordering::Release);
+            session.shutdown(None);
+            assert!(session.wait(EXIT_TIMEOUT), "close request {round} was lost");
+            assert!(session.reaped());
+        }
+    }
+
+    #[test]
+    fn returning_or_panicking_workers_wake_an_idle_supervisor() {
+        // Natural exit without a close: the child is gone and the only
+        // worker finishes later. Its guard alone must wake the supervisor to
+        // join it, including when the worker panics.
+        let _widened = Widened::new();
+        for round in 0..48 {
+            let (mut startup, exited) = fake_startup();
+            exited.store(true, Ordering::Release);
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            startup
+                .spawn_worker("test-worker", move || {
+                    let _ = released.recv();
+                    assert!(round % 2 == 0, "worker panics are announced too");
+                })
+                .unwrap();
+            let session = startup.activate();
+            stagger(round * 7);
+            drop(release);
+            assert!(
+                session.wait(EXIT_TIMEOUT),
+                "worker completion {round} was lost"
+            );
+        }
+    }
 
     #[test]
     fn abandoned_startup_reaps_child_and_joins_started_worker() {
@@ -364,14 +593,16 @@ mod tests {
         let session = startup.job.as_ref().unwrap().session.clone();
         let worker_done = Arc::new(AtomicBool::new(false));
         let done = worker_done.clone();
-        startup.worker(std::thread::spawn(move || {
-            use std::io::Read;
-            assert_eq!(
-                reader.read(&mut [0u8]).unwrap_err().kind(),
-                io::ErrorKind::ConnectionAborted
-            );
-            done.store(true, Ordering::Release);
-        }));
+        startup
+            .spawn_worker("test-reader", move || {
+                use std::io::Read;
+                assert_eq!(
+                    reader.read(&mut [0u8]).unwrap_err().kind(),
+                    io::ErrorKind::ConnectionAborted
+                );
+                done.store(true, Ordering::Release);
+            })
+            .unwrap();
         // Models an error creating the second worker: the first handle and
         // the already-spawned child must not escape through an early return.
         drop(startup);

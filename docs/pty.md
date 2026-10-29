@@ -117,14 +117,26 @@ On `PtySession::drop`:
 4. Return without joining a live worker, waiting for a child, or invoking a
    potentially sleeping process-kill helper on the UI thread.
 
-The supervisor independently polls all owned children for natural exit and
-joins **only finished** workers. It sleeps when no jobs exist, but while any job
-exists it polls every 25 ms. That is ~35 wakeups per second for an idle window
-with a shell, the largest idle wakeup source; see
-[idle CPU and energy](idle.md#1-the-pty-supervisors-fixed-poll). A startup
-guard owns the child immediately after spawn and submits the same cleanup if
-later worker creation fails. The parent's slave handle is dropped after spawn so
-it cannot keep EOF from reaching the reader.
+The supervisor reaps owned children and joins **only finished** workers. It is
+event-driven. Workers start through `Startup::spawn_worker`, whose drop guard
+also runs on panic: it counts the worker as finished and wakes the supervisor.
+The reader returning at EOF is therefore the natural-exit signal. Close requests
+and finished workers both **publish under the queue lock before notifying**, so
+a supervisor between its wait predicate and its wait cannot miss either one. The
+supervisor uses its 25 ms timed wait only while some job needs time-based steps:
+the job is closing (hangup grace and escalation), has a finished worker whose
+handle is not joinable yet, or has a finished worker while its child is
+unreaped. Otherwise it waits without a timer, even while shells are alive, and
+an idle window gets no supervisor wakeups.
+
+Accepted gap: a shell that exits while a background job still holds the slave
+produces no EOF. It stays a zombie until its tab closes, and its tab stays open
+because no Exit arrives. Exact exit events (kqueue `EVFILT_PROC`/`NOTE_EXIT`,
+a Linux pidfd) would close this gap; they are not implemented.
+
+A startup guard owns the child immediately after spawn and submits the same
+cleanup if later worker creation fails. The parent's slave handle is dropped
+after spawn so it cannot keep EOF from reaching the reader.
 
 Unix close policy:
 
@@ -152,8 +164,12 @@ cargo test --locked app::pty_io::
 Real Unix PTY tests need no display. They cover idle raw children, saturated
 input/output, paste/key/reply ordering, hangup-resistant escalation, natural
 exit/final-output ordering, and partial startup. Process-wide thread/descriptor
-counts run in an isolated subprocess so parallel tests cannot corrupt baselines.
+counts run in an isolated subprocess so parallel tests cannot corrupt baselines;
+that process also asserts that one idle child causes no timed supervisor waits.
 Notification races and service order/budgets have deterministic tests.
+Supervisor wakeups (close requests, returning and panicking workers) have stress
+tests with fake children; a test-only hook holds the lock between the idle
+predicate and the wait, so a wakeup published without the lock hangs them.
 
 The ignored scheduling probe measures request-to-parse through production queues
 and scheduling helpers, **not GUI echo latency**; see [performance](performance.md).

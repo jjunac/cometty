@@ -252,39 +252,31 @@ impl PtySession {
         let (tx_from_pty, output) = output_channel(move || output_wake());
         let (tx_to_pty, rx_to_pty) = input::channel(move || waker());
 
-        startup.worker(
-            std::thread::Builder::new()
-                .name("pty-reader".into())
-                .spawn(move || {
-                    let mut buf = [0u8; PTY_READ_CHUNK];
-                    loop {
-                        match reader.read(&mut buf) {
-                            Ok(0) => {
-                                tx_from_pty.send(PtyEvent::Exit);
-                                break;
-                            }
-                            Ok(n) => {
-                                if !tx_from_pty.send(PtyEvent::Data(buf[..n].to_vec())) {
-                                    break;
-                                }
-                            }
-                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
-                                continue;
-                            }
-                            Err(_) => {
-                                tx_from_pty.send(PtyEvent::Exit);
-                                break;
-                            }
+        startup.spawn_worker("pty-reader", move || {
+            let mut buf = [0u8; PTY_READ_CHUNK];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => {
+                        tx_from_pty.send(PtyEvent::Exit);
+                        break;
+                    }
+                    Ok(n) => {
+                        if !tx_from_pty.send(PtyEvent::Data(buf[..n].to_vec())) {
+                            break;
                         }
                     }
-                })?,
-        );
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                        continue;
+                    }
+                    Err(_) => {
+                        tx_from_pty.send(PtyEvent::Exit);
+                        break;
+                    }
+                }
+            }
+        })?;
 
-        startup.worker(
-            std::thread::Builder::new()
-                .name("pty-writer".into())
-                .spawn(move || rx_to_pty.run(writer))?,
-        );
+        startup.spawn_worker("pty-writer", move || rx_to_pty.run(writer))?;
         let lifecycle = Some(startup.activate());
 
         Ok(Self {

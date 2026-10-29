@@ -288,7 +288,30 @@ fn isolated_resource_probe() {
         finish_shutdown();
         until(|| descriptors() == baseline_fds && threads() == baseline_threads);
     }
+    // This process owns the supervisor, so its counters are exact. With one
+    // idle shell, nothing is closing or exiting: the supervisor must park in
+    // its timer-free wait and stay there (the former design polled every
+    // 25 ms while any child existed).
+    let session = spawn("stty raw -echo; printf READY; exec /bin/sleep 60");
+    ready(&session);
+    until(|| {
+        let (jobs, parked, _) = lifecycle::supervisor_state();
+        jobs == 1 && parked
+    });
+    let (_, _, timed_before) = lifecycle::supervisor_state();
+    // An observation window for the absence of polls, not a timing assertion.
+    std::thread::sleep(Duration::from_millis(250));
+    let (jobs, parked, timed_after) = lifecycle::supervisor_state();
+    assert_eq!((jobs, parked), (1, true), "idle supervisor left its wait");
+    assert_eq!(
+        timed_after, timed_before,
+        "idle supervisor polled on a timer"
+    );
+    // Closing is time-based again (hangup grace), then the supervisor parks.
+    close(session);
+    finish_shutdown();
+    until(|| lifecycle::supervisor_state().0 == 0);
     println!(
-        "PTY resources after repeated close: fds={baseline_fds}, threads={baseline_threads} (includes one supervisor); input charges=0; children reaped"
+        "PTY resources after repeated close: fds={baseline_fds}, threads={baseline_threads} (includes one supervisor); input charges=0; children reaped; idle supervisor: no timed waits"
     );
 }
