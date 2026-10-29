@@ -448,24 +448,34 @@ job actually needs time-based steps.
   the repaint rule, the strip hit test (close boxes above tabs), the scrollbar's
   interactive state, and the coalescing.
 
-### Step 4 — Make the remaining frames cheaper
+### Step 4 — Make the remaining frames cheaper (4.1–4.2 shipped)
 
 These steps need measurement one at a time. The phase table above gives each
-sub-step's ceiling.
+sub-step's ceiling. Sub-steps 4.1 and 4.2 shipped; 4.3 was measured and
+dropped; 4.4–4.6 remain proposed.
 
-1. **Colors:** build `fg_col`/`deco_col` only when a block element or decoration
+1. **Colors (shipped):** build `fg_col`/`deco_col` only when a block element or decoration
    uses them, and replace `powf` with a 256-entry sRGB→linear table. This is a
    small, local change inside `background`, which costs 0.24–0.26 ms per blink
    frame in total.
-2. **Background geometry cache:** rebuild the cell quads only when the snapshot,
+2. **Background geometry cache (shipped):** rebuild the cell quads only when the snapshot,
    highlights (selection, search, link hints), metrics, or tab-bar offset
    change. Draw the cursor as a separate small draw. Blink frames then upload a
    few vertices instead of walking every cell.
-3. **egui reuse:** when the frame has no new egui input, no pending egui repaint,
+3. **egui reuse (tried, dropped):** when the frame has no new egui input, no pending egui repaint,
    and unchanged chrome inputs, skip `begin_pass`…`update_buffers` and redraw
    the last paint jobs. Chrome inputs are titles, active tab, scrollbar state,
    notices, panels, theme, size, and scale. On macOS this pass runs on every
    frame (0.12–0.14 ms plus its uploads).
+   **Measured once on top of 4.2:** the egui pass left every blink frame
+   (`egui_pass` 1.87 → 0/s), and the redraw callback fell from 0.41 to
+   0.29 ms. Yet whole-process instructions per blink frame rose from 1.93 to
+   2.68 M in all three `blink-forever*` scenarios, while tick frames improved
+   only 3–6%. The extra instructions were outside the redraw callback and
+   irregular between 10 s reports (43–57 M against a steady 35–37 M), so they
+   look like other threads' work; their source was not identified. The change
+   was dropped. A retry should first compare it with a variant that still
+   uploads egui buffers every frame, and sample other threads.
 4. **Changed rows from identity:** pass the snapshot's changed-row set to the
    renderer instead of hashing every cell in `diff_rows` (`rebuild`, 0.6 ms per
    update measured on efficiency cores). Keep the hash for metric, theme, and
