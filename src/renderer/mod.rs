@@ -90,6 +90,30 @@ fn surface_retry_delay(failures: &mut u8) -> Duration {
     delay
 }
 
+/// Pointer motion that is not painted accumulates in egui's pending input
+/// until the next frame. Collapse the trailing run of motion events to the
+/// newest one: egui only needs the latest position (or departure), and moving
+/// the mouse over the terminal for minutes must not queue thousands of events.
+/// Button, wheel and key events always request a frame, which drains the
+/// input, so they never sit inside that run.
+fn coalesce_pointer_motion(events: &mut Vec<egui::Event>) {
+    let motion = |event: &egui::Event| {
+        matches!(
+            event,
+            egui::Event::PointerMoved(_) | egui::Event::PointerGone
+        )
+    };
+    let run = events
+        .iter()
+        .rev()
+        .take_while(|event| motion(event))
+        .count();
+    if run > 1 {
+        let newest = events.len() - 1;
+        events.drain(events.len() - run..newest);
+    }
+}
+
 /// Pick the lowest-latency vsync present mode the surface supports:
 /// `Mailbox` never blocks the CPU on acquire and never queues stale
 /// frames (no tearing); elsewhere fall back to `AutoVsync`.
@@ -228,6 +252,9 @@ pub struct Renderer {
     fullscreen: bool,
     /// Painted find-bar rect (logical points), for press hit-testing.
     search_bar_rect: Option<egui::Rect>,
+    /// Hover-painted tab-strip elements of the last egui pass (logical
+    /// points, paint order), for pointer-motion repaint decisions.
+    tab_strip_targets: Vec<(crate::tabbar::StripTarget, [f32; 4])>,
     last_grid_version: u64,
     /// Cached "terminal forced window IME on" state (see
     /// [`Self::ensure_terminal_ime`]). Cleared while egui owns a text field
@@ -455,6 +482,7 @@ impl Renderer {
             // fullscreen resize goes through `resize`.
             fullscreen: false,
             search_bar_rect: None,
+            tab_strip_targets: Vec::new(),
             last_grid_version: u64::MAX,
             ime_terminal_enabled: false,
             egui_ctx,
@@ -726,6 +754,24 @@ impl Renderer {
         };
         let scale = self.scale_factor.max(1.0);
         rect.contains(egui::pos2(x_phys / scale, y_phys / scale))
+    }
+
+    /// Tab-strip element under physical `(x, y)`, as painted by the last
+    /// egui pass (horizontal strip scrolling included).
+    pub fn tab_strip_target(&self, x_phys: f32, y_phys: f32) -> crate::tabbar::StripTarget {
+        let scale = self.scale_factor.max(1.0);
+        crate::tabbar::strip_target_at(&self.tab_strip_targets, x_phys / scale, y_phys / scale)
+    }
+
+    /// egui owns the pointer, for example while dragging the scrollbar.
+    pub fn egui_is_using_pointer(&self) -> bool {
+        self.egui_ctx.egui_is_using_pointer()
+    }
+
+    /// Pointer motion that requests no frame: keep only the newest pending
+    /// pointer event in egui's input, see [`coalesce_pointer_motion`].
+    pub fn coalesce_pointer_motion(&mut self) {
+        coalesce_pointer_motion(&mut self.egui_state.egui_input_mut().events);
     }
 
     /// Thin orchestrator: rebuild text on version change, paint bg +
@@ -1065,6 +1111,38 @@ mod tests {
         // must replace lines before key construction, advancing the revision.
         rows[0][0].ch = 'X';
         assert_eq!(text::diff_rows(&mut hashes, &rows), Some(vec![0]));
+    }
+
+    #[test]
+    fn unpainted_pointer_motion_keeps_one_pending_event() {
+        use egui::{Event, PointerButton, pos2};
+        let press = Event::PointerButton {
+            pos: pos2(1.0, 1.0),
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // Minutes of motion over the grid with no frame in between.
+        let mut events = vec![press.clone()];
+        for i in 0..10_000 {
+            events.push(Event::PointerMoved(pos2(i as f32, 2.0)));
+            coalesce_pointer_motion(&mut events);
+            if i % 1000 == 0 {
+                events.push(Event::PointerGone);
+                coalesce_pointer_motion(&mut events);
+            }
+        }
+        // Earlier, painted input is untouched; only the newest motion stays.
+        assert_eq!(
+            events,
+            [press.clone(), Event::PointerMoved(pos2(9999.0, 2.0))]
+        );
+        events.push(Event::PointerGone);
+        coalesce_pointer_motion(&mut events);
+        assert_eq!(events, [press, Event::PointerGone]);
+        let mut single = vec![Event::PointerMoved(pos2(3.0, 4.0))];
+        coalesce_pointer_motion(&mut single);
+        assert_eq!(single, [Event::PointerMoved(pos2(3.0, 4.0))]);
     }
 
     #[test]

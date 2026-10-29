@@ -128,9 +128,9 @@ off by default. They aggregate:
   became occluded and stopped rendering), redraw requests by reason
   (`request_blink`, `request_egui_input`, `request_egui_deadline`,
   `request_egui_immediate`, `request_output`, `request_output_deadline`,
-  `request_chrome`), full egui passes (`egui_pass`), background vertices per
-  frame (`bg_vertices`: sum and `max_value`), and timed PTY-supervisor waits
-  (`supervisor_poll`).
+  `request_chrome`, `request_pointer`), full egui passes (`egui_pass`),
+  background vertices per frame (`bg_vertices`: sum and `max_value`), and timed
+  PTY-supervisor waits (`supervisor_poll`).
 - `process`: the whole process's CPU time over the interval (all threads,
   including Metal/AppKit queues and PTY workers) and, on macOS, its
   package-idle and interrupt wakeups and retired instructions
@@ -397,6 +397,13 @@ frames cost. `blink-forever-unfocused` launches a small second Cometty beside
 the measured window, which takes focus. The summary reports each run's focus
 changes and occlusions, launch included, next to pointer events and skipped
 frames.
+
+The manual `hover` scenario opens its window pinned at the top-left of the main
+display. macOS sends pointer motion only to the focused window, and a window
+launched just after the operator clicked elsewhere does not get focus. Click
+the window once during the settle time, then keep the pointer moving over the
+text. Normalize hover runs per pointer event, or compare runs whose
+`pointer_event` rates match.
 
 The probe only cleans up its own processes. Keep the probe windows uncovered,
 and keep the pointer away from them unless the scenario asks for it. An occluded

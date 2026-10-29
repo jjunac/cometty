@@ -82,6 +82,9 @@ pub struct App {
     pub(crate) pending_scale: Option<f32>,
     pub(crate) wheel_accum: f64,
     pub(crate) cursor_pos: Option<(f32, f32)>,
+    /// Chrome under the pointer at its last motion event, see
+    /// [`mouse::pointer_repaint`].
+    pub(crate) chrome_hover: mouse::ChromeHover,
     /// Multi-click chain for word/line select: last press time, view cell,
     /// and count (1 single, 2 word, 3 line). Separate from
     /// `last_titlebar_click` (macOS zoom).
@@ -151,6 +154,7 @@ impl App {
             pending_scale: None,
             wheel_accum: 0.0,
             cursor_pos: None,
+            chrome_hover: mouse::ChromeHover::None,
             last_click: None,
             last_titlebar_click: None,
             mouse_pressed: 0,

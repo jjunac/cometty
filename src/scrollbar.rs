@@ -98,6 +98,12 @@ impl ScrollbarUi {
         self.drag_grab.is_some()
     }
 
+    /// The overlay paints and hit-tests the track only while it is visible or
+    /// dragged; a fully faded scrollbar does not react to hover.
+    pub fn interactive(&self, is_alt: bool) -> bool {
+        !is_alt && (self.opacity > 0.01 || self.is_dragging())
+    }
+
     pub fn begin_drag(&mut self, grab_offset: f32) {
         self.drag_grab = Some(grab_offset);
         self.last_active = Instant::now();
@@ -278,6 +284,20 @@ mod tests {
         ui.set_opacity_for_test(1.0, t0);
         ui.update(t0, 100, 40, 10, true, false, &cfg);
         assert_eq!(ui.opacity, 0.0);
+    }
+
+    #[test]
+    fn only_a_visible_or_dragged_track_reacts_to_the_pointer() {
+        let t0 = Instant::now();
+        let mut ui = ScrollbarUi::new(t0);
+        assert!(!ui.interactive(false));
+        ui.set_opacity_for_test(0.5, t0);
+        assert!(ui.interactive(false));
+        assert!(!ui.interactive(true), "alternate screen hides the track");
+        ui.set_opacity_for_test(0.0, t0);
+        ui.begin_drag(0.0);
+        ui.set_opacity_for_test(0.0, t0);
+        assert!(ui.interactive(false), "a drag keeps the track live");
     }
 
     #[test]

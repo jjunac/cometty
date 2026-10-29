@@ -81,8 +81,13 @@ tests or headless timings with native-memory, GUI-latency, or energy verificatio
   the deliberate macOS fullscreen one-pixel crop.
 - **Focus/repaint:** terminal-owned Tab bypasses egui; chrome stays non-focusable.
   Route IME commits under the same ownership policy and reassert terminal IME after
-  text fields release it. Forward both input repaint responses (not for
-  `RedrawRequested`) and root repaint delays; idle must remain reactive.
+  text fields release it. Forward egui's input repaint response for non-pointer
+  events (never `RedrawRequested`) and root repaint delays; idle must remain
+  reactive. Pointer motion (`CursorMoved`/`Entered`/`Left`) repaints only per
+  `app::mouse::pointer_repaint`: while egui uses the pointer, on any move over the
+  find bar or an open panel, when the hovered tab/×/+/visible scrollbar changes,
+  and once on leaving chrome. Coalesce unpainted motion in egui's pending input;
+  selection drags, link cursors and mouse reports keep their own paths.
 - **Search/links:** search opens/re-focuses after the settings guard; navigation
   precedes egui consumption and closing surrenders focus. Cache by content/row
   identity, never scroll on background refresh. Modifier-only hints must repaint;

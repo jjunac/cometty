@@ -158,6 +158,29 @@ pub fn fit_title(title: &str, max_width: f32, measure: &mut dyn FnMut(&str) -> f
     String::new()
 }
 
+/// Tab-strip element whose hover state is painted: a tab's pill, its close
+/// `×`, or the `+` button. Elsewhere on the strip nothing reacts to hover.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StripTarget {
+    #[default]
+    Empty,
+    Tab(usize),
+    Close(usize),
+    NewTab,
+}
+
+/// Hovered element at `(x, y)` points, from the interactive rects
+/// `[min_x, min_y, max_x, max_y]` recorded by the last painted strip in paint
+/// order. Later rects are on top: a close box wins over the tab under it,
+/// like egui's own hover.
+pub fn strip_target_at(targets: &[(StripTarget, [f32; 4])], x: f32, y: f32) -> StripTarget {
+    targets
+        .iter()
+        .rev()
+        .find(|(_, r)| x >= r[0] && x < r[2] && y >= r[1] && y < r[3])
+        .map_or(StripTarget::Empty, |(target, _)| *target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +195,31 @@ mod tests {
         let cfg = cfg();
         assert_eq!(close_hit(0.0, 38.0, &cfg), [0.0, 0.0, 24.0, 38.0]);
         assert_eq!(close_hit(180.0, 38.0, &cfg), [180.0, 0.0, 24.0, 38.0]);
+    }
+
+    #[test]
+    fn strip_hover_follows_painted_rects_with_close_boxes_on_top() {
+        let targets = [
+            (StripTarget::Tab(0), [84.0, 5.0, 284.0, 33.0]),
+            (StripTarget::Close(0), [84.0, 5.0, 108.0, 33.0]),
+            (StripTarget::Tab(1), [284.0, 5.0, 484.0, 33.0]),
+            (StripTarget::Close(1), [284.0, 5.0, 308.0, 33.0]),
+            (StripTarget::NewTab, [492.0, 5.0, 520.0, 33.0]),
+        ];
+        assert_eq!(strip_target_at(&targets, 200.0, 20.0), StripTarget::Tab(0));
+        assert_eq!(strip_target_at(&targets, 90.0, 20.0), StripTarget::Close(0));
+        // Shared edges belong to the right-hand tab, once.
+        assert_eq!(
+            strip_target_at(&targets, 284.0, 20.0),
+            StripTarget::Close(1)
+        );
+        assert_eq!(strip_target_at(&targets, 400.0, 20.0), StripTarget::Tab(1));
+        assert_eq!(strip_target_at(&targets, 500.0, 20.0), StripTarget::NewTab);
+        // Traffic lights, insets and the gap before `+` react to nothing.
+        for (x, y) in [(30.0, 20.0), (200.0, 2.0), (488.0, 20.0), (600.0, 20.0)] {
+            assert_eq!(strip_target_at(&targets, x, y), StripTarget::Empty);
+        }
+        assert_eq!(strip_target_at(&[], 200.0, 20.0), StripTarget::Empty);
     }
 
     #[test]

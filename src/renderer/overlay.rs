@@ -87,6 +87,7 @@ impl Renderer {
         {
             let _ = self.egui_state.take_egui_input(window);
             self.search_bar_rect = None;
+            self.tab_strip_targets.clear();
             // No chrome is visible, so any egui focus left over from a panel
             // or find bar that just closed is stale. This early return skips
             // the full pass that would run egui's dead-man's-switch, so drop
@@ -141,6 +142,13 @@ impl Renderer {
         // active tab is a nested pill with a 1px border; inactive tabs are
         // separated by thin dividers. Close `×` is reserved on the left of
         // each tab (painted on hover only); `⌘N` sits right-aligned.
+        // Each hover-painted element's interactive rect is recorded, so
+        // pointer motion repaints only when the hovered element changes.
+        let mut strip_targets = std::mem::take(&mut self.tab_strip_targets);
+        strip_targets.clear();
+        let mut record = |target: crate::tabbar::StripTarget, rect: egui::Rect| {
+            strip_targets.push((target, [rect.min.x, rect.min.y, rect.max.x, rect.max.y]));
+        };
         if crate::app::tab::bar_height_points(tab_titles.len(), &tabbar_cfg) > 0.0 {
             egui::Area::new(egui::Id::new("tabbar"))
                 .fixed_pos(egui::pos2(0.0, 0.0))
@@ -242,6 +250,10 @@ impl Renderer {
                                                 );
                                                 let is_active = i == active_tab;
                                                 let tab_hovered = tab_resp.hovered();
+                                                record(
+                                                    crate::tabbar::StripTarget::Tab(i),
+                                                    tab_resp.interact_rect,
+                                                );
                                                 let pill = tab_rect.shrink2(egui::vec2(
                                                     crate::tabbar::TAB_PILL_INSET_X,
                                                     crate::tabbar::TAB_PILL_INSET_Y,
@@ -359,6 +371,10 @@ impl Renderer {
                                                         // Non-focusable like the pill itself.
                                                         egui::Sense::CLICK,
                                                     );
+                                                    record(
+                                                        crate::tabbar::StripTarget::Close(i),
+                                                        close_resp.interact_rect,
+                                                    );
                                                     let close_hovered = close_resp.hovered();
                                                     // `close_hovered` included: the close rect
                                                     // overlaps the tab and steals its hover
@@ -406,6 +422,7 @@ impl Renderer {
                                     egui::Sense::CLICK,
                                 );
                                 let plus_hovered = plus_resp.hovered();
+                                record(crate::tabbar::StripTarget::NewTab, plus_resp.interact_rect);
                                 let plus_painter = ui.painter().clone();
                                 plus_painter.circle_filled(
                                     plus_rect.center(),
@@ -436,6 +453,7 @@ impl Renderer {
                     });
                 });
         }
+        self.tab_strip_targets = strip_targets;
         egui::Area::new(egui::Id::new("scrollbar"))
             .fixed_pos(egui::pos2(0.0, 0.0))
             .order(egui::Order::Foreground)
@@ -446,7 +464,7 @@ impl Renderer {
                 else {
                     return;
                 };
-                if is_alt || (opacity <= 0.01 && !scrollbar.is_dragging()) {
+                if !scrollbar.interactive(is_alt) {
                     return;
                 }
                 let track_w = scrollbar_cfg.track_width;

@@ -19,6 +19,39 @@ pub(crate) struct MotionState {
     sgr: bool,
 }
 
+/// What the pointer is over in egui chrome, judged from the last painted
+/// frame. Only these can change appearance under a moving pointer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ChromeHover {
+    /// The terminal grid, empty strip space, a faded scrollbar strip, or
+    /// outside the window: nothing there paints hover.
+    #[default]
+    None,
+    /// A tab, its close `×`, or the `+` button.
+    Strip(crate::tabbar::StripTarget),
+    /// The visible scrollbar track (highlighted while hovered).
+    Scrollbar,
+    /// The find bar: a text field and buttons with their own hover states.
+    SearchBar,
+    /// An open settings or log panel, including its popups and tooltips.
+    Panel,
+}
+
+/// Pointer motion (`CursorMoved`/`CursorLeft`) repaints only when chrome under
+/// it can look different: while egui uses the pointer (a scrollbar or panel
+/// drag), on every move over the find bar or an open panel, and when the
+/// hovered strip element or scrollbar changes, including one frame on leaving
+/// chrome to clear its hover. Motion over the grid alone paints nothing.
+pub(crate) fn pointer_repaint(
+    previous: ChromeHover,
+    current: ChromeHover,
+    egui_using_pointer: bool,
+) -> bool {
+    egui_using_pointer
+        || matches!(current, ChromeHover::SearchBar | ChromeHover::Panel)
+        || current != previous
+}
+
 /// True when a titlebar press at `now` completes a double-click: a previous
 /// press exists and falls within `threshold_ms`. Pure for headless testing.
 pub(crate) fn is_titlebar_double_click(
@@ -168,19 +201,10 @@ impl App {
 
     pub(crate) fn on_cursor_moved(&mut self, x: f32, y: f32) {
         self.cursor_pos = Some((x, y));
-        // Hovering a link (modifier held) switches to the pointer cursor;
-        // hovering the tab strip must repaint (hover highlight / × reveal)
-        // even when no selection drag is in progress.
+        // Hovering a link (modifier held) switches to the pointer cursor; no
+        // frame is needed for that.
         self.update_link_cursor();
-        let tab_count = self.tabs.len();
-        if self
-            .renderer
-            .as_ref()
-            .is_some_and(|r| r.over_tab_bar(y, tab_count))
-            && let Some(w) = self.window.as_ref()
-        {
-            w.request_redraw();
-        }
+        self.update_chrome_hover(Some((x, y)));
         // Mouse reporting: forward motion instead of extending a selection.
         if let Some((mode, sgr)) = self.mouse_report_state() {
             let button_held = self.mouse_pressed != 0;
@@ -307,6 +331,56 @@ impl App {
         self.last_mouse_report = None;
         self.cursor_pos = None;
         self.set_link_cursor_icon(winit::window::CursorIcon::Default);
+        self.update_chrome_hover(None);
+    }
+
+    /// Chrome element under physical `(x, y)`, judged like the last painted
+    /// frame. Hit tests are explicit: egui's area rects cannot tell the grid
+    /// from chrome, because the scrollbar area spans the window while shown.
+    fn chrome_hover_at(&self, x: f32, y: f32) -> ChromeHover {
+        let Some(renderer) = self.renderer.as_ref() else {
+            return ChromeHover::None;
+        };
+        if self.settings.open || self.logs.open {
+            return ChromeHover::Panel;
+        }
+        if self.search_open() && renderer.over_search_bar(x, y) {
+            return ChromeHover::SearchBar;
+        }
+        if renderer.over_tab_bar(y, self.tabs.len()) {
+            return match renderer.tab_strip_target(x, y) {
+                crate::tabbar::StripTarget::Empty => ChromeHover::None,
+                target => ChromeHover::Strip(target),
+            };
+        }
+        if renderer.over_scrollbar(x)
+            && self
+                .active_tab()
+                .is_some_and(|tab| tab.scrollbar.interactive(tab.terminal.grid().is_alt()))
+        {
+            return ChromeHover::Scrollbar;
+        }
+        ChromeHover::None
+    }
+
+    /// egui reports `repaint` for every pointer event; request a frame only
+    /// when [`pointer_repaint`] says chrome can change. Otherwise collapse
+    /// the pending egui motion, so unpainted moves cannot pile up.
+    fn update_chrome_hover(&mut self, pos: Option<(f32, f32)>) {
+        let current = pos.map_or(ChromeHover::None, |(x, y)| self.chrome_hover_at(x, y));
+        let previous = std::mem::replace(&mut self.chrome_hover, current);
+        let using = self
+            .renderer
+            .as_ref()
+            .is_some_and(|r| r.egui_is_using_pointer());
+        if pointer_repaint(previous, current, using) {
+            if let Some(w) = self.window.as_ref() {
+                crate::perf::add(crate::perf::Metric::RequestPointer, 1);
+                w.request_redraw();
+            }
+        } else if let Some(r) = self.renderer.as_mut() {
+            r.coalesce_pointer_motion();
+        }
     }
 
     pub(crate) fn on_focused(&mut self, focused: bool) {
@@ -713,8 +787,42 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClickState, is_titlebar_double_click, next_click_count};
+    use super::{
+        ChromeHover, ClickState, is_titlebar_double_click, next_click_count, pointer_repaint,
+    };
+    use crate::tabbar::StripTarget;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn pointer_motion_repaints_only_when_chrome_under_it_can_change() {
+        use ChromeHover::*;
+        let tab = |i| Strip(StripTarget::Tab(i));
+        let close = |i| Strip(StripTarget::Close(i));
+        // Moving over the grid: no frames, whatever the position.
+        assert!(!pointer_repaint(None, None, false));
+        // Within one tab, × or `+`, or along the visible scrollbar: nothing
+        // changes on screen. Entering, switching and leaving do.
+        for steady in [tab(1), close(1), Strip(StripTarget::NewTab), Scrollbar] {
+            assert!(!pointer_repaint(steady, steady, false), "{steady:?}");
+            assert!(pointer_repaint(None, steady, false), "enter {steady:?}");
+            assert!(
+                pointer_repaint(steady, None, false),
+                "exit frame {steady:?}"
+            );
+        }
+        assert!(pointer_repaint(tab(0), tab(1), false));
+        assert!(pointer_repaint(tab(1), close(1), false));
+        assert!(pointer_repaint(Scrollbar, tab(0), false));
+        // The find bar and open panels have per-widget hover: every move.
+        for busy in [SearchBar, Panel] {
+            assert!(pointer_repaint(busy, busy, false));
+            assert!(pointer_repaint(busy, None, false));
+        }
+        // A drag egui owns (scrollbar thumb, panel window) follows every move,
+        // even over the grid.
+        assert!(pointer_repaint(None, None, true));
+        assert!(pointer_repaint(Scrollbar, Scrollbar, true));
+    }
 
     #[test]
     fn titlebar_double_click_needs_a_prior_press() {

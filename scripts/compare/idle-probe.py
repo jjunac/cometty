@@ -68,7 +68,9 @@ SCENARIOS = {
                        STEADY, 1, [{"op": "tick", "interval": 0.1, "fill": "ascii"}]),
     "tick-30hz": ("Hidden cursor; status rewritten every 33 ms on an empty screen",
                   STEADY, 1, [{"op": "tick", "interval": 1 / 30}]),
-    # Manual: needs an operator, so it is never in the default list.
+    # Manual: needs an operator, so it is never in the default list. The window
+    # opens pinned at the top-left of the main display; click it once during
+    # the settle (macOS sends pointer motion only to the focused window).
     "hover": ("MANUAL: keep moving the pointer over the focused window during the window",
               STEADY, 1, [FILL]),
 }
@@ -203,7 +205,9 @@ restore = "tabs"
 filter = "off"
 %s''' % (json.dumps(command), overrides))
     unfocused = name in UNFOCUSED
-    write_session(home / "state", tabs, position=MEASURED_POSITION if unfocused else None)
+    # Pinned where the operator (or the focus thief's placement) expects it.
+    pinned = unfocused or name in MANUAL
+    write_session(home / "state", tabs, position=MEASURED_POSITION if pinned else None)
     env = isolated_env(home, args.perf)
     result = {"scenario": name, "description": description, "tabs": tabs, "repeat": repeat,
               "ops": ops, "settle_s": args.settle, "window_s": args.seconds}

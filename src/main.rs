@@ -317,12 +317,20 @@ impl ApplicationHandler<UserEvent> for App {
             _ => egui_winit::EventResponse::default(),
         };
         let egui_consumed = response.consumed;
-        // egui's own repaint request for this event (hover, wheel, typing,
-        // IME, …): the loop is otherwise reactive (PTY output / blink), so
-        // without it egui only stepped forward on the next blink tick.
-        // `RedrawRequested` always asks for a repaint — honoring it here
-        // would loop forever.
+        // egui's own repaint request for this event (wheel, typing, IME, …):
+        // the loop is otherwise reactive (PTY output / blink), so without it
+        // egui only stepped forward on the next blink tick. `RedrawRequested`
+        // always asks for a repaint — honoring it here would loop forever.
+        // Pointer motion also always asks; `on_cursor_moved`/`on_cursor_left`
+        // repaint only when chrome under the pointer can change instead.
+        let pointer_motion = matches!(
+            event,
+            WindowEvent::CursorMoved { .. }
+                | WindowEvent::CursorEntered { .. }
+                | WindowEvent::CursorLeft { .. }
+        );
         if response.repaint
+            && !pointer_motion
             && !matches!(event, WindowEvent::RedrawRequested)
             && let Some(w) = self.window.as_ref()
         {

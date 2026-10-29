@@ -29,6 +29,14 @@ code-path descriptions refer to that revision, not to current behavior. Each
    next runs, normally at the next blink tick. `blink_step` now requests the one
    frame needed when blinking stops in the hidden phase. An unfocused window
    draws a steady cursor, hollow for the block shape.
+3. **Pointer motion repaints only when chrome changes (step 3).** egui's
+   `repaint` for `CursorMoved`/`CursorEntered`/`CursorLeft` is no longer
+   forwarded. Motion requests a frame only while egui uses the pointer, on every
+   move over the find bar or an open panel, and when the hovered tab, close `×`,
+   `+`, or visible scrollbar track changes, including one frame on leaving
+   chrome. Tab-strip rects come from the last egui pass. Unpainted motion is
+   coalesced in egui's pending input. See
+   [architecture](architecture.md#decisions-that-shape-the-event-loop).
 
 ### Same-host results
 
@@ -71,6 +79,28 @@ key and blinks in every case.
 An inactive or unfocused window now costs what a steady cursor costs. A focused
 window still blinks for 10 s after each input, at the per-frame cost that step 4
 addresses.
+
+Step 3 used the manual `hover` scenario: the operator clicks the pinned window
+once, then moves the pointer in continuous circles over the text area. The rates
+come from the 10 s counter reports that contain motion. In both runs the
+operator's motion produced about 116 pointer events per second.
+
+| `hover`, continuous motion | Pointer events/s | Frames/s | M instr/s | M instr/event | Loop wakes/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| before | 115.8 | 117.9 | 634.7 | 5.48 | 117.9 |
+| step 3 | 117.2 | 0.30 | 93.8 | 0.80 | 232.7 |
+
+The remaining 0.3 frames/s are the entry and exit frames when the pointer
+crossed the tab strip. The remaining ~0.8 M instructions per event is platform
+event delivery, not rendering. A native sample taken during motion shows the
+process almost entirely blocked: the main thread is active in ~2% of samples,
+and AppKit's event thread spends its active time pulling and decoding events
+from the WindowServer. Each unpainted event also costs two run-loop turns
+instead of one. Not accepting mouse-moved events while nothing needs them
+(no chrome hover, mouse reporting, or link hints) would remove that cost; that
+is not implemented. An earlier, slower run of the old binary (22.5 events/s)
+cost 7.2 M instructions and 1.31 frames per event, close to the investigation's
+estimate.
 
 ## Investigation baseline (before fixes)
 
@@ -363,7 +393,7 @@ job actually needs time-based steps.
   `blink-forever*` scenarios (no timeout) to keep measuring blink frames, a
   focus-thief scenario, and `focus_in`/`focus_out`/`occluded` counters.
 
-### Step 3 — Repaint pointer motion only when chrome changes
+### Step 3 — Repaint pointer motion only when chrome changes (shipped)
 
 - Forward egui's `repaint` for pointer events only while egui is using the
   pointer, or when the pointer is over egui chrome or has just left it. Chrome
@@ -375,6 +405,17 @@ job actually needs time-based steps.
 - Expected: no frames while the pointer moves over the terminal area. Measure
   with the `hover` probe before and after. Check hover highlights, scrollbar
   fade-in, and tooltips by hand.
+- **Shipped** with explicit hit tests instead of
+  `Context::is_pointer_over_area()`. egui only knows the previous frame's
+  pointer position, and the scrollbar area spans the whole window while the
+  scrollbar is shown, so egui's area rects would count the grid as chrome. The
+  tab strip records each tab's, close box's, and `+` button's interactive rect
+  during the egui pass. The scrollbar strip counts only while its track is
+  visible or dragged, since a faded track ignores hover. Open panels count as
+  chrome everywhere. Unpainted motion is collapsed to the newest pending egui
+  pointer event, so egui's input cannot grow while no frames run. Tests cover
+  the repaint rule, the strip hit test (close boxes above tabs), the scrollbar's
+  interactive state, and the coalescing.
 
 ### Step 4 — Make the remaining frames cheaper
 

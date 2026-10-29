@@ -104,10 +104,31 @@ and transient GPU recovery still apply; no GPU lifetime boundary is bypassed.
 egui repaint requests have two paths, both required:
 
 - Forward `EventResponse::repaint` for input events, **except**
-  `RedrawRequested` (which would create a loop).
+  `RedrawRequested` (which would create a loop) and pointer motion.
 - Forward the root viewport's `repaint_delay` from the overlay through
   `RenderOutput` to `App::egui_repaint_at`; `Duration::MAX` means no wake.
   Update the scrollbar **before** `end_pass` so its request belongs to this pass.
+
+egui-winit asks for a repaint on every `CursorMoved`, `CursorEntered`, and
+`CursorLeft`; forwarding those redrew the whole window for each mouse event.
+Pointer motion instead requests a frame only when chrome under the pointer can
+look different (`app::mouse::pointer_repaint`):
+
+- while egui uses the pointer (a scrollbar-thumb or panel drag);
+- on every move over the find bar, and while a settings or log panel is open
+  (their widgets, popups, and tooltips have their own hover states);
+- when the hovered element changes among a tab, its close `×`, the `+` button,
+  the visible scrollbar track, and nothing, which includes one frame on leaving
+  chrome to clear its hover.
+
+The hit tests are explicit: tab-strip rects recorded by the last egui pass (so
+horizontal strip scrolling is included), the scrollbar strip while the track is
+visible or dragged, and the painted find-bar rect. egui's own area rects cannot
+tell the grid from chrome, because the scrollbar area spans the window while it
+is shown. Motion that requests no frame is coalesced in egui's pending input to
+the newest pointer event. Keyboard, wheel, button, focus, and other window events
+keep forwarding egui's response. Selection drags, link-hint cursor updates, and
+mouse reporting keep their own repaint and report paths.
 
 Synchronized output defers **all** presentation sources, including chrome and
 blink, until the end marker or a one-shot 150 ms recovery deadline. Parsing,

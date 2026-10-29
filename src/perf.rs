@@ -59,12 +59,13 @@ pub(crate) enum Metric {
     RequestOutput,
     RequestOutputDeadline,
     RequestChrome,
+    RequestPointer,
     EguiPass,
     BgVertices,
     SupervisorPoll,
 }
 
-const NAMES: [&str; 47] = [
+const NAMES: [&str; 48] = [
     "drain",
     "parse",
     "search",
@@ -109,6 +110,7 @@ const NAMES: [&str; 47] = [
     "request_output",
     "request_output_deadline",
     "request_chrome",
+    "request_pointer",
     "egui_pass",
     "bg_vertices",
     "supervisor_poll",
