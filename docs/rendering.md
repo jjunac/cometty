@@ -123,6 +123,9 @@ its high-water capacity.
   as a single strip; double underline has two strips.
 - Background clear/geometry colors must be linear-light values for the sRGB
   surface. Plain byte/255 colors would double-apply the transfer curve.
+  `Rgb::as_linear_f32_array` reads a 256-entry table that reproduces the sRGB
+  transfer function bit for bit; geometry converts a cell's foreground only
+  when the cell draws a block element or decoration.
 - Hint underlines depend on modifier state, not only grid versions. Existing
   application underlines retain their styling.
 

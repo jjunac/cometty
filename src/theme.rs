@@ -17,30 +17,21 @@ impl Rgb {
         Self { r, g, b }
     }
 
-    pub fn as_f32_array(&self) -> [f32; 3] {
-        [
-            self.r as f32 / 255.0,
-            self.g as f32 / 255.0,
-            self.b as f32 / 255.0,
-        ]
-    }
-
     /// sRGB bytes as linear-light values for the GPU.
     ///
     /// The wgpu surface is an sRGB format, so fragment output and clear
     /// colors are treated as linear and encoded to sRGB on store. Passing
     /// the naive `c / 255.0` values would double-apply the transfer curve
-    /// and render dark colors (e.g. `#1E1E1E`) much too light.
+    /// and render dark colors (e.g. `#1E1E1E`) much too light. Background
+    /// geometry converts colors for many cells per frame, so each channel is
+    /// read from a 256-entry table rather than recomputed with `powf`.
     pub fn as_linear_f32_array(&self) -> [f32; 3] {
-        fn to_linear(c: f32) -> f32 {
-            if c <= 0.04045 {
-                c / 12.92
-            } else {
-                ((c + 0.055) / 1.055).powf(2.4)
-            }
-        }
-        let [r, g, b] = self.as_f32_array();
-        [to_linear(r), to_linear(g), to_linear(b)]
+        let table = srgb_to_linear_table();
+        [
+            table[usize::from(self.r)],
+            table[usize::from(self.g)],
+            table[usize::from(self.b)],
+        ]
     }
 
     pub fn as_glyphon_color(&self) -> glyphon::Color {
@@ -58,6 +49,23 @@ impl Rgb {
         let scale = |c: u8| ((c as f32 * 0.55).round().clamp(0.0, 255.0)) as u8;
         Self::new(scale(self.r), scale(self.g), scale(self.b))
     }
+}
+
+/// The sRGB transfer function for one 8-bit channel, evaluated once per
+/// byte value to fill [`srgb_to_linear_table`].
+fn srgb_channel_to_linear(byte: u8) -> f32 {
+    let c = byte as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn srgb_to_linear_table() -> &'static [f32; 256] {
+    static TABLE: std::sync::LazyLock<[f32; 256]> =
+        std::sync::LazyLock::new(|| std::array::from_fn(|i| srgb_channel_to_linear(i as u8)));
+    &TABLE
 }
 
 /// A full terminal color scheme.
@@ -274,6 +282,26 @@ mod tests {
         assert!((r - 0.013).abs() < 0.002, "r={r}");
         assert!((g - 0.013).abs() < 0.002, "g={g}");
         assert!((b - 0.013).abs() < 0.002, "b={b}");
+        // The table must reproduce the former per-call `powf` conversion
+        // bit for bit, for every channel value and in every channel slot.
+        fn reference(c: f32) -> f32 {
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        for byte in 0..=255_u8 {
+            let expected = reference(byte as f32 / 255.0).to_bits();
+            let linear = Rgb::new(byte, byte, byte).as_linear_f32_array();
+            assert_eq!(linear.map(f32::to_bits), [expected; 3], "byte {byte}");
+        }
+        // Each slot reads its own channel.
+        let mixed = Rgb::new(1, 128, 254).as_linear_f32_array();
+        assert_eq!(
+            mixed.map(f32::to_bits),
+            [1.0_f32, 128.0, 254.0].map(|c| reference(c / 255.0).to_bits())
+        );
     }
 
     #[test]

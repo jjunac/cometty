@@ -37,6 +37,11 @@ code-path descriptions refer to that revision, not to current behavior. Each
    chrome. Tab-strip rects come from the last egui pass. Unpainted motion is
    coalesced in egui's pending input. See
    [architecture](architecture.md#decisions-that-shape-the-event-loop).
+4. **Cheaper frames (step 4), one measured sub-step at a time.**
+   1. *Colors.* `paint_bg` converts the foreground and decoration colors only
+      for cells that draw a block element or decoration, and
+      `Rgb::as_linear_f32_array` reads a 256-entry sRGB→linear table built from
+      the former `powf` formula. The table is bit-identical for every byte.
 
 ### Same-host results
 
@@ -101,6 +106,23 @@ instead of one. Not accepting mouse-moved events while nothing needs them
 is not implemented. An earlier, slower run of the old binary (22.5 events/s)
 cost 7.2 M instructions and 1.31 frames per event, close to the investigation's
 estimate.
+
+Step 4 compares instructions per presented frame, idle floor included, with the
+baseline probe settings (6 s settle, 40 s window). The blink scenarios use
+`blink-forever*`, because the default-config ones stop blinking after step 2;
+`before` ignores the extra key. `before` also carries the old supervisor poll,
+about 0.4 M instructions per blink frame. Each row adds one sub-step to the one
+above.
+
+| Binary | `blink-forever` | `blink-forever-full` | `blink-forever-5tabs` | `tick-1hz-full` | `tick-10hz-full` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| before | 5.27 | 5.30 | 5.83 | 9.30 | 8.35 |
+| step 3 | 4.89 | 4.91 | 5.01 | 9.00 | 8.31 |
+| 4.1 colors | 2.32 | 2.36 | 2.49 | 5.95 | 5.80 |
+
+4.1 cuts the `background` phase from 0.26–0.30 ms to 0.035–0.07 ms per frame;
+`powf` was nearly all of it. The 10 Hz spinner drops from 83.3 to 58.1 M
+instructions/s.
 
 ## Investigation baseline (before fixes)
 

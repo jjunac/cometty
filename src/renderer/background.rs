@@ -225,6 +225,7 @@ impl super::Renderer {
         let pad = self.scale_factor.max(1.0);
         let search_match_col = self.theme.search_match.as_linear_f32_array();
         let search_active_col = self.theme.search_active.as_linear_f32_array();
+        let selection_col = self.theme.selection.as_linear_f32_array();
         let hint_col = self.theme.link.as_linear_f32_array();
         for (y, row) in grid_rows.iter().enumerate() {
             // Cell rects snap to whole device pixels; adjacent cells share
@@ -257,18 +258,10 @@ impl super::Renderer {
                 // selection so `Enter` navigation always shows where it
                 // landed; other matches sit underneath a selection.
                 let eff_bg = cell.effective_bg();
-                let eff_fg = cell.effective_fg();
                 if matches!(search_hit, crate::search::Hit::Active) {
                     self.push_quad(&mut verts, px, py, w_px, row_h, search_active_col);
                 } else if is_selected {
-                    self.push_quad(
-                        &mut verts,
-                        px,
-                        py,
-                        w_px,
-                        row_h,
-                        self.theme.selection.as_linear_f32_array(),
-                    );
+                    self.push_quad(&mut verts, px, py, w_px, row_h, selection_col);
                 } else if matches!(search_hit, crate::search::Hit::Match) {
                     self.push_quad(&mut verts, px, py, w_px, row_h, search_match_col);
                 } else if eff_bg != self.theme.background {
@@ -281,48 +274,55 @@ impl super::Renderer {
                         eff_bg.as_linear_f32_array(),
                     );
                 }
+                // Foreground-colored geometry is rare: convert the effective
+                // foreground only for a cell that draws some.
+                let fg_col = || cell.effective_fg().as_linear_f32_array();
                 // Block elements are rects, not font glyphs: fonts fill only
                 // their line box, which is shorter than the cell, so stacked
                 // blocks (`btop`, `chafa`, …) would leave gaps between rows.
                 // The matching glyph is skipped in `text` (shaped as a space).
-                let fg_col = eff_fg.as_linear_f32_array();
                 if cell.width == 1
                     && cell.extra.is_none()
                     && let Some(rects) = super::blocks::block_rects(cell.ch)
                 {
                     let cell_rect = (px, py, cell_right, row_bottom);
+                    let col = fg_col();
                     for rect in rects {
                         let (rx0, ry0, rx1, ry1) = super::blocks::snap_rect(cell_rect, *rect);
-                        self.push_quad(&mut verts, rx0, ry0, rx1 - rx0, ry1 - ry0, fg_col);
+                        self.push_quad(&mut verts, rx0, ry0, rx1 - rx0, ry1 - ry0, col);
                     }
                 }
                 // Text decorations: strips in effective fg unless an
                 // explicit underline color (`SGR 58`) overrides. Curly /
                 // dotted / dashed render as single for now (stored
                 // distinctly in the cell for future shaping).
-                let deco_col = cell.underline_color.unwrap_or(eff_fg).as_linear_f32_array();
+                let deco_col = || match cell.underline_color {
+                    Some(color) => color.as_linear_f32_array(),
+                    None => fg_col(),
+                };
                 match cell.underline {
                     crate::grid::UnderlineStyle::None => {}
                     crate::grid::UnderlineStyle::Double => {
                         let lower = row_bottom - underline_h - pad;
                         let upper = lower - underline_h - pad;
                         let upper = upper.max(py);
-                        self.push_quad(&mut verts, px, lower, w_px, underline_h, deco_col);
-                        self.push_quad(&mut verts, px, upper, w_px, underline_h, deco_col);
+                        let col = deco_col();
+                        self.push_quad(&mut verts, px, lower, w_px, underline_h, col);
+                        self.push_quad(&mut verts, px, upper, w_px, underline_h, col);
                     }
                     _ if cell.underline.is_active() => {
                         let uy = row_bottom - underline_h - pad;
-                        self.push_quad(&mut verts, px, uy, w_px, underline_h, deco_col);
+                        self.push_quad(&mut verts, px, uy, w_px, underline_h, deco_col());
                     }
                     _ => {}
                 }
                 if cell.strikethrough {
                     let sy = py + row_h * 0.5 - underline_h * 0.5;
-                    self.push_quad(&mut verts, px, sy, w_px, underline_h, fg_col);
+                    self.push_quad(&mut verts, px, sy, w_px, underline_h, fg_col());
                 }
                 if cell.overline {
                     let oy = py + pad;
-                    self.push_quad(&mut verts, px, oy, w_px, underline_h, fg_col);
+                    self.push_quad(&mut verts, px, oy, w_px, underline_h, fg_col());
                 }
                 // Link hints (OSC 8 / detected URLs): same strip as a text
                 // underline, tinted with the theme's link color. Cells that
