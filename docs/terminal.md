@@ -154,6 +154,18 @@ Otherwise it keeps the original rows. Packed chunks contain:
 - Consecutive style runs that can coalesce across rows, including hyperlink IDs.
 - Implicit narrow-space text suffixes, while retaining their full styles.
 
+Sparse records use **6 bytes** when a chunk's stored text fits 65,535 bytes,
+admission width is at most 8,192 columns, and stored widths fit two bits. A
+16-bit word holds the column, exact width, and cluster-tail-presence flag; two
+16-bit offsets delimit the original UTF-8 cluster. The flag preserves even an
+explicitly present empty tail. Preflight selects the original wider records
+otherwise, without truncating offsets or unusual cell widths. This does not
+change stored text, style runs, row identities, or width projections.
+
+Estimates and retained-capacity accounting use the selected record size. A
+reusable chunk keeps only one record format's allocation; switching formats
+releases the previous record buffer rather than adding another pool.
+
 Preflight retains per-row text ends and up to 64 style runs in bounded stack
 scratch. Common batches copy those runs directly, and pack only the text prefix,
 avoiding a second full style scan and repeated suffix trimming. Higher-diversity

@@ -62,6 +62,7 @@ allocations or prove a process-memory bound.
 | `shape_*_cold_advances` | Clear the advance/measurement cache per operation; font discovery/system caches remain warm |
 | `hash_unchanged`, `expand_word` | Viewport hashing and warmed selection-pattern path |
 | `resize_lazy_200_201`, `scroll_recycle_1000` | Width projection and saturated history recycling; compare CPU cost alongside compact storage savings |
+| `search_history_*_missing`, `copy_history_*` | Full-history Unicode search and 60-row history snapshot copying for CJK, combining marks, and ZWJ clusters; no shaping/GPU |
 | `paste_build_1m` | One-pass normalization/bracketed framing, not clipboard/PTY transfer latency |
 | `log_index_slice`, `log_index_unchanged`, `log_index_full_scan` | One cooperative filter unit, metadata-only reuse, and explicit full filtering of a 100,000-entry ring |
 
@@ -73,20 +74,24 @@ release, not evidence of retained-heap growth.
 ### History and parser memory checks
 
 The harness prints `history_memory` for sparse/dense ASCII at 80/200/400/1,024
-columns and 60 live rows, using default limits. It feeds 20,000 lines and then
-another 20,000 with reusable input, reports accounted history and terminal-owned
-requested live/peak/later-growth bytes, and checks allocation balance on drop.
-The input string is outside the counting window; the unfinished dense batch and
-recycling pools are inside it. Batch phase affects exact retained bytes.
+columns and 60 live rows, and `history_unicode` for CJK, combining marks, and ZWJ
+clusters at 200 columns/60 live rows, using default limits. Each case feeds
+20,000 lines and then another 20,000 with reusable input, reports accounted
+history and terminal-owned requested live/peak/later-growth bytes, and checks
+allocation balance on drop. The input string is outside the counting window;
+the unfinished dense batch and recycling pools are inside it. Batch phase affects
+exact retained bytes. Unicode copy timings include any unsealed dense rows among
+the last 60 history rows; allocation counts can reflect that dense copy path.
 
 ```sh
 cargo test --locked grid::history::
 cargo test --release --locked term::
 ```
 
-History regressions cover source-batch bounds, adaptive dense fallback, Unicode/
-style/link round trips, row-level eviction, byte accounting, destructive resize,
-stable IDs, direct ASCII search, viewport copy, and zero-cap/pool release. OSC
+History regressions cover source-batch bounds, adaptive dense fallback, narrow/
+wide Unicode-record boundaries and format reuse, exact cluster/style/link round
+trips, row-level eviction, byte accounting, destructive resize, stable IDs,
+direct ASCII search, viewport copy, and zero-cap/pool release. OSC
 tests cover 2 MiB overflow/discard/recovery, >64 KiB release, small-buffer reuse,
 callback equivalence, and handler allocation preflights.
 

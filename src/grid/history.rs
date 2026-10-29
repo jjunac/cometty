@@ -546,11 +546,20 @@ mod tests {
     fn complete_chunks_keep_resize_projection_unicode_links_and_snapshot_equivalent() {
         let mut grid = Grid::new(80, 2, Theme::default());
         let mut reference = Vec::new();
-        for _ in 0..96 {
+        for index in 0..96 {
             grid.set_cursor(0, 0);
             grid.set_hyperlink(Some("https://example.com"));
             for ch in "e\u{301} 👨\u{200d}👩\u{200d}👧 中 https://example.com".chars() {
                 grid.put_char(ch);
+            }
+            if index == 0 {
+                // The first sealed chunk needs wide text offsets; later chunks
+                // use narrow records. Projection/copy must treat both alike.
+                grid.cells[0][0]
+                    .extra
+                    .as_mut()
+                    .unwrap()
+                    .push_str(&"x".repeat(usize::from(u16::MAX)));
             }
             grid.set_hyperlink(None);
             grid.sgr(&[44]);

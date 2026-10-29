@@ -388,6 +388,55 @@ mod tests {
     }
 
     #[test]
+    fn mixed_special_formats_keep_row_eviction_and_pool_accounting_exact() {
+        let mut history = History::default();
+        let mut expected = VecDeque::new();
+        for cohort in 0..4 {
+            for _ in 0..3 {
+                let mut cells = vec![Cell::default(); 256];
+                cells[0].ch = 'é';
+                cells[0].extra = Some(if cohort % 2 == 0 {
+                    "\u{301}".into()
+                } else {
+                    "x".repeat(usize::from(u16::MAX))
+                });
+                cells[1].ch = 'z';
+                let row = Row::new(cells);
+                expected.push_back((row.id, row.to_vec()));
+                history.push(row, cohort);
+            }
+            history.seal();
+        }
+        assert!(
+            history
+                .chunks
+                .iter()
+                .all(|chunk| matches!(chunk.storage, Storage::Packed { .. }))
+        );
+        while !expected.is_empty() {
+            for (index, (id, cells)) in expected.iter().enumerate() {
+                let (_, StoredRow::Packed(row)) = history.get(index).unwrap() else {
+                    panic!("both record formats must stay packed");
+                };
+                assert_eq!(row.identity().0, *id);
+                for (col, cell) in cells.iter().enumerate() {
+                    assert_eq!(row.get(col), crate::grid::CellRef::from(cell));
+                }
+            }
+            let bytes = history.chunks[0].bytes();
+            let partial = history.chunks[0].len() > 1;
+            history.pop_front().unwrap();
+            expected.pop_front();
+            if partial {
+                assert_eq!(history.chunks[0].bytes(), bytes);
+            }
+            assert_accounting(&history);
+        }
+        history.release_unused();
+        assert_eq!(history.bytes(), 0);
+    }
+
+    #[test]
     fn oversized_rows_and_incompressible_batches_stay_dense_without_giant_copy() {
         let huge = "x".repeat(BATCH_BYTES + 1);
         let row = Row::new(vec![Cell {

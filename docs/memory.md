@@ -38,6 +38,10 @@ budget is not malloc physical footprint. Compact history saves space for ordinar
 text but adds bounded packing work and can fall back to dense storage for
 high-entropy text/styles. See [terminal model](terminal.md#decision-immutable-compact-history-with-lazy-width-projection).
 
+Unicode metadata uses checked narrow records where possible, with the original
+wider format as fallback. Each chunk retains only one record buffer; accounting
+charges its actual element size/capacity and the container's format metadata.
+
 The renderer and active-view snapshot are shared, not replicated per tab. Active
 alternate-screen use retains main history and a saved main screen, but does not
 archive alternate output. Closing a tab requests cancellation/reaping, not merely
@@ -70,9 +74,10 @@ number: allocation churn and latency can worsen without fixing a lifecycle bug.
 On the measured 64-bit layout a `Cell` is now **56 bytes** (formerly 48): growable
 `String` tails avoid repeated whole-cluster reconstruction but add one capacity
 word per dense cell. Dense storage alone is roughly `56 × rows × columns`,
-excluding tail **capacities** and vector slack. Packed payloads are unchanged;
-source-batch accounting uses the actual type size and tail capacities. Verify type
-sizes on the target before treating this as a byte contract; compact history
+excluding tail **capacities** and vector slack. Packed history stores UTF-8 and
+sparse metadata instead; source-batch accounting uses the actual cell size and
+tail capacities. Verify type sizes on the target before treating this as a byte
+contract; compact history
 does not use one `Cell` per stored column. Similarly, each background rectangle
 currently uses 120 vertex bytes, and decorations can add several rectangles per
 cell. Logical cell limits are not renderer-byte limits.
@@ -82,7 +87,9 @@ cell. Logical cell limits are not renderer-byte limits.
 These results come from the display-backed stress run described in
 [performance](performance.md#long-session-stress-results-measured) (Apple M3 Pro,
 macOS, release build, 2026-10-26). Values are macOS `footprint` for the parent PID.
-They describe that host and revision, not a bound.
+They describe that host and revision, not a bound. They predate narrow Unicode
+history records; native footprint has not been remeasured after that change.
+Headless history-byte savings are not a replacement for those OS measurements.
 
 - **Fixed GPU cost dominates idle.** A fresh 1-tab instance has a 207 MB footprint,
   broken down as:

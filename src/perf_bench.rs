@@ -247,6 +247,53 @@ fn history_memory_case(cols: usize, dense: bool) {
     assert_eq!(counts.live_delta + growth.live_delta + freed.live_delta, 0);
 }
 
+fn unicode_history_case(name: &str, cluster: &str, width: usize) {
+    let cols = 200;
+    let rows = 60;
+    let line = format!("{}\r\n", cluster.repeat((cols - 1) / width));
+    let mut retained = None;
+    let counts = allocation_stats(|| {
+        let mut terminal = Terminal::new(cols, rows, Theme::default());
+        for _ in 0..20_000 {
+            terminal.feed(line.as_bytes());
+        }
+        retained = Some(terminal);
+    });
+    let terminal = retained.as_mut().unwrap();
+    let growth = allocation_stats(|| {
+        for _ in 0..20_000 {
+            terminal.feed(line.as_bytes());
+        }
+    });
+    let grid = terminal.grid();
+    println!(
+        "PERF history_unicode case={name} cols={cols} rows={} accounted_bytes={} live_requested_bytes={} peak_requested_bytes={} later_live_delta={} later_peak_delta={}",
+        grid.scrollback_len(),
+        grid.history_bytes(),
+        counts.live_delta,
+        counts.peak_delta,
+        growth.live_delta,
+        growth.peak_delta,
+    );
+    assert!(growth.live_delta.abs() < 512 * 1024);
+    measure(&format!("search_history_{name}_missing"), 2, || {
+        black_box(search::find_matches(grid, black_box("missing")));
+    });
+    let mut snapshot = vec![Vec::new(); rows];
+    measure(&format!("copy_history_{name}"), 20, || {
+        for (row, dst) in snapshot.iter_mut().enumerate() {
+            black_box(
+                grid.global_line(grid.scrollback_len() - rows + row)
+                    .unwrap(),
+            )
+            .copy_into(dst);
+        }
+        black_box(&snapshot);
+    });
+    let freed = allocation_stats(|| drop(retained));
+    assert_eq!(counts.live_delta + growth.live_delta + freed.live_delta, 0);
+}
+
 #[test]
 #[ignore = "manual release benchmark; not a wall-clock CI gate"]
 // Runtime guard, not a const assertion: debug test binaries must still build.
@@ -351,6 +398,13 @@ fn headless_release() {
         for dense in [false, true] {
             history_memory_case(cols, dense);
         }
+    }
+    for (name, cluster, width) in [
+        ("cjk", "漢", 2),
+        ("combining", "e\u{301}", 1),
+        ("zwj", "👨\u{200d}👩\u{200d}👧", 2),
+    ] {
+        unicode_history_case(name, cluster, width);
     }
 
     let config = Config::default();
