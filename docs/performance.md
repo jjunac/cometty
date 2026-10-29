@@ -123,7 +123,9 @@ off by default. They aggregate:
   input-to-first-output, and oldest unpresented output-to-present.
 - Wake and frame sources (see [idle CPU and energy](idle.md)): `loop_turn`
   (`about_to_wait` calls), `wake_timer`/`wake_event` (loop wakes by a deadline or
-  by anything else), `window_event`/`pointer_event`, redraw requests by reason
+  by anything else), `window_event`/`pointer_event`, `focus_in`/`focus_out`
+  (window focus changes; blinking depends on focus), `occluded` (the window
+  became occluded and stopped rendering), redraw requests by reason
   (`request_blink`, `request_egui_input`, `request_egui_deadline`,
   `request_egui_immediate`, `request_output`, `request_output_deadline`,
   `request_chrome`), full egui passes (`egui_pass`), background vertices per
@@ -386,6 +388,15 @@ periodic counter reports that lie wholly inside the window: frames, wake sources
 supervisor polls, and per-frame phases. `--sample-seconds N` records a native call
 graph *after* the window, so sampling does not perturb the counters. Artifacts go
 to `target/perf/idle-<UTC>/`.
+
+Blinking depends on window focus and `cursor.blink_timeout_ms` (default 10 s).
+The default-config `blink*` scenarios therefore stop blinking 10 s after launch;
+settle longer than that to measure the inactive state. `blink-forever*` sets the
+timeout to `0`, so a focused window keeps blinking, which measures what blink
+frames cost. `blink-forever-unfocused` launches a small second Cometty beside
+the measured window, which takes focus. The summary reports each run's focus
+changes and occlusions, launch included, next to pointer events and skipped
+frames.
 
 The probe only cleans up its own processes. Keep the probe windows uncovered,
 and keep the pointer away from them unless the scenario asks for it. An occluded

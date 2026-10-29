@@ -117,6 +117,11 @@ shell/starting-directory changes in Settings apply to new tabs. `--theme`
 overrides your saved theme for the current session, and `--config` selects a
 different preferences file.
 
+The cursor blinks only while the window has focus, and stops blinking 10 seconds
+after you last typed; typing or returning to the window restarts it. Set
+`[cursor] blink_timeout_ms = 0` to blink for as long as the window has focus. In
+a window without focus, the block cursor is drawn as an outline.
+
 Quitting with tabs open (Cmd+Q, or closing the window) reopens the same tabs, in
 their working directories, at the next launch, with their scrollback and the
 window size and position. Each restored tab shows its previous contents followed

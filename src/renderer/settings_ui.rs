@@ -726,7 +726,7 @@ fn show_section(
             });
         }
         SettingsSection::Cursor => {
-            ui.label("Shape defaults apply to new tabs; blink speed is live.");
+            ui.label("Shape defaults apply to new tabs; blink settings are live.");
             ed.u64(
                 ui,
                 "Blink ms",
@@ -734,6 +734,14 @@ fn show_section(
                 1..=10_000,
                 1,
                 d.cursor.blink_ms,
+            );
+            ed.u64(
+                ui,
+                "Stop blinking after ms (0 = never)",
+                &mut config.cursor.blink_timeout_ms,
+                0..=600_000,
+                0,
+                d.cursor.blink_timeout_ms,
             );
             ui.horizontal(|ui| {
                 let slot = begin_reset_slot(ui);

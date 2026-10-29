@@ -49,6 +49,9 @@ pub(crate) enum Metric {
     WakeEvent,
     WindowEvent,
     PointerEvent,
+    FocusIn,
+    FocusOut,
+    Occluded,
     RequestBlink,
     RequestEguiInput,
     RequestEguiDeadline,
@@ -61,7 +64,7 @@ pub(crate) enum Metric {
     SupervisorPoll,
 }
 
-const NAMES: [&str; 44] = [
+const NAMES: [&str; 47] = [
     "drain",
     "parse",
     "search",
@@ -96,6 +99,9 @@ const NAMES: [&str; 44] = [
     "wake_event",
     "window_event",
     "pointer_event",
+    "focus_in",
+    "focus_out",
+    "occluded",
     "request_blink",
     "request_egui_input",
     "request_egui_deadline",
@@ -459,6 +465,7 @@ mod tests {
             (Metric::Drain, "drain"),
             (Metric::RedrawTotal, "redraw_total"),
             (Metric::LoopTurn, "loop_turn"),
+            (Metric::FocusOut, "focus_out"),
             (Metric::RequestBlink, "request_blink"),
             (Metric::RequestChrome, "request_chrome"),
             (Metric::SupervisorPoll, "supervisor_poll"),

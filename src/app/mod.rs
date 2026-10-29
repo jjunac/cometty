@@ -65,6 +65,12 @@ pub struct App {
     pub(crate) modifiers: ModifiersState,
     pub(crate) cursor_visible: bool,
     pub(crate) last_blink: Instant,
+    /// Window keyboard focus. Unfocused windows never blink and draw a
+    /// steady cursor (a hollow block for the block shape).
+    pub(crate) focused: bool,
+    /// Last keyboard, IME or paste input, or regained focus: the start of
+    /// `cursor.blink_timeout_ms`.
+    pub(crate) last_input: Instant,
     /// Next egui frame or transient surface retry, if any; independent of
     /// whether the cursor needs a blink timer.
     pub(crate) egui_repaint_at: Option<Instant>,
@@ -135,6 +141,8 @@ impl App {
             modifiers: ModifiersState::empty(),
             cursor_visible: true,
             last_blink: Instant::now(),
+            focused: false,
+            last_input: Instant::now(),
             egui_repaint_at: None,
             occluded: false,
             zero_sized: false,
@@ -172,6 +180,19 @@ impl App {
                 .window
                 .as_ref()
                 .is_some_and(|w| w.is_minimized() == Some(true))
+    }
+
+    /// Keyboard, IME or paste input: restart the cursor blink, visible phase
+    /// first, and its inactivity timeout.
+    pub(crate) fn note_input(&mut self) {
+        let now = Instant::now();
+        self.last_input = now;
+        if scheduling::blink_restart(now, &mut self.last_blink, &mut self.cursor_visible)
+            && let Some(w) = self.window.as_ref()
+        {
+            crate::perf::add(crate::perf::Metric::RequestBlink, 1);
+            w.request_redraw();
+        }
     }
 
     /// Persist the live config after a panel edit. Failures stay in the

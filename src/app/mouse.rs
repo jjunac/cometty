@@ -310,6 +310,15 @@ impl App {
     }
 
     pub(crate) fn on_focused(&mut self, focused: bool) {
+        self.focused = focused;
+        // Unfocused windows draw a steady cursor; regained focus restarts the
+        // blink, visible phase first, and its inactivity timeout. The redraw
+        // below shows either change.
+        let now = Instant::now();
+        if focused {
+            self.last_input = now;
+        }
+        super::scheduling::blink_restart(now, &mut self.last_blink, &mut self.cursor_visible);
         if !focused {
             self.last_mouse_report = None;
             self.mouse_pressed = 0;

@@ -156,8 +156,24 @@ impl SyncPresentation {
     }
 }
 
-pub(crate) fn cursor_blinks(suspended: bool, enabled: bool, blinking: bool, offset: usize) -> bool {
-    !suspended && enabled && blinking && offset == 0
+/// Only a blinking, visible cursor at the live bottom of a focused window that
+/// is presenting, and that saw input within the blink timeout, needs a timer.
+pub(crate) fn cursor_blinks(
+    suspended: bool,
+    focused: bool,
+    inactive: bool,
+    enabled: bool,
+    blinking: bool,
+    offset: usize,
+) -> bool {
+    !suspended && focused && !inactive && enabled && blinking && offset == 0
+}
+
+/// Blinking stops `timeout` after the last keyboard, IME or paste input (or
+/// regained focus); zero blinks forever. Evaluated when the loop next runs,
+/// normally the next blink tick: the timeout adds no timer of its own.
+pub(crate) fn blink_inactive(now: Instant, last_input: Instant, timeout: Duration) -> bool {
+    !timeout.is_zero() && now.saturating_duration_since(last_input) >= timeout
 }
 
 pub(crate) fn earlier(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
@@ -167,6 +183,8 @@ pub(crate) fn earlier(a: Option<Instant>, b: Option<Instant>) -> Option<Instant>
     }
 }
 
+/// Advance the blink phase. Stopping in the hidden phase requests exactly one
+/// frame, so the cursor is shown again; stopping while visible requests none.
 pub(crate) fn blink_step(
     now: Instant,
     last: &mut Instant,
@@ -176,8 +194,9 @@ pub(crate) fn blink_step(
 ) -> (bool, Option<Instant>) {
     if !enabled {
         *last = now;
+        let repaint = !*visible;
         *visible = true;
-        return (false, None);
+        return (repaint, None);
     }
     let repaint = now.saturating_duration_since(*last) >= period;
     if repaint {
@@ -185,6 +204,15 @@ pub(crate) fn blink_step(
         *visible = !*visible;
     }
     (repaint, last.checked_add(period))
+}
+
+/// Input or regained focus restarts the blink with its visible phase, a full
+/// period from `now`. True when the cursor was hidden and needs a frame.
+pub(crate) fn blink_restart(now: Instant, last: &mut Instant, visible: &mut bool) -> bool {
+    *last = now;
+    let repaint = !*visible;
+    *visible = true;
+    repaint
 }
 
 #[cfg(test)]
@@ -330,15 +358,24 @@ mod tests {
 
     #[test]
     fn only_a_visible_blinking_live_cursor_needs_a_timer() {
-        assert!(cursor_blinks(false, true, true, 0));
-        for args in [
+        assert!(cursor_blinks(false, true, false, true, true, 0));
+        // Suspension, a hidden cursor, a steady DECSCUSR style and history
+        // scrolling stop the timer exactly as before focus/inactivity existed.
+        for (suspended, enabled, blinking, offset) in [
             (true, true, true, 0),
             (false, false, true, 0),
             (false, true, false, 0),
             (false, true, true, 10),
         ] {
-            assert!(!cursor_blinks(args.0, args.1, args.2, args.3));
+            for (focused, inactive) in [(true, false), (false, false), (true, true)] {
+                assert!(!cursor_blinks(
+                    suspended, focused, inactive, enabled, blinking, offset
+                ));
+            }
         }
+        // The new inputs stop it on their own.
+        assert!(!cursor_blinks(false, false, false, true, true, 0));
+        assert!(!cursor_blinks(false, true, true, true, true, 0));
     }
 
     #[test]
@@ -354,11 +391,17 @@ mod tests {
         assert!(blink_step(now + period, &mut last, &mut visible, true, period).0);
         assert!(!visible);
         let resumed = now + Duration::from_secs(60);
+        // Stopping in the hidden phase requests the one frame that shows the
+        // cursor again; staying stopped requests nothing more.
+        assert_eq!(
+            blink_step(resumed, &mut last, &mut visible, false, period),
+            (true, None)
+        );
+        assert!(visible);
         assert_eq!(
             blink_step(resumed, &mut last, &mut visible, false, period),
             (false, None)
         );
-        assert!(visible);
         assert_eq!(
             blink_step(resumed, &mut last, &mut visible, true, period),
             (false, Some(resumed + period))
@@ -366,5 +409,157 @@ mod tests {
         assert_eq!(earlier(None, Some(now)), Some(now));
         assert_eq!(earlier(Some(now + period), Some(now)), Some(now));
         assert_eq!(earlier(None, None), None);
+    }
+
+    const PERIOD: Duration = Duration::from_millis(500);
+
+    /// Wake only at the returned blink deadlines, as `about_to_wait` does with
+    /// no other events, for a focused window. Records each wake's
+    /// `(time, repaint)` until no deadline remains.
+    fn drive_blink(
+        mut now: Instant,
+        last_input: Instant,
+        timeout: Duration,
+        last: &mut Instant,
+        visible: &mut bool,
+    ) -> Vec<(Instant, bool)> {
+        let mut wakes = Vec::new();
+        loop {
+            let inactive = blink_inactive(now, last_input, timeout);
+            let blinking = cursor_blinks(false, true, inactive, true, true, 0);
+            let (repaint, next) = blink_step(now, last, visible, blinking, PERIOD);
+            wakes.push((now, repaint));
+            match next {
+                Some(at) => now = at,
+                None => return wakes,
+            }
+            assert!(wakes.len() < 10_000, "blink never stopped");
+        }
+    }
+
+    fn repaints(wakes: &[(Instant, bool)]) -> Vec<bool> {
+        wakes.iter().map(|(_, repaint)| *repaint).collect()
+    }
+
+    #[test]
+    fn focus_loss_stops_the_blink_with_one_frame_only_when_hidden() {
+        let t0 = Instant::now();
+        for (lost_after, hidden) in [(PERIOD, true), (PERIOD * 2, false)] {
+            let (mut last, mut visible) = (t0, true);
+            let mut now = t0;
+            while now < t0 + lost_after {
+                now += PERIOD;
+                assert!(blink_step(now, &mut last, &mut visible, true, PERIOD).0);
+            }
+            assert_eq!(visible, !hidden);
+            // Unfocused: no timer, and a frame only to show a hidden cursor.
+            let lost = now + PERIOD / 5;
+            let blinking = cursor_blinks(false, false, false, true, true, 0);
+            assert_eq!(
+                blink_step(lost, &mut last, &mut visible, blinking, PERIOD),
+                (hidden, None)
+            );
+            assert!(visible);
+            for later in 1..50 {
+                assert_eq!(
+                    blink_step(
+                        lost + PERIOD * later,
+                        &mut last,
+                        &mut visible,
+                        false,
+                        PERIOD
+                    ),
+                    (false, None)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inactivity_timeout_stops_at_the_next_tick_with_a_frame_only_when_hidden() {
+        let t0 = Instant::now();
+        // Ticks toggle at 0.5 s (hidden), 1 s, 1.5 s (hidden), 2 s, …
+        let (mut last, mut visible) = (t0, true);
+        let wakes = drive_blink(t0, t0, Duration::from_secs(2), &mut last, &mut visible);
+        assert_eq!(repaints(&wakes), [false, true, true, true, true]);
+        assert_eq!(wakes.last().unwrap().0, t0 + Duration::from_secs(2));
+        assert!(visible, "stopped in the hidden phase: shown by that frame");
+
+        let (mut last, mut visible) = (t0, true);
+        let wakes = drive_blink(
+            t0,
+            t0,
+            Duration::from_millis(2_400),
+            &mut last,
+            &mut visible,
+        );
+        assert_eq!(repaints(&wakes), [false, true, true, true, true, false]);
+        assert_eq!(wakes.last().unwrap().0, t0 + Duration::from_millis(2_500));
+        assert!(visible, "stopped in the visible phase: no extra frame");
+    }
+
+    #[test]
+    fn input_and_focus_restart_the_blink_visible_phase_first() {
+        let t0 = Instant::now();
+        let timeout = Duration::from_secs(2);
+        let (mut last, mut visible) = (t0, true);
+        let stopped = drive_blink(t0, t0, timeout, &mut last, &mut visible);
+        let stop = stopped.last().unwrap().0;
+        // Keyboard, IME or paste input (or regained focus) after the stop:
+        // already visible, so no frame; the next toggle is a full period away.
+        let input = stop + Duration::from_secs(30);
+        assert!(!blink_restart(input, &mut last, &mut visible));
+        let wakes = drive_blink(input, input, timeout, &mut last, &mut visible);
+        assert_eq!(wakes[1].0, input + PERIOD);
+        assert_eq!(repaints(&wakes), [false, true, true, true, true]);
+        assert_eq!(wakes.last().unwrap().0, input + timeout);
+
+        // Input during the hidden phase of an active blink shows the cursor at
+        // once (one frame) and postpones the next toggle by a full period.
+        let (mut last, mut visible) = (t0, true);
+        assert!(blink_step(t0 + PERIOD, &mut last, &mut visible, true, PERIOD).0);
+        assert!(!visible);
+        let typed = t0 + PERIOD + PERIOD / 2;
+        assert!(blink_restart(typed, &mut last, &mut visible));
+        assert!(visible);
+        assert_eq!(
+            blink_step(typed, &mut last, &mut visible, true, PERIOD),
+            (false, Some(typed + PERIOD))
+        );
+    }
+
+    #[test]
+    fn zero_timeout_blinks_forever() {
+        let t0 = Instant::now();
+        assert!(!blink_inactive(
+            t0 + Duration::from_secs(86_400),
+            t0,
+            Duration::ZERO
+        ));
+        assert!(blink_inactive(
+            t0 + Duration::from_secs(10),
+            t0,
+            Duration::from_secs(10)
+        ));
+        assert!(!blink_inactive(
+            t0 + Duration::from_millis(9_999),
+            t0,
+            Duration::from_secs(10)
+        ));
+        let (mut last, mut visible) = (t0, true);
+        let mut now = t0;
+        for tick in 0..2_000 {
+            let blinking = cursor_blinks(
+                false,
+                true,
+                blink_inactive(now, t0, Duration::ZERO),
+                true,
+                true,
+                0,
+            );
+            let (repaint, next) = blink_step(now, &mut last, &mut visible, blinking, PERIOD);
+            assert_eq!(repaint, tick > 0);
+            now = next.expect("a zero timeout never stops the blink");
+        }
     }
 }

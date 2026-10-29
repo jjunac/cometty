@@ -164,6 +164,8 @@ pub struct CursorCtx {
     pub pos: (usize, usize),
     pub visible: bool,
     pub shape: crate::grid::CursorShape,
+    /// Window focus: an unfocused block cursor is drawn hollow.
+    pub focused: bool,
 }
 
 /// [`Renderer::render`] output: scrollbar scrolling plus tab-strip actions

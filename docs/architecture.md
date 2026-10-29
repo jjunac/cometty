@@ -70,7 +70,7 @@ budget is cooperative, not an end-to-end latency guarantee.
 
 | Decision | Rationale and required behavior |
 | --- | --- |
-| Sleep when idle (`Wait`/`WaitUntil`) | Do not introduce permanent polling to improve throughput or animation. Wake only for input, queued work, or an actual deadline. Current exception: a cursor blink that never stops while the window is visible; see [idle CPU and energy](idle.md). |
+| Sleep when idle (`Wait`/`WaitUntil`) | Do not introduce permanent polling to improve throughput or animation. Wake only for input, queued work, or an actual deadline. |
 | One shared event-loop proxy | `App` holds one `Arc<EventLoopProxy>`; wakers clone the `Arc`. On macOS (winit 0.30) every proxy clone wakes the loop and registers a run-loop source that is never removed, so per-turn paths must not create or clone a proxy (a per-turn clone once kept idle at 100% CPU). |
 | Separate parsing progress from presentation | Occlusion, selection dragging, synchronized output, and hidden cursors must not strand bytes, replies, or exits. |
 | One drain allowance per event-loop turn | `new_events` resets it; user-event, redraw, and pre-wait drains share the allowance. Fair order survives exhaustion and tab removal. |
@@ -80,7 +80,14 @@ budget is cooperative, not an end-to-end latency guarantee.
 
 Known occluded, minimized, and zero-sized windows skip visual preparation while
 transport continues. A blinking cursor needs a timer only when enabled, visible
-at the live bottom, and not presentation-suspended. A settled scrollbar requests
+at the live bottom, not presentation-suspended, in a focused window, and within
+`cursor.blink_timeout_ms` of the last keyboard, IME, or paste input or regained
+focus. The timeout adds no timer: it is checked when the loop next runs,
+normally at the next blink tick. Stopping in the hidden phase requests one frame
+so the cursor shows again; input and regained focus restart the blink with its
+visible phase. An unfocused window draws a steady cursor, hollow for the block
+shape. Together with event-driven PTY supervision, a quiet window has no
+periodic wakeup; see [idle CPU and energy](idle.md). A settled scrollbar requests
 no immediate frame; a pending fade schedules its deadline, and a changing opacity
 requests animation frames based on elapsed time.
 

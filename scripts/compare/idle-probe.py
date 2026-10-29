@@ -6,7 +6,8 @@ configured process whose tabs run driver.py's agent instead of a shell: the
 agent blocks on a FIFO, so the terminal's own wakeups are all that remain.
 Nothing else is touched (isolated HOME/XDG dirs, owned PIDs only, no posted
 input). Needs a display/GPU. The window opens unfocused or focused depending
-on macOS activation policy; Cometty's idle schedule does not depend on focus.
+on macOS activation policy. Blinking depends on focus and on
+cursor.blink_timeout_ms, so the summary reports each run's focus changes.
 
 Per scenario: settle, then diff `proc_pid_rusage` over the window (process CPU,
 package-idle and interrupt wakeups, energy) and, with --perf, aggregate the
@@ -34,7 +35,12 @@ import procstat  # noqa: E402
 
 # name: (description, config overrides, tab count, agent ops run in order).
 # Every op but a final `tick` must finish before the measured window starts.
+# Since the blink policy (cursor.blink_timeout_ms, default 10 s; never while
+# unfocused), the default-config `blink*` scenarios stop blinking once that
+# timeout passes. The `*-forever` variants keep a focused window blinking, to
+# measure what each blink frame costs; older binaries ignore the extra key.
 STEADY = "[cursor]\ndefault_blinking = false\n"
+FOREVER = "[cursor]\nblink_timeout_ms = 0\n"
 FILL = {"op": "fill", "kind": "ascii", "lines": 200}
 SCENARIOS = {
     "blink": ("Default blinking cursor, one tab, near-empty screen", "", 1, []),
@@ -44,6 +50,14 @@ SCENARIOS = {
     "steady-full": ("Steady cursor below a screen of plain text", STEADY, 1, [FILL]),
     "blink-5tabs": ("Blinking cursor, five tabs", "", 5, []),
     "steady-5tabs": ("Steady cursor, five tabs", STEADY, 5, []),
+    "blink-forever": ("Cursor that blinks without timeout (blink_timeout_ms = 0); "
+                      "blinks only while the window has focus", FOREVER, 1, []),
+    "blink-forever-full": ("Blink without timeout below a screen of plain text",
+                           FOREVER, 1, [FILL]),
+    "blink-forever-5tabs": ("Blink without timeout, five tabs", FOREVER, 5, []),
+    # A second, small Cometty launched beside the measured window takes focus.
+    "blink-forever-unfocused": ("Blink without timeout in a window that lost focus to a "
+                                "second, small Cometty beside it", FOREVER, 1, []),
     "tick-1hz": ("Hidden cursor; a 15-cell status rewritten every 1 s on an empty screen",
                  STEADY, 1, [{"op": "tick", "interval": 1.0}]),
     "tick-1hz-full": ("Hidden cursor; full screen of text, status rewritten every 1 s (TUI clock)",
@@ -59,6 +73,12 @@ SCENARIOS = {
               STEADY, 1, [FILL]),
 }
 MANUAL = {"hover"}
+# Measured window pinned top-left; the focus thief sits to its right. Physical
+# pixels: at 2x the measured window ends at 1000 points, the thief starts at
+# 1050. Cometty ignores a saved position that no monitor shows.
+UNFOCUSED = {"blink-forever-unfocused"}
+MEASURED_POSITION = (0, 100)
+THIEF_POSITION = (2100, 100)
 
 PERF_LINE = re.compile(r"^cometty-perf \(.*?\) interval_us=(\d+) at_ms=(\d+):(.*)$")
 PERF_FIELD = re.compile(r" (\w+)=\{([^}]*)\}")
@@ -123,12 +143,38 @@ def steady_rates(reports, start_s, end_s):
     return {"seconds": seconds, "reports": len(chosen), "totals": totals}
 
 
-def write_session(state_home, tabs):
+def write_session(state_home, tabs, size=(1000, 700), position=None):
     directory = state_home / "cometty"
     directory.mkdir(parents=True)
-    body = "version = 1\nactive = 0\n\n[window]\nwidth = 1000.0\nheight = 700.0\n"
+    body = "version = 1\nactive = 0\n\n[window]\nwidth = %.1f\nheight = %.1f\n" % size
+    if position:
+        body += "position = [%d, %d]\n" % position
     body += "\n[[tabs]]\n" * tabs
     (directory / "session.toml").write_text(body)
+
+
+def isolated_env(home, perf):
+    env = os.environ.copy()
+    env.update(HOME=str(home), XDG_STATE_HOME=str(home / "state"),
+               XDG_CONFIG_HOME=str(home / "config"), RUST_LOG="off",
+               COMETTY_PERF="1" if perf else "0")
+    return env
+
+
+def launch_thief(args, run):
+    """A second, small Cometty that takes focus from the measured window.
+
+    Its single tab runs `cat` with a steady cursor, so it adds no frames of its
+    own; it is a separate process and does not count in the measurement."""
+    home = run / "thief-home"
+    home.mkdir()
+    write_session(home / "state", 1, size=(320, 200), position=THIEF_POSITION)
+    config = run / "thief.toml"
+    config.write_text('[shell]\nshell = "/bin/cat"\n[session]\nrestore = "tabs"\n'
+                      '[log]\nfilter = "off"\n[cursor]\ndefault_blinking = false\n')
+    return subprocess.Popen([str(args.binary), "--config", str(config)],
+                            env=isolated_env(home, False), stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
 
 
 def run_scenario(args, output, name, repeat):
@@ -156,11 +202,9 @@ restore = "tabs"
 [log]
 filter = "off"
 %s''' % (json.dumps(command), overrides))
-    write_session(home / "state", tabs)
-    env = os.environ.copy()
-    env.update(HOME=str(home), XDG_STATE_HOME=str(home / "state"),
-               XDG_CONFIG_HOME=str(home / "config"), RUST_LOG="off",
-               COMETTY_PERF="1" if args.perf else "0")
+    unfocused = name in UNFOCUSED
+    write_session(home / "state", tabs, position=MEASURED_POSITION if unfocused else None)
+    env = isolated_env(home, args.perf)
     result = {"scenario": name, "description": description, "tabs": tabs, "repeat": repeat,
               "ops": ops, "settle_s": args.settle, "window_s": args.seconds}
     ticking = bool(ops) and ops[-1]["op"] == "tick"
@@ -169,6 +213,7 @@ filter = "off"
         app = subprocess.Popen([str(args.binary), "--config", str(config)], env=env,
                                stdout=log, stderr=log)
         agents = []
+        thief = None
         try:
             agents_dir = run / "agents"
             infos = wait_for(lambda: (lambda found: found if len(found) >= tabs else None)(
@@ -188,6 +233,8 @@ filter = "off"
                 if op["op"] != "tick":
                     done = agents_dir / ("%d.%d.json" % (first["pid"], seq))
                     wait_for(done.exists, app, 60, "op %s" % op["op"])
+            if unfocused:
+                thief = launch_thief(args, run)
             time.sleep(args.settle)
             if name in MANUAL:
                 print("  >>> %s: start now, for %.0f s" % (description, args.seconds), flush=True)
@@ -219,6 +266,13 @@ filter = "off"
                                      text=True).stdout
             (run / "threads.txt").write_text(threads)
         finally:
+            if thief is not None:
+                thief.terminate()
+                try:
+                    thief.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    thief.kill()
+                    thief.wait(timeout=10)
             for agent in agents:
                 fifo = run / "agents" / (str(agent["pid"]) + ".fifo")
                 try:
@@ -240,6 +294,11 @@ filter = "off"
         reports = parse_perf((run / "stderr.log").read_text(errors="replace"))
         result["perf"] = steady_rates(reports, result["window"]["start_s"],
                                       result["window"]["end_s"])
+        # Whole run, launch included: blinking depends on window focus, and an
+        # occluded window renders nothing.
+        result["focus"] = {key: sum(r[2].get(metric, {}).get("n", 0) for r in reports)
+                           for key, metric in (("in", "focus_in"), ("out", "focus_out"),
+                                               ("occluded", "occluded"))}
     (run / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
 
@@ -282,11 +341,14 @@ def summarize(results):
     if any(r.get("perf") for r in results):
         lines += ["", "In-app counters (COMETTY_PERF=1 periodic reports inside the window). "
                   "M instr/frame is whole-process instructions per presented frame, idle floor "
-                  "included; the other per-frame columns are main-thread elapsed ms.", "",
+                  "included; the other per-frame columns are main-thread elapsed ms. Pointer "
+                  "events and skipped frames flag a disturbed window; focus in/out and occlusions "
+                  "count the whole run, launch included.", "",
                   "| Scenario | counted s | frames/s | loop wakes/s timer+event | supervisor polls/s | "
+                  "pointer | skipped | focus in/out, occluded | "
                   "M instr/frame | redraw_total | overlay | background | encode_submit | "
                   "acquire | present | rebuild | prepare |",
-                  "|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+                  "|---|---:|---:|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
         for r in results:
             perf = r.get("perf")
             if not perf:
@@ -294,9 +356,13 @@ def summarize(results):
                 continue
             frames = rate(perf, "presented")
             instructions = rate(perf, "process", "instructions")
-            lines.append("| %s | %.0f | %s | %s+%s | %s | %s | %s |" % (
+            focus = r.get("focus") or {}
+            lines.append("| %s | %.0f | %s | %s+%s | %s | %d | %d | %d/%d, %d | %s | %s |" % (
                 label(r), perf["seconds"], fmt(frames, 2), fmt(rate(perf, "wake_timer"), 1),
                 fmt(rate(perf, "wake_event"), 1), fmt(rate(perf, "supervisor_poll"), 1),
+                perf["totals"].get("pointer_event", {}).get("n", 0),
+                perf["totals"].get("skipped", {}).get("n", 0),
+                focus.get("in", 0), focus.get("out", 0), focus.get("occluded", 0),
                 fmt(instructions / 1e6 / frames if frames and instructions else None, 2),
                 " | ".join(fmt(per_frame_ms(perf, n), 3) for n in (
                     "redraw_total", "overlay", "background", "encode_submit", "acquire",

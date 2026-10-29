@@ -226,6 +226,9 @@ impl ApplicationHandler<UserEvent> for App {
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.last_blink = Instant::now();
+        self.last_input = self.last_blink;
+        // A window created without focus gets `Focused(true)` when it gains it.
+        self.focused = self.window.as_ref().is_some_and(|w| w.has_focus());
         if !self.spawn_initial_tabs(cols, rows, restored) {
             event_loop.exit();
         }
@@ -369,12 +372,21 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == winit::event::ElementState::Pressed {
+                    self.note_input();
+                }
                 self.on_keyboard(&event, egui_consumed);
             }
             // Dead-key / IME commits (macOS US-Intl `~ ' " \``) never
             // appear as `KeyboardInput`; egui already saw the event above,
             // `on_ime` forwards to the PTY only when no text field owns it.
             WindowEvent::Ime(ime) => {
+                if matches!(
+                    ime,
+                    winit::event::Ime::Commit(_) | winit::event::Ime::Preedit(..)
+                ) {
+                    self.note_input();
+                }
                 self.on_ime(&ime);
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -404,9 +416,20 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Focused(focused) => {
+                perf::add(
+                    if focused {
+                        perf::Metric::FocusIn
+                    } else {
+                        perf::Metric::FocusOut
+                    },
+                    1,
+                );
                 self.on_focused(focused);
             }
             WindowEvent::Occluded(occluded) => {
+                if occluded {
+                    perf::add(perf::Metric::Occluded, 1);
+                }
                 self.occluded = occluded;
                 if !occluded && let Some(w) = self.window.as_ref() {
                     let size = w.inner_size();
@@ -442,9 +465,16 @@ impl ApplicationHandler<UserEvent> for App {
         {
             w.request_redraw();
         }
+        let inactive = app::scheduling::blink_inactive(
+            now,
+            self.last_input,
+            Duration::from_millis(self.config.cursor.blink_timeout_ms),
+        );
         let blinking = self.active_tab().is_some_and(|tab| {
             app::scheduling::cursor_blinks(
                 suspended || sync_at.is_some(),
+                self.focused,
+                inactive,
                 tab.terminal.cursor_visible(),
                 tab.terminal.cursor_style().blinking,
                 tab.terminal.scroll_offset(),

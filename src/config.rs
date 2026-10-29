@@ -70,6 +70,9 @@ fn d_cwd() -> String {
 fn d_blink_ms() -> u64 {
     530
 }
+fn d_blink_timeout_ms() -> u64 {
+    10_000
+}
 fn d_cursor_shape() -> String {
     "block".to_string()
 }
@@ -310,6 +313,10 @@ impl Default for ShellConfig {
 pub struct CursorConfig {
     #[serde(default = "d_blink_ms")]
     pub blink_ms: u64,
+    /// Stop blinking this long after the last keyboard, IME or paste input;
+    /// `0` blinks forever. Unfocused windows never blink.
+    #[serde(default = "d_blink_timeout_ms")]
+    pub blink_timeout_ms: u64,
     /// `"block" | "underline" | "bar"` — initial DECSCUSR shape.
     #[serde(default = "d_cursor_shape")]
     pub default_shape: String,
@@ -325,6 +332,7 @@ impl Default for CursorConfig {
     fn default() -> Self {
         Self {
             blink_ms: d_blink_ms(),
+            blink_timeout_ms: d_blink_timeout_ms(),
             default_shape: d_cursor_shape(),
             default_blinking: true,
             underline_factor: d_cursor_underline_factor(),
@@ -876,6 +884,7 @@ mod tests {
         assert_eq!(c.terminal.tab_stop, 8);
         assert_eq!(c.shell.term, "xterm-256color");
         assert_eq!(c.cursor.blink_ms, 530);
+        assert_eq!(c.cursor.blink_timeout_ms, 10_000);
         assert_eq!(c.scrollbar.track_width, 10.0);
         assert_eq!(c.scrollbar.min_thumb, 20.0);
         assert_eq!(c.scrollbar.pad, 2.0);
@@ -914,6 +923,16 @@ mod tests {
         assert_eq!(c.font.line_height_factor, 1.25);
         assert_eq!(c.window.title, "cometty");
         assert!(c.input.copy_ctrl_shift);
+    }
+
+    #[test]
+    fn blink_timeout_zero_means_forever_and_survives_sanitize() {
+        // Older files without the key keep a finite default timeout.
+        let c: Config = toml::from_str("[cursor]\nblink_ms=400\n").unwrap();
+        assert_eq!(c.cursor.blink_timeout_ms, 10_000);
+        // Zero is a valid choice (never stop), not a degenerate value.
+        let c: Config = toml::from_str("[cursor]\nblink_timeout_ms=0\n").unwrap();
+        assert_eq!(c.sanitized().cursor.blink_timeout_ms, 0);
     }
 
     #[test]

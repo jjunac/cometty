@@ -198,6 +198,7 @@ impl App {
                     pos: (cursor.x, cursor.y),
                     visible: effective_cursor,
                     shape: cursor_shape,
+                    focused: self.focused,
                 },
                 version,
                 renderer::HighlightCtx {

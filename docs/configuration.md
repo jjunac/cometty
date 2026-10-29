@@ -64,6 +64,7 @@ restore = "tabs"
 | `window.title` | `"cometty"` | Fallback window title when the shell supplies none |
 | `window.width`, `window.height` | `800`, `600` | Initial logical window size |
 | `cursor.blink_ms` | `530` | Blink interval in milliseconds |
+| `cursor.blink_timeout_ms` | `10000` | Stop blinking this long after the last keyboard, IME, or paste input; `0` blinks forever. Typing or refocusing the window restarts the blink. An unfocused window never blinks and shows a steady cursor (a hollow block for the block shape) |
 | `cursor.default_shape` | `"block"` | `block`, `underline`, or `bar`; applications can change cursor style |
 | `cursor.default_blinking` | `true` | Initial cursor blinking |
 | `cursor.underline_factor` | `0.14` | Underline cursor thickness relative to line height |

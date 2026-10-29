@@ -78,6 +78,29 @@ pub(crate) fn bar_cursor_width(cell_width: f32, cursor: &crate::config::CursorCo
     (cell_width * cursor.bar_width_factor).max(1.0)
 }
 
+/// Edges of a hollow rectangle (the unfocused block cursor), each `thickness`
+/// device pixels wide and inside the rect. Top and bottom span the width and
+/// the sides fill between them, so no pixel is painted twice. `None` when the
+/// rect is too small to show a hole: the caller fills it instead.
+pub(crate) fn outline_rects(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    thickness: f32,
+) -> Option<[(f32, f32, f32, f32); 4]> {
+    let t = thickness.max(1.0);
+    if w <= 2.0 * t || h <= 2.0 * t {
+        return None;
+    }
+    Some([
+        (x, y, w, t),
+        (x, y + h - t, w, t),
+        (x, y + t, t, h - 2.0 * t),
+        (x + w - t, y + t, t, h - 2.0 * t),
+    ])
+}
+
 /// Snap a column span to device pixels: both edges are rounded from the
 /// grid origin so adjacent cells share the exact same edge value.
 /// Returns `(x0, x1)` with `x1 > x0` (at least 1px).
@@ -315,7 +338,21 @@ impl super::Renderer {
                     let cursor_col = self.theme.foreground.as_linear_f32_array();
                     match cursor.shape {
                         crate::grid::CursorShape::Block => {
-                            self.push_quad(&mut verts, px, py, w_px, row_h, cursor_col);
+                            // Unfocused: an outline, the usual cue that keys
+                            // go elsewhere; it also leaves the glyph readable.
+                            let outline = (!cursor.focused)
+                                .then(|| outline_rects(px, py, w_px, row_h, pad.round()))
+                                .flatten();
+                            match outline {
+                                Some(edges) => {
+                                    for (ex, ey, ew, eh) in edges {
+                                        self.push_quad(&mut verts, ex, ey, ew, eh, cursor_col);
+                                    }
+                                }
+                                None => {
+                                    self.push_quad(&mut verts, px, py, w_px, row_h, cursor_col);
+                                }
+                            }
                         }
                         crate::grid::CursorShape::Underline => {
                             let uy = row_bottom - cursor_underline_h - pad;
@@ -382,6 +419,33 @@ mod tests {
         let b2 = bar_cursor_width(16.8, &cursor);
         assert!((h2 - h1 * 2.0).abs() < 0.01, "h2={h2}");
         assert!((b2 - b1 * 2.0).abs() < 0.01, "b2={b2}");
+    }
+
+    #[test]
+    fn unfocused_block_outline_tiles_the_cell_border_once() {
+        let (x, y, w, h, t) = (10.0, 20.0, 17.0, 35.0, 2.0);
+        let edges = outline_rects(x, y, w, h, t).unwrap();
+        // Inside the cell, never overlapping, and covering exactly the border.
+        let area: f32 = edges.iter().map(|(_, _, ew, eh)| ew * eh).sum();
+        assert_eq!(area, w * h - (w - 2.0 * t) * (h - 2.0 * t));
+        for (i, a) in edges.iter().enumerate() {
+            assert!(a.0 >= x && a.1 >= y && a.0 + a.2 <= x + w && a.1 + a.3 <= y + h);
+            assert!(a.2 >= 1.0 && a.3 >= 1.0);
+            for b in &edges[i + 1..] {
+                let overlap_w = (a.0 + a.2).min(b.0 + b.2) - a.0.max(b.0);
+                let overlap_h = (a.1 + a.3).min(b.1 + b.3) - a.1.max(b.1);
+                assert!(overlap_w <= 0.0 || overlap_h <= 0.0, "{a:?} overlaps {b:?}");
+            }
+        }
+        // The hole is left unpainted, so the glyph under the cursor shows.
+        let hole = (x + w / 2.0, y + h / 2.0);
+        assert!(!edges.iter().any(|(ex, ey, ew, eh)| {
+            (*ex..ex + ew).contains(&hole.0) && (*ey..ey + eh).contains(&hole.1)
+        }));
+        // Thickness is at least one device pixel; tiny cells stay filled.
+        assert_eq!(outline_rects(0.0, 0.0, 8.0, 8.0, 0.0).unwrap()[0].3, 1.0);
+        assert!(outline_rects(0.0, 0.0, 4.0, 30.0, 2.0).is_none());
+        assert!(outline_rects(0.0, 0.0, 8.0, 3.0, 2.0).is_none());
     }
 
     #[test]

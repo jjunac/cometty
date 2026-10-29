@@ -22,6 +22,13 @@ code-path descriptions refer to that revision, not to current behavior. Each
    its child is unreaped. A shell that exits while a background job holds the
    PTY now stays a zombie until its tab closes; see
    [PTY lifecycle](pty.md#decision-cancellation-aware-io-supervised-child-cleanup).
+2. **Cursor blink policy (step 2).** Blinking stops while the window is
+   unfocused, and `cursor.blink_timeout_ms` (default 10 s, `0` = forever) after
+   the last keyboard, IME, or paste input. Input or regained focus restarts it,
+   visible phase first. The timeout adds no timer: it is checked when the loop
+   next runs, normally at the next blink tick. `blink_step` now requests the one
+   frame needed when blinking stops in the hidden phase. An unfocused window
+   draws a steady cursor, hollow for the block shape.
 
 ### Same-host results
 
@@ -42,6 +49,28 @@ and zero skipped frames. These are measurements on one host, not guarantees.
 
 Step 1 removes the supervisor's wakeups whatever the tab count: five idle shells
 cost the same as one. Blink frames are untouched by it.
+
+Step 2 runs settled 12 s instead of 6 s, so the measured window starts after the
+10 s blink timeout. Probe windows get focus at launch on this host (one
+`focus_in` per run). `blink-forever` sets `blink_timeout_ms = 0`, and
+`blink-forever-unfocused` adds a small second Cometty beside the measured window
+that takes its focus; no run recorded an occlusion. `before` ignores the new
+key and blinks in every case.
+
+| Scenario | Binary | M instr/s | Interrupt wakeups/s | Frames/s | Supervisor polls/s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `blink` (inactive after 10 s) | before | 9.96 | 38.0 | 1.87 | 35.3 |
+| `blink` (inactive after 10 s) | step 2 | 0.04 | 0.4 | 0 | 0 |
+| `blink-forever-unfocused` | before | 9.88 | 34.7 | 1.87 | 31.8 |
+| `blink-forever-unfocused` | step 2 | 0.07 | 0.4 | 0 | 0 |
+| `blink-forever` (focused) | before | 9.96 | 35.7 | 1.87 | 32.4 |
+| `blink-forever` (focused) | step 2 | 9.34 | 2.8 | 1.87 | 0 |
+| `steady` | before | 0.68 | 32.2 | 0 | 31.7 |
+| `steady` | step 2 | 0.04 | 0.4 | 0 | 0 |
+
+An inactive or unfocused window now costs what a steady cursor costs. A focused
+window still blinks for 10 s after each input, at the per-frame cost that step 4
+addresses.
 
 ## Investigation baseline (before fixes)
 
@@ -309,7 +338,7 @@ job actually needs time-based steps.
   without the lock hangs those tests instead of needing a nanosecond-wide
   coincidence.
 
-### Step 2 — Cursor blink policy
+### Step 2 — Cursor blink policy (shipped)
 
 - Stop blinking while the window is unfocused, and draw the cursor steady.
   Optionally use a hollow block, the usual unfocused-terminal cue.
@@ -319,13 +348,20 @@ job actually needs time-based steps.
   elsewhere: kitty's `cursor_stop_blinking_after` (15 s) and Alacritty's
   `cursor.blink_timeout` (5 s).
 - `cursor_blinks` gains focus and inactivity inputs. `blink_step` must request
-  **one** repaint when it stops blinking during the hidden phase. Today it only
-  sets `visible = true`. That is harmless now, because every current stop
-  condition coincides with another frame, but a timeout or focus change would
-  leave the cursor invisible. No new timer: the timeout is checked at the next
-  blink tick, so it costs at most one extra frame.
+  **one** repaint when it stops blinking during the hidden phase. Before step 2
+  it only set `visible = true`. That was harmless, because every stop condition
+  then coincided with another frame, but a timeout or focus change would leave
+  the cursor invisible. No new timer: the timeout is checked at the next blink
+  tick, so it costs at most one extra frame.
 - Expected: the `steady` rows above, which are 0.05 M instructions/s and
   ~0.5 wakeups/s with step 1, for every unfocused or inactive window.
+- **Shipped** with a 10 s default timeout and the hollow block. Every key press,
+  IME commit or preedit, and paste restarts the blink, so a cursor stays solid
+  while you type. Pure scheduling tests cover focus loss, timeout expiry in
+  both phases, restart on input and focus, a zero timeout, and unchanged
+  DECSCUSR, scroll-offset, and suspension behavior. The probe gained
+  `blink-forever*` scenarios (no timeout) to keep measuring blink frames, a
+  focus-thief scenario, and `focus_in`/`focus_out`/`occluded` counters.
 
 ### Step 3 — Repaint pointer motion only when chrome changes
 
@@ -395,10 +431,10 @@ GPU.
 
 ## Expected end state
 
-| Quiet window | Baseline (measured) | Step 1 (shipped, measured) | Steps 1–2 (modeled from `steady`) |
+| Quiet window | Baseline (measured) | Step 1 (measured) | Steps 1–2 (measured) |
 | --- | --- | --- | --- |
-| Instructions | 10 M/s | 9.4 M/s | ~0.05 M/s |
-| Wakeups | 38/s | 2.9/s | ~0.5/s |
+| Instructions | 10 M/s | 9.4 M/s | 0.04–0.07 M/s once unfocused or inactive |
+| Wakeups | 38/s | 2.9/s | 0.4/s |
 | Frames | 1.87/s, forever | 1.87/s | 0 when unfocused or inactive |
 
 Steps 3–4 address the costs that remain while a person or a program is actually
