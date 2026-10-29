@@ -42,6 +42,11 @@ code-path descriptions refer to that revision, not to current behavior. Each
       for cells that draw a block element or decoration, and
       `Rgb::as_linear_f32_array` reads a 256-entry sRGB→linear table built from
       the former `powf` formula. The table is bit-identical for every byte.
+   2. *Background geometry cache.* The cell quads are rebuilt only when the
+      grid version, layout (size, tab-bar offset, metrics, scale, theme),
+      selection, or search and link-hint views change; a tab switch
+      invalidates them. The cursor is drawn after the cells, and a cache hit
+      uploads only its vertices.
 
 ### Same-host results
 
@@ -119,10 +124,14 @@ above.
 | before | 5.27 | 5.30 | 5.83 | 9.30 | 8.35 |
 | step 3 | 4.89 | 4.91 | 5.01 | 9.00 | 8.31 |
 | 4.1 colors | 2.32 | 2.36 | 2.49 | 5.95 | 5.80 |
+| 4.2 background cache | 1.93 | 1.95 | 2.07 | 6.06 | 5.64 |
 
 4.1 cuts the `background` phase from 0.26–0.30 ms to 0.035–0.07 ms per frame;
 `powf` was nearly all of it. The 10 Hz spinner drops from 83.3 to 58.1 M
-instructions/s.
+instructions/s. 4.2 removes the per-cell walk from frames whose cells did not
+change: blink frames rebuild no cells (`bg_rebuild` = 0) and upload the cursor's
+6 vertices, saving ~0.4 M instructions each (−17%). Tick frames change content
+every frame and stay within run-to-run noise (±3%).
 
 ## Investigation baseline (before fixes)
 

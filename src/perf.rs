@@ -62,10 +62,11 @@ pub(crate) enum Metric {
     RequestPointer,
     EguiPass,
     BgVertices,
+    BgRebuild,
     SupervisorPoll,
 }
 
-const NAMES: [&str; 48] = [
+const NAMES: [&str; 49] = [
     "drain",
     "parse",
     "search",
@@ -113,6 +114,7 @@ const NAMES: [&str; 48] = [
     "request_pointer",
     "egui_pass",
     "bg_vertices",
+    "bg_rebuild",
     "supervisor_poll",
 ];
 

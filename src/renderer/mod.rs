@@ -184,6 +184,7 @@ pub struct HighlightCtx<'a> {
 
 /// Cursor input for [`Renderer::render`]: position + visibility + shape.
 /// Grouped so `render` stays under the clippy arg limit.
+#[derive(Clone, Copy, Debug)]
 pub struct CursorCtx {
     pub pos: (usize, usize),
     pub visible: bool,
@@ -236,7 +237,8 @@ pub struct Renderer {
     bg_pipeline: wgpu::RenderPipeline,
     bg_vertex_buf: wgpu::Buffer,
     bg_vertex_capacity: usize,
-    bg_scratch: Vec<BgVertex>,
+    /// Retained cell quads plus this frame's cursor (see `background`).
+    bg: background::BgGeometry,
     theme: Theme,
     user_config: Config,
     base_font_size: f32,
@@ -467,7 +469,7 @@ impl Renderer {
             bg_pipeline,
             bg_vertex_buf,
             bg_vertex_capacity,
-            bg_scratch: Vec::new(),
+            bg: background::BgGeometry::default(),
             theme,
             user_config: user_config.clone(),
             base_font_size,
@@ -704,6 +706,7 @@ impl Renderer {
     /// holding different content.
     pub fn invalidate(&mut self) {
         self.last_grid_version = u64::MAX;
+        self.bg.invalidate();
     }
 
     /// Rows available to the terminal grid (window minus tab bar).
@@ -922,7 +925,7 @@ impl Renderer {
                     height: renderer.height,
                 },
             );
-            renderer.paint_bg(grid_rows, &cursor, &highlights, tab_count)
+            renderer.paint_bg(grid_rows, grid_version, &cursor, &highlights, tab_count)
         }) else {
             out.egui_repaint_delay = Duration::MAX;
             return Ok(out);

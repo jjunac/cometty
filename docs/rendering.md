@@ -22,7 +22,9 @@ inputs and resource-lifetime requirements:
 | Natural advances | Cluster text + weight/style within a font/metrics generation |
 | Final advanced shaping runs | Text + full attributes (including spacing/features/color) + direction, within the shared font database generation; 512 entries / 2 MiB accounted capacities |
 | Prepared glyph instances | Shared text-buffer revision + surface width/height + tab-bar offset + default text color |
-| Background/chrome | Repaint from current cursor, decorations, selection/search/link state and UI; no retained base-geometry cache |
+| Background cell quads | Grid version + layout (surface size, tab-bar offset, cell metrics, underline thickness, scale inset, theme) + selection + search and link-hint views; a tab switch invalidates, because equal versions can hold different rows |
+| Cursor quads | Rebuilt every frame and drawn after the cells; a cell-cache hit uploads only these |
+| Chrome | Repaint from current UI state; no retained egui output |
 
 On tab switch, force a content comparison even if both tabs have the same numeric
 grid version. Identical shaped text may reuse preparation if placement/color also
@@ -108,14 +110,20 @@ Future shared atlases/multiple text renderers need a new lifetime policy.
 Backgrounds, block elements, decorations, hints, and cursor shapes use custom
 WGSL quads. Each rectangle emits six 20-byte vertices. GPU buffer capacity grows
 on overflow and shrinks below quarter utilization; CPU scratch currently retains
-its high-water capacity.
+its high-water capacity. The cell quads are retained (see the cache table): a
+frame whose key is unchanged rebuilds and uploads only the cursor's vertices,
+which follow the cells in the same buffer, and a buffer reallocation re-uploads
+the retained cells. `renderer::background` keeps the geometry pure, and a
+headless test checks the retained buffer against a fresh build frame by frame.
 
 - Snap both cell edges from the grid origin to device pixels. Shared adjacent
   edges avoid seams; include fractional tab-bar/DPI offsets in row snapping.
 - Wide leads cover both columns for selection, search, and block cursors.
 - Background priority is **active search > selection > other search > cell
   background**. Blocks/decorations/hints follow, then cursor geometry; text and
-  egui paint afterward.
+  egui paint afterward. The cursor's quads come after all cell quads. They stay
+  inside the cursor's cell, which no other cell's quads enter, so this paints
+  the same pixels as drawing them right after that cell.
 - U+2580–U+259F block elements use cell-filling rectangles where supported, with
   spaces shaped in place of their glyphs. U+2591–U+2593 shades retain font glyphs.
   Font line boxes alone leave gaps in stacked terminal graphics.

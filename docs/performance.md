@@ -129,7 +129,8 @@ off by default. They aggregate:
   (`request_blink`, `request_egui_input`, `request_egui_deadline`,
   `request_egui_immediate`, `request_output`, `request_output_deadline`,
   `request_chrome`, `request_pointer`), full egui passes (`egui_pass`),
-  background vertices per frame (`bg_vertices`: sum and `max_value`), and timed
+  background vertices per frame (`bg_vertices`: sum and `max_value`), rebuilds
+  of the retained background cell quads (`bg_rebuild`), and timed
   PTY-supervisor waits (`supervisor_poll`).
 - `process`: the whole process's CPU time over the interval (all threads,
   including Metal/AppKit queues and PTY workers) and, on macOS, its
