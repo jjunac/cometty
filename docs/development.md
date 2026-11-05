@@ -110,6 +110,7 @@ Do not run all `--ignored` tests indiscriminately without a working GPU.
 | Transport / lifecycle | `pty::`, `app::scheduling::`, `app::pty_io::`: notification races, fairness, shared budget, FIFO/reply reserve, cancellation/reaping |
 | Text / frames | `renderer::`: named-font resolution, cached/uncached complex shaping fingerprints, run/advance capacity bounds, prepared-key invalidation, pins, upload/submit/free order on every returned outcome |
 | Search / selection / links | `search::`, `selection::`, `links::`, `app::search::`, `app::tab::`: projected columns, eviction/recycling, security gates, no background reveal |
+| Tab reordering | `tabbar::`, `renderer::tabbar_ui::`, `app::tab::`, `app::mouse::`, `app::scheduling::`, `app::session::`: gesture/preview/drop, stable identity, capture/cancellation, overflow/idle, preserved caches/transport/drain cursor, saved order |
 | Panels / settings / logs | `app::settings::`, `app::persistence::`, `logbuf::`, `logging::`, `renderer::log_ui::`: generation ordering, bounded indexing, independent filters, focus and fixed-height rows |
 
 For memory/parser or optimization changes, also run the relevant tests with
@@ -128,6 +129,13 @@ headless tests:
   Unicode-wide highlights, eviction while streaming, close and resume typing.
 - Mouse/chrome: selection/word/line dragging, scrollbar fade and stationary idle,
   link modifier/click before mouse reporting, Shift override, tooltips/animations.
+- Tabs: drag first/middle/last in both directions, activate an inactive source,
+  crowded-strip edge/trackpad scrolling, click/×/+, Esc/outside/focus-loss
+  cancellation, source/other shell exit during a drag, resize/DPI mid-drag,
+  macOS empty-titlebar dragging/zoom (tab bodies, × and + must never move the
+  window), system tiling/fullscreen/display changes, search/terminal Tab and IME
+  afterward, and saved order after quit/restore. Headless widget tests do not
+  replace this native pass.
 - Window: resize/DPI, one↔many tabs (macOS always reserves the titlebar), fullscreen
   one-pixel workaround, minimize/occlude/restore, surface recovery and sync timeout.
 - Settings: live edits/resets, CLI theme precedence, custom path, save failure,

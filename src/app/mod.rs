@@ -85,6 +85,8 @@ pub struct App {
     /// Chrome under the pointer at its last motion event, see
     /// [`mouse::pointer_repaint`].
     pub(crate) chrome_hover: mouse::ChromeHover,
+    /// Native pointer capture + pure drag preview state for the tab strip.
+    pub(crate) tab_drag: crate::tabbar::TabDrag,
     /// Multi-click chain for word/line select: last press time, view cell,
     /// and count (1 single, 2 word, 3 line). Separate from
     /// `last_titlebar_click` (macOS zoom).
@@ -155,6 +157,7 @@ impl App {
             wheel_accum: 0.0,
             cursor_pos: None,
             chrome_hover: mouse::ChromeHover::None,
+            tab_drag: crate::tabbar::TabDrag::default(),
             last_click: None,
             last_titlebar_click: None,
             mouse_pressed: 0,

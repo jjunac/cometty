@@ -230,6 +230,30 @@ mod tests {
     }
 
     #[test]
+    fn a_committed_reorder_marks_and_snapshots_the_new_order_and_active_identity() {
+        let path = std::env::temp_dir().join("cometty-session-reorder-not-written.toml");
+        let mut app = app_at(&path);
+        add_tab(&mut app, "/one");
+        add_tab(&mut app, "/two");
+        add_tab(&mut app, "/three");
+        app.active = 1;
+        assert!(app.session.deadline().is_none());
+        assert!(app.reorder_tab(crate::tabbar::TabMove { id: 0, to: 2 }));
+        assert!(app.session.deadline().is_some());
+        let (snapshot, dumps) = app.session_snapshot(false);
+        assert!(dumps.is_empty());
+        assert_eq!(snapshot.active, 0);
+        assert_eq!(
+            snapshot
+                .tabs
+                .iter()
+                .map(|tab| tab.cwd.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("/two"), Some("/three"), Some("/one")]
+        );
+    }
+
+    #[test]
     fn exit_saves_open_tabs_and_forgets_closed_sessions() {
         let dir = std::env::temp_dir().join(format!("cometty-app-session-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

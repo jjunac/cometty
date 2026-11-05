@@ -6,6 +6,9 @@
 //! and testable instead of an `NSBundle` query.
 
 #[cfg(target_os = "macos")]
+pub(crate) mod titlebar;
+
+#[cfg(target_os = "macos")]
 use std::path::Path;
 
 /// True when `path` is the main executable inside a macOS `.app` bundle.

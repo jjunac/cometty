@@ -3,7 +3,8 @@
 Sources: [`renderer/mod.rs`](../src/renderer/mod.rs),
 [`text.rs`](../src/renderer/text.rs),
 [`background.rs`](../src/renderer/background.rs),
-[`overlay.rs`](../src/renderer/overlay.rs), and
+[`overlay.rs`](../src/renderer/overlay.rs),
+[`tabbar_ui.rs`](../src/renderer/tabbar_ui.rs), and
 [`frame.rs`](../src/renderer/frame.rs).
 
 One shared renderer uses wgpu for the surface/pipeline, cosmic-text for layout,
@@ -32,6 +33,13 @@ match. Do not retain a shaped line for all history rows to optimize scrolling:
 current layouts are viewport-sized and tied to positions, not a scroll-aware cache.
 The bounded run cache is position-independent: moved/repeated text can reuse final
 shaping/fallback, but layouts and GPU preparation still follow their own keys.
+
+A tab reorder is chrome-only while the active stable identity stays unchanged:
+it must not invalidate terminal snapshots, text/background preparation, or search
+views. `tabbar_ui` caches title widths for the current egui font, retains the
+horizontal strip offset, and records clipped hit rects; app-owned `TabDrag` holds
+the native gesture. Previewing a drop moves only painted rectangles, not tab
+ownership. See [tab ordering](interaction.md#tab-ordering-and-pointer-ownership).
 
 The snapshot copies only changed visible rows into reusable vectors, decoding
 compact history directly. A changed grid version can still hash every visible
@@ -136,6 +144,10 @@ headless test checks the retained buffer against a fresh build frame by frame.
   when the cell draws a block element or decoration.
 - Hint underlines depend on modifier state, not only grid versions. Existing
   application underlines retain their styling.
+- Every visible tab group, including a single tab, has a subtle two-device-pixel
+  outline around its inset container, using the theme's tab-border color and
+  configured bar corner radius. The outline excludes the traffic lights and `+`
+  button. It adds no grid space or interactive region.
 
 The macOS Intel Iris Plus/Metal fullscreen workaround deliberately crops the
 surface **one pixel narrower** when fullscreen/display-sized. Exactly

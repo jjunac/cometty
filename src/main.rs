@@ -200,6 +200,10 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
+        #[cfg(target_os = "macos")]
+        if let Err(error) = platform::titlebar::install(&window) {
+            log::warn!("could not claim titlebar pointer gestures: {error:#}");
+        }
         let size = window.inner_size();
         let (w, h) = (size.width.max(1), size.height.max(1));
         let scale = window.scale_factor() as f32;
@@ -312,8 +316,16 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { event, .. }
             if event.logical_key == Key::Named(NamedKey::Tab)
         ) && self.terminal_owns_keyboard();
+        let skip_egui_for_drag_escape = matches!(
+            &event,
+            WindowEvent::KeyboardInput { event, .. }
+            if event.logical_key == Key::Named(NamedKey::Escape)
+        ) && (self.tab_drag.captures_pointer()
+            || self.tab_drag.source().is_some());
         let response = match (self.renderer.as_mut(), self.window.as_ref()) {
-            (Some(r), Some(w)) if !skip_egui_for_tab => r.on_window_event(w, &event),
+            (Some(r), Some(w)) if !skip_egui_for_tab && !skip_egui_for_drag_escape => {
+                r.on_window_event(w, &event)
+            }
             _ => egui_winit::EventResponse::default(),
         };
         let egui_consumed = response.consumed;

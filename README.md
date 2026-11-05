@@ -91,6 +91,12 @@ application is handling the mouse.
 
 Hold **Cmd** on macOS or **Ctrl** on Linux and click a link to open it. Click a
 tab to switch, its **×** to close, or **+** to open another.
+Drag a tab left or right to reorder it; hold near either end of a crowded tab
+strip to scroll. Release to place it, or press **Esc** to cancel. Dropping outside
+the strip cancels rather than opening a new window. Tab order is saved with the
+session.
+On macOS, drag the empty space around the tabs to move the window—not the tabs
+or their buttons.
 
 ## Preferences
 

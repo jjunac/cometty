@@ -6,14 +6,13 @@ user-facing behavior to the [README](README.md), then delete it here. Known
 storage/latency gaps live in [memory](docs/memory.md#remaining-limits-and-follow-up-work).
 
 ## Session restoration
-- [ ] Per-tab shell command history (later)
+- Per-tab shell command history (later)
 
 ## Tabs & panes
-- [ ] Pane splitting (horizontal and vertical) and resizing
-- [ ] Tab reordering
-- [ ] Vertical tab bar
+- Pane splitting (horizontal and vertical) and resizing
+- Vertical tab bar
 
 ## Other features
-- [ ] Experiment with a way to have "hidden" tabs for background processes
-- [ ] Explore the sub-tab system (rather than pane)
-- [ ] Customizable key bindings
+- Experiment with a way to have "hidden" tabs for background processes
+- Explore the sub-tab system (rather than pane)
+- Customizable key bindings

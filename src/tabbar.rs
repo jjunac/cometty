@@ -10,11 +10,239 @@
 //! right of the traffic lights (see [`leading_inset_points`]). The active
 //! tab is a nested pill. The close `×` is reserved on the **left** of each
 //! tab (painted on hover only, layout-stable); the `⌘N` shortcut hint sits
-//! on the right for the first 9 tabs. A lone tab renders as a plain title
-//! (no pill, close box or shortcut), so the bar reads as the window
-//! titlebar.
+//! on the right for the first 9 tabs. A lone tab keeps the container outline
+//! but renders as a plain title (no nested pill, close box or shortcut).
 
 use crate::config::TabbarConfig;
+
+/// A painted tab's identity is independent of its position (and label).
+pub struct TabLabel {
+    pub id: u64,
+    pub title: String,
+}
+
+/// Move an existing tab to this final, zero-based position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TabMove {
+    pub id: u64,
+    pub to: usize,
+}
+
+const DRAG_THRESHOLD: f32 = 6.0;
+const SCROLL_EDGE: f32 = 24.0;
+const SCROLL_SPEED: f32 = 600.0;
+
+#[derive(Clone, Copy, Debug)]
+struct TabPress {
+    id: u64,
+    x: f32,
+    grab: f32,
+    dragging: bool,
+}
+
+/// App-owned pointer gesture. Native events advance it even when presentation
+/// is deferred; the widget only projects the preview and returns a drop action.
+/// Cancellation retains the matching release, never forwarding it to a PTY.
+#[derive(Default)]
+pub struct TabDrag {
+    press: Option<TabPress>,
+    pointer: Option<[f32; 2]>,
+    held: bool,
+    swallow_release: bool,
+    released: bool,
+    cancelled: bool,
+}
+
+/// Last/current strip geometry, all in logical points. `left` includes the
+/// horizontal scroll offset; `viewport` excludes traffic lights and `+`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DragLayout {
+    pub viewport: [f32; 4],
+    pub left: f32,
+    pub width: f32,
+    pub count: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DragPreview {
+    pub to: usize,
+    pub left: f32,
+}
+
+fn contains(rect: [f32; 4], [x, y]: [f32; 2]) -> bool {
+    x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3]
+}
+
+impl TabDrag {
+    /// Begin a primary press on the strip. Only a tab body supplies a source;
+    /// close/plus/empty chrome still own their release, but cannot start a drag.
+    pub(crate) fn begin(&mut self, source: Option<(u64, [f32; 4])>, pointer: [f32; 2]) {
+        *self = Self {
+            press: source.and_then(|(id, rect)| {
+                let width = rect[2] - rect[0];
+                (width > 0.0 && width.is_finite()).then(|| TabPress {
+                    id,
+                    x: pointer[0],
+                    grab: ((pointer[0] - rect[0]) / width).clamp(0.0, 1.0),
+                    dragging: false,
+                })
+            }),
+            pointer: Some(pointer),
+            held: true,
+            swallow_release: true,
+            ..Self::default()
+        };
+    }
+
+    /// Return the tab to activate exactly once, when horizontal motion crosses
+    /// the threshold. A vertical move alone is not a reorder gesture.
+    pub(crate) fn moved(&mut self, pointer: [f32; 2]) -> Option<u64> {
+        self.pointer = Some(pointer);
+        let press = self.press.as_mut()?;
+        if self.held && !press.dragging && (pointer[0] - press.x).abs() >= DRAG_THRESHOLD {
+            press.dragging = true;
+            return Some(press.id);
+        }
+        None
+    }
+
+    pub(crate) fn pointer_gone(&mut self) {
+        if self.held {
+            self.pointer = None;
+        }
+    }
+
+    pub(crate) fn captures_pointer(&self) -> bool {
+        self.held
+    }
+
+    pub(crate) fn source(&self) -> Option<u64> {
+        self.press.map(|press| press.id)
+    }
+
+    pub(crate) fn dragging(&self) -> bool {
+        self.press.is_some_and(|press| press.dragging)
+    }
+
+    pub(crate) fn suppress_clicks(&self) -> bool {
+        self.cancelled || self.dragging()
+    }
+
+    /// The matching release is swallowed even after Escape or focus loss.
+    pub(crate) fn release(&mut self) -> bool {
+        if !self.swallow_release {
+            return false;
+        }
+        self.swallow_release = false;
+        self.held = false;
+        self.released = true;
+        true
+    }
+
+    pub(crate) fn cancel(&mut self) -> bool {
+        let changed = self.held || self.press.is_some();
+        if changed {
+            self.press = None;
+            self.cancelled = true;
+        }
+        changed
+    }
+
+    pub(crate) fn focus_lost(&mut self) {
+        self.cancel();
+        // A release outside this window may never arrive. Stop capturing motion
+        // now, but retain the release guard until a release or a fresh press.
+        self.held = false;
+        self.released = true;
+    }
+
+    /// A vanished source must not turn into the tab that took its old slot.
+    pub(crate) fn retain_source(&mut self, valid: bool) {
+        if self.press.is_some() && !valid {
+            self.cancel();
+        }
+    }
+
+    pub(crate) fn preview(&self, layout: DragLayout) -> Option<DragPreview> {
+        let press = self.press.filter(|press| press.dragging)?;
+        let pointer = self.pointer?;
+        if layout.count < 2 || layout.width <= 0.0 || !layout.width.is_finite() {
+            return None;
+        }
+        if self.released && !contains(layout.viewport, pointer) {
+            return None;
+        }
+        let center = pointer[0] + (0.5 - press.grab) * layout.width;
+        if !center.is_finite() {
+            return None;
+        }
+        let to = ((center - layout.left) / layout.width)
+            .floor()
+            .clamp(0.0, (layout.count - 1) as f32) as usize;
+        let left = if self.released {
+            layout.left + to as f32 * layout.width
+        } else {
+            (pointer[0] - press.grab * layout.width).clamp(
+                layout.viewport[0],
+                (layout.viewport[2] - layout.width).max(layout.viewport[0]),
+            )
+        };
+        Some(DragPreview { to, left })
+    }
+
+    pub(crate) fn drop_action(&self, layout: DragLayout, from: usize) -> Option<TabMove> {
+        if !self.released {
+            return None;
+        }
+        let preview = self.preview(layout)?;
+        (preview.to != from).then_some(TabMove {
+            id: self.source()?,
+            to: preview.to,
+        })
+    }
+
+    /// Retire the ended gesture after the widget has suppressed its click and
+    /// gathered its drop action. Keep cancellation until the next native press.
+    pub(crate) fn finish_frame(&mut self) {
+        if self.released {
+            self.press = None;
+            self.released = false;
+        }
+    }
+
+    pub(crate) fn scroll_offset(&self, layout: DragLayout, offset: f32, dt: f32) -> f32 {
+        let max = (layout.width * layout.count as f32 - (layout.viewport[2] - layout.viewport[0]))
+            .max(0.0);
+        let offset = offset.clamp(0.0, max);
+        if !self.held || !self.dragging() {
+            return offset;
+        }
+        let Some(pointer) = self.pointer.filter(|&pos| contains(layout.viewport, pos)) else {
+            return offset;
+        };
+        let edge = SCROLL_EDGE.min((layout.viewport[2] - layout.viewport[0]) * 0.5);
+        if edge <= 0.0 || !dt.is_finite() {
+            return offset;
+        }
+        let left = ((layout.viewport[0] + edge - pointer[0]) / edge).clamp(0.0, 1.0);
+        let right = ((pointer[0] - (layout.viewport[2] - edge)) / edge).clamp(0.0, 1.0);
+        (offset + (right - left) * SCROLL_SPEED * dt.clamp(0.0, 0.05)).clamp(0.0, max)
+    }
+}
+
+/// Remap an index after removing `from` and inserting it at final index `to`.
+/// Used for both the active tab and the persistent PTY service cursor.
+pub(crate) fn index_after_move(index: usize, from: usize, to: usize) -> usize {
+    if index == from {
+        to
+    } else if from < to && index > from && index <= to {
+        index - 1
+    } else if to < from && index >= to && index < from {
+        index + 1
+    } else {
+        index
+    }
+}
 
 /// Width reserved on the left of the bar for the OS traffic lights
 /// (lights + margin). 76pt on macOS, 0 elsewhere. A single `cfg!`
@@ -60,7 +288,20 @@ pub fn plus_rect(screen_w: f32, config: &TabbarConfig) -> [f32; 4] {
 /// the bar but not on the traffic lights, a tab, or the `+` button.
 /// Callers on macOS start a native window drag (`Window::drag_window`)
 /// in this case so the merged titlebar behaves like Brave's.
-pub fn is_titlebar_drag(x: f32, y: f32, screen_w: f32, bar_h: f32, config: &TabbarConfig) -> bool {
+pub fn is_titlebar_drag(
+    x: f32,
+    y: f32,
+    screen_w: f32,
+    bar_h: f32,
+    config: &TabbarConfig,
+    painted: StripTarget,
+) -> bool {
+    // The last painted controls take precedence over geometric fallback (for
+    // example during a resize/config transition). Never reinterpret a tab,
+    // close box or plus press as a window drag.
+    if painted != StripTarget::Empty {
+        return false;
+    }
     if bar_h <= 0.0 || y < 0.0 || y >= bar_h {
         return false;
     }
@@ -164,8 +405,8 @@ pub fn fit_title(title: &str, max_width: f32, measure: &mut dyn FnMut(&str) -> f
 pub enum StripTarget {
     #[default]
     Empty,
-    Tab(usize),
-    Close(usize),
+    Tab(u64),
+    Close(u64),
     NewTab,
 }
 
@@ -188,6 +429,190 @@ mod tests {
 
     fn cfg() -> TabbarConfig {
         TabbarConfig::default()
+    }
+
+    fn drag_layout() -> DragLayout {
+        DragLayout {
+            viewport: [100.0, 5.0, 500.0, 35.0],
+            left: 100.0,
+            width: 100.0,
+            count: 4,
+        }
+    }
+
+    fn pressed_drag() -> TabDrag {
+        let mut drag = TabDrag::default();
+        drag.begin(Some((42, [100.0, 5.0, 200.0, 35.0])), [150.0, 20.0]);
+        drag
+    }
+
+    #[test]
+    fn move_index_matches_remove_then_insert_for_every_position() {
+        for len in 1..10 {
+            for from in 0..len {
+                for to in 0..len {
+                    let mut tabs: Vec<_> = (0..len).collect();
+                    let moved = tabs.remove(from);
+                    tabs.insert(to, moved);
+                    for old in 0..len {
+                        assert_eq!(tabs[index_after_move(old, from, to)], old);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn drag_threshold_is_horizontal_and_activates_once_without_committing() {
+        let mut drag = pressed_drag();
+        assert!(drag.captures_pointer());
+        assert_eq!(drag.moved([155.0, 100.0]), None);
+        assert!(!drag.dragging());
+        assert_eq!(drag.moved([156.0, 20.0]), Some(42));
+        assert_eq!(drag.moved([350.0, 20.0]), None);
+        assert_eq!(drag.preview(drag_layout()).unwrap().to, 2);
+        assert_eq!(drag.drop_action(drag_layout(), 0), None);
+        assert!(drag.suppress_clicks());
+        assert!(drag.release());
+        assert!(!drag.captures_pointer());
+        assert_eq!(
+            drag.drop_action(drag_layout(), 0),
+            Some(TabMove { id: 42, to: 2 })
+        );
+        drag.finish_frame();
+        assert_eq!(drag.drop_action(drag_layout(), 0), None);
+        assert!(!drag.dragging());
+        assert!(!drag.release());
+    }
+
+    #[test]
+    fn drop_uses_the_grab_fraction_current_width_and_scrolled_origin() {
+        let mut drag = TabDrag::default();
+        // Grab near the right edge, not the centre. Motion alone must not
+        // immediately jump to the neighbouring slot.
+        drag.begin(Some((8, [300.0, 5.0, 400.0, 35.0])), [390.0, 20.0]);
+        drag.moved([383.0, 20.0]);
+        assert_eq!(drag.preview(drag_layout()).unwrap().to, 2);
+        // Recompute after a resize + horizontal scroll; no stored tab index or
+        // pixel offset survives as an identity/layout assumption.
+        let layout = DragLayout {
+            left: -100.0,
+            width: 200.0,
+            ..drag_layout()
+        };
+        drag.moved([185.0, 20.0]);
+        assert_eq!(drag.preview(layout).unwrap().to, 1);
+        drag.release();
+        assert_eq!(drag.drop_action(layout, 2), Some(TabMove { id: 8, to: 1 }));
+        assert_eq!(
+            drag.preview(layout).unwrap().left,
+            100.0,
+            "release snaps to the final slot"
+        );
+    }
+
+    #[test]
+    fn invalid_or_outside_drops_do_not_reorder_or_turn_into_clicks() {
+        for outside in [[99.0, 20.0], [500.0, 20.0], [350.0, 35.0], [350.0, 100.0]] {
+            let mut drag = pressed_drag();
+            drag.moved(outside);
+            drag.release();
+            assert_eq!(drag.drop_action(drag_layout(), 0), None);
+            assert!(drag.suppress_clicks());
+        }
+        let mut drag = pressed_drag();
+        drag.moved([450.0, 20.0]);
+        drag.pointer_gone();
+        drag.release();
+        assert_eq!(drag.drop_action(drag_layout(), 0), None);
+        for count in [0, 1] {
+            assert!(
+                drag.preview(DragLayout {
+                    count,
+                    ..drag_layout()
+                })
+                .is_none()
+            );
+        }
+        let mut click = pressed_drag();
+        click.release();
+        assert_eq!(click.drop_action(drag_layout(), 0), None);
+        assert!(!click.suppress_clicks());
+    }
+
+    #[test]
+    fn leaving_the_window_after_releasing_inside_does_not_change_the_drop() {
+        let mut drag = pressed_drag();
+        drag.moved([350.0, 20.0]);
+        drag.release();
+        drag.pointer_gone();
+        assert_eq!(
+            drag.drop_action(drag_layout(), 0),
+            Some(TabMove { id: 42, to: 2 })
+        );
+    }
+
+    #[test]
+    fn cancel_source_exit_and_focus_loss_keep_only_the_matching_release() {
+        for focus_loss in [false, true] {
+            let mut drag = pressed_drag();
+            drag.moved([350.0, 20.0]);
+            if focus_loss {
+                drag.focus_lost();
+                assert!(
+                    !drag.captures_pointer(),
+                    "a missing outside release cannot stick capture"
+                );
+            } else {
+                drag.retain_source(false);
+                assert!(drag.captures_pointer());
+            }
+            assert_eq!(drag.moved([450.0, 20.0]), None);
+            assert!(drag.release());
+            assert!(drag.suppress_clicks());
+            assert_eq!(drag.drop_action(drag_layout(), 0), None);
+            drag.finish_frame();
+            assert!(!drag.release());
+            drag.begin(None, [480.0, 20.0]);
+            assert!(!drag.suppress_clicks(), "a new press retires cancellation");
+            assert_eq!(
+                drag.moved([110.0, 20.0]),
+                None,
+                "close/plus cannot start a drag"
+            );
+            assert!(!drag.dragging());
+        }
+    }
+
+    #[test]
+    fn edge_scroll_is_clamped_and_stops_outside_in_the_middle_or_after_release() {
+        let layout = DragLayout {
+            count: 10,
+            ..drag_layout()
+        };
+        let mut drag = pressed_drag();
+        drag.moved([499.0, 20.0]);
+        assert!(drag.scroll_offset(layout, 0.0, 1.0 / 60.0) > 0.0);
+        assert_eq!(drag.scroll_offset(layout, 600.0, 1.0), 600.0);
+        assert_eq!(
+            drag.scroll_offset(drag_layout(), 0.0, 1.0),
+            0.0,
+            "no overflow"
+        );
+        drag.moved([100.0, 20.0]);
+        assert!(drag.scroll_offset(layout, 100.0, 1.0 / 60.0) < 100.0);
+        assert_eq!(drag.scroll_offset(layout, 0.0, 1.0), 0.0);
+        for pos in [[300.0, 20.0], [499.0, 50.0], [501.0, 20.0]] {
+            drag.moved(pos);
+            assert_eq!(drag.scroll_offset(layout, 100.0, 1.0), 100.0);
+        }
+        drag.moved([499.0, 20.0]);
+        drag.release();
+        assert_eq!(drag.scroll_offset(layout, 100.0, 1.0), 100.0);
+        let mut drag = pressed_drag();
+        drag.moved([499.0, 20.0]);
+        drag.cancel();
+        assert_eq!(drag.scroll_offset(layout, 100.0, 1.0), 100.0);
     }
 
     #[test]
@@ -322,6 +747,7 @@ mod tests {
         );
         assert_eq!(p[1], cfg.inset_y);
         assert_eq!((p[2], p[3]), (cfg.plus_diameter, cfg.plus_diameter));
+        assert_eq!(800.0 - (p[0] + p[2]), cfg.inset_x);
     }
 
     #[test]
@@ -331,14 +757,22 @@ mod tests {
         let screen_w = 800.0;
         let mid_y = cfg.inset_y + 4.0;
         // Hidden bar: nothing is draggable.
-        assert!(!is_titlebar_drag(400.0, 10.0, screen_w, 0.0, &cfg));
+        assert!(!is_titlebar_drag(
+            400.0,
+            10.0,
+            screen_w,
+            0.0,
+            &cfg,
+            StripTarget::Empty
+        ));
         // On a tab: not draggable.
         assert!(!is_titlebar_drag(
             leading_inset_points(&cfg) + 4.0,
             mid_y,
             screen_w,
             bar_h,
-            &cfg
+            &cfg,
+            StripTarget::Empty
         ));
         // On the `+` button: not draggable.
         let p = plus_rect(screen_w, &cfg);
@@ -347,7 +781,8 @@ mod tests {
             p[1] + 1.0,
             screen_w,
             bar_h,
-            &cfg
+            &cfg,
+            StripTarget::Empty
         ));
         // Trailing margin past the `+` button: draggable.
         assert!(is_titlebar_drag(
@@ -355,7 +790,8 @@ mod tests {
             mid_y,
             screen_w,
             bar_h,
-            &cfg
+            &cfg,
+            StripTarget::Empty
         ));
         // Vertical inset above the tab row, inside the container x-range:
         // draggable.
@@ -364,13 +800,54 @@ mod tests {
             2.0,
             screen_w,
             bar_h,
-            &cfg
+            &cfg,
+            StripTarget::Empty
         ));
         // Left margin: draggable on plain platforms, traffic lights on macOS.
         if cfg!(target_os = "macos") {
-            assert!(!is_titlebar_drag(4.0, mid_y, screen_w, bar_h, &cfg));
+            assert!(!is_titlebar_drag(
+                4.0,
+                mid_y,
+                screen_w,
+                bar_h,
+                &cfg,
+                StripTarget::Empty
+            ));
         } else {
-            assert!(is_titlebar_drag(4.0, mid_y, screen_w, bar_h, &cfg));
+            assert!(is_titlebar_drag(
+                4.0,
+                mid_y,
+                screen_w,
+                bar_h,
+                &cfg,
+                StripTarget::Empty
+            ));
+        }
+    }
+
+    #[test]
+    fn painted_controls_win_over_empty_chrome_geometry_during_layout_transitions() {
+        let cfg = cfg();
+        // Geometric fallback alone considers this trailing margin draggable.
+        // A control painted here by the previous layout must still own its hit.
+        let (x, y) = (798.0, 20.0);
+        assert!(is_titlebar_drag(
+            x,
+            y,
+            800.0,
+            38.0,
+            &cfg,
+            StripTarget::Empty
+        ));
+        for target in [
+            StripTarget::Tab(42),
+            StripTarget::Close(42),
+            StripTarget::NewTab,
+        ] {
+            assert!(
+                !is_titlebar_drag(x, y, 800.0, 38.0, &cfg, target),
+                "{target:?}"
+            );
         }
     }
 }

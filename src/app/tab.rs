@@ -2,7 +2,7 @@
 //!
 //! `App` holds `tabs: Vec<Tab>` and an `active` index; the renderer,
 //! window, clipboard, and blink state stay shared. Tab management
-//! (spawn/switch/close) lives here so `keyboard` / `pty_io` / `redraw`
+//! (spawn/switch/close/reorder) lives here so `keyboard` / `pty_io` / `redraw`
 //! stay thin.
 
 use std::time::{Duration, Instant};
@@ -54,7 +54,7 @@ impl Default for LinkHintCache {
 
 /// A single terminal tab.
 pub struct Tab {
-    /// Monotonic session identity; indices change when other tabs close.
+    /// Monotonic session identity; indices change on close and reorder.
     pub(crate) id: u64,
     pub(crate) terminal: Terminal,
     pub(crate) pty: PtySession,
@@ -460,12 +460,49 @@ impl App {
     }
 
     /// Labels for every tab in order, for the tab-bar overlay.
-    pub(crate) fn tab_titles(&self) -> Vec<String> {
+    pub(crate) fn tab_labels(&self) -> Vec<crate::tabbar::TabLabel> {
         self.tabs
             .iter()
             .enumerate()
-            .map(|(i, t)| self.title_for_tab(i, t))
+            .map(|(i, t)| crate::tabbar::TabLabel {
+                id: t.id,
+                title: self.title_for_tab(i, t),
+            })
             .collect()
+    }
+
+    pub(crate) fn tab_index(&self, id: u64) -> Option<usize> {
+        self.tabs.iter().position(|tab| tab.id == id)
+    }
+
+    /// Commit one drop, moving the entire tab (including its transport and
+    /// caches). A positional change is not a content switch or a grid resize.
+    pub(crate) fn reorder_tab(&mut self, movement: crate::tabbar::TabMove) -> bool {
+        let Some(from) = self.tab_index(movement.id) else {
+            return false;
+        };
+        let to = movement.to;
+        if to >= self.tabs.len() || from == to {
+            return false;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active = crate::tabbar::index_after_move(self.active, from, to);
+        self.pty_schedule.moved(from, to);
+        self.session_changed();
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+        true
+    }
+
+    pub(crate) fn reconcile_tab_drag(&mut self) {
+        let valid = self.tabs.len() > 1
+            && self
+                .tab_drag
+                .source()
+                .is_some_and(|id| self.tab_index(id).is_some());
+        self.tab_drag.retain_source(valid);
     }
 
     pub(crate) fn title_for_tab(&self, i: usize, t: &Tab) -> String {
@@ -589,6 +626,7 @@ impl App {
         }
         let mut tab = Tab::new(id, terminal, pty);
         tab.spawn_cwd = cwd.map(str::to_string);
+        self.cancel_tab_drag();
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.spawned_any = true;
@@ -640,6 +678,13 @@ impl App {
         if index >= self.tabs.len() || index == self.active {
             return;
         }
+        if self
+            .tab_drag
+            .source()
+            .is_some_and(|id| self.tabs[index].id != id)
+        {
+            self.cancel_tab_drag();
+        }
         if let Some(old) = self.active_tab_mut() {
             old.last_output = None;
             old.last_key_write = None;
@@ -677,6 +722,7 @@ impl App {
         log::debug!("closed tab {index} ({} left)", self.tabs.len() - 1);
         self.tabs.remove(index);
         self.pty_schedule.removed(&[index], self.tabs.len());
+        self.reconcile_tab_drag();
         self.session_changed();
         if self.tabs.is_empty() {
             return true;
@@ -703,6 +749,142 @@ mod tests {
 
     fn cfg() -> TabbarConfig {
         TabbarConfig::default()
+    }
+
+    fn app_with_tabs(count: usize) -> (App, Vec<crate::pty::input::InputReceiver>) {
+        let mut config = Config::default();
+        config.tabbar.title_format = "$tab".into();
+        let mut app = App::new(
+            None,
+            crate::theme::Theme::default(),
+            config,
+            crate::app::AppStartup {
+                config_path_override: None,
+                cli_theme: None,
+                config_corrupt: false,
+            },
+            std::sync::Arc::new(std::sync::Mutex::new(crate::logbuf::LogBuffer::new(10))),
+        );
+        let mut inputs = Vec::new();
+        for id in 0..count {
+            let (pty, _, input) = crate::pty::test_support::session();
+            let mut terminal = Terminal::new(20, 2, crate::theme::Theme::default());
+            terminal.feed(format!("tab {id}\r\nhistory {id}\r\nscreen {id}").as_bytes());
+            let mut tab = Tab::new(id as u64, terminal, pty);
+            tab.selection = Some(Selection::new(CellPos { x: 1, y: 1 }));
+            tab.search.focus_or_open();
+            tab.search.query = id.to_string();
+            tab.search.refresh(tab.terminal.grid());
+            app.tabs.push(tab);
+            inputs.push(input);
+        }
+        app.next_tab_id = count as u64;
+        (app, inputs)
+    }
+
+    #[test]
+    fn reorder_moves_the_whole_tab_without_switching_content_or_invalidating_views() {
+        let (mut app, inputs) = app_with_tabs(5);
+        app.active = 2;
+        let active_id = app.tabs[2].id;
+        app.snapshot_tab = Some(active_id);
+        app.snapshot_version = app.tabs[2].terminal.grid().version;
+        let snapshot_version = app.snapshot_version;
+        let versions: Vec<_> = app
+            .tabs
+            .iter()
+            .map(|tab| tab.terminal.grid().version)
+            .collect();
+        let views: Vec<_> = app
+            .tabs
+            .iter_mut()
+            .map(|tab| tab.search.view(tab.terminal.grid()).unwrap())
+            .collect();
+        app.pty_schedule
+            .add_bytes(super::super::scheduling::MAX_DRAIN_BYTES);
+
+        for movement in [
+            crate::tabbar::TabMove { id: 0, to: 4 },
+            crate::tabbar::TabMove { id: 2, to: 0 },
+            crate::tabbar::TabMove { id: 4, to: 1 },
+            crate::tabbar::TabMove { id: 2, to: 4 },
+        ] {
+            assert!(app.reorder_tab(movement));
+            assert_eq!(app.tabs[app.active].id, active_id);
+            assert_eq!(app.snapshot_tab, Some(active_id));
+            assert_eq!(app.snapshot_version, snapshot_version);
+            assert!(
+                app.pty_schedule.exhausted(Duration::ZERO),
+                "a move cannot reset the shared turn budget"
+            );
+            for tab in &mut app.tabs {
+                let id = tab.id as usize;
+                assert_eq!(tab.terminal.grid().version, versions[id]);
+                assert_eq!(tab.terminal.grid().scrollback_len(), 1);
+                assert!(tab.selection.is_some());
+                assert_eq!(tab.search.query, id.to_string());
+                let view = tab.search.view(tab.terminal.grid()).unwrap();
+                assert!(
+                    std::sync::Arc::ptr_eq(&view, &views[id]),
+                    "search cache travels with the tab"
+                );
+            }
+        }
+        for tab in &app.tabs {
+            assert!(tab.pty.write(vec![tab.id as u8]));
+        }
+        for (id, input) in inputs.iter().enumerate() {
+            assert_eq!(
+                input.try_recv().unwrap(),
+                [id as u8],
+                "transport stays attached to identity"
+            );
+        }
+        let labels = app.tab_labels();
+        for (index, label) in labels.iter().enumerate() {
+            assert_eq!(label.id, app.tabs[index].id);
+            assert_eq!(
+                label.title,
+                (index + 1).to_string(),
+                "$tab follows committed order"
+            );
+        }
+    }
+
+    #[test]
+    fn reorder_ignores_noop_out_of_range_and_vanished_sources() {
+        let (mut app, _) = app_with_tabs(3);
+        app.active = 1;
+        for movement in [
+            crate::tabbar::TabMove { id: 1, to: 1 },
+            crate::tabbar::TabMove { id: 1, to: 3 },
+            crate::tabbar::TabMove { id: 99, to: 0 },
+        ] {
+            assert!(!app.reorder_tab(movement));
+            assert_eq!(
+                app.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+                [0, 1, 2]
+            );
+            assert_eq!(app.active, 1);
+        }
+        app.tabs.clear();
+        assert!(!app.reorder_tab(crate::tabbar::TabMove { id: 1, to: 0 }));
+    }
+
+    #[test]
+    fn closing_a_neighbour_retains_the_drag_but_closing_its_source_cancels_it() {
+        let (mut app, _) = app_with_tabs(4);
+        app.tab_drag
+            .begin(Some((2, [100.0, 5.0, 200.0, 35.0])), [150.0, 20.0]);
+        app.tab_drag.moved([350.0, 20.0]);
+        app.close_tab(0);
+        assert_eq!(app.tab_drag.source(), Some(2));
+        assert_eq!(app.tab_index(2), Some(1));
+        app.close_tab(1);
+        assert_eq!(app.tab_drag.source(), None);
+        assert!(app.tab_drag.captures_pointer());
+        assert!(app.tab_drag.release());
+        assert!(app.tab_drag.suppress_clicks());
     }
 
     fn vars<'a>(

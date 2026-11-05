@@ -91,8 +91,7 @@ impl App {
     /// Pointer cursor over a clickable link, default everywhere else.
     /// Cheap no-op while the icon is unchanged (called on every move).
     pub(crate) fn update_link_cursor(&mut self) {
-        let cell = self
-            .hints_active()
+        let cell = (self.hints_active() && !self.tab_drag.captures_pointer())
             .then(|| self.cell_under_cursor())
             .flatten();
         let detect_urls = self.config.links.detect_urls;

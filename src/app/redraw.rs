@@ -155,7 +155,7 @@ impl App {
         self.sync_window_title();
         // Owned: the overlay borrows titles while also taking
         // `&mut` to the active tab's scrollbar.
-        let titles = self.tab_titles();
+        let labels = self.tab_labels();
         self.settings.history_usage = self.tabs.get(active).map(|tab| {
             let grid = tab.terminal.grid();
             (
@@ -213,8 +213,9 @@ impl App {
                     visible,
                     offset,
                     is_alt,
-                    tab_titles: &titles,
+                    tabs: &labels,
                     active_tab: active,
+                    tab_drag: &mut self.tab_drag,
                     settings: &mut self.settings,
                     config: &mut self.config,
                     logs: &mut self.logs,
@@ -322,13 +323,16 @@ impl App {
         {
             w.request_redraw();
         }
-        if let Some(i) = output.selected_tab {
+        if let Some(i) = output.selected_tab.and_then(|id| self.tab_index(id)) {
             self.switch_tab(i);
+        }
+        if let Some(movement) = output.reordered_tab {
+            self.reorder_tab(movement);
         }
         if output.new_tab {
             self.spawn_tab_for_window();
         }
-        if let Some(i) = output.close_tab {
+        if let Some(i) = output.close_tab.and_then(|id| self.tab_index(id)) {
             self.close_tab(i);
         }
         if self.tabs.is_empty() {

@@ -9,6 +9,7 @@ configuration writes. Model helpers remain usable without a display or GPU.
 ```text
 App
 ├── shared Window, Renderer, clipboard, Config, settings and log panels
+├── shared native tab-strip pointer capture / drag-preview state
 ├── shared viewport snapshot (only the active view)
 ├── ConfigSaver → ordered background writer
 ├── SessionState → session lock + SessionSaver (ordered background writer)
@@ -29,7 +30,7 @@ This distinction matters when diagnosing memory or invalidating shared caches.
 | --- | --- |
 | [`main.rs`](../src/main.rs) | CLI, startup, winit `ApplicationHandler`, event-loop deadlines, final shutdown |
 | [`app/mod.rs`](../src/app/mod.rs) | App state, cross-subsystem settings application, save/result servicing |
-| [`app/tab.rs`](../src/app/tab.rs) | Tab ownership, spawn/switch/close, title facts, selection rebasing |
+| [`app/tab.rs`](../src/app/tab.rs) | Tab ownership, spawn/switch/close/reorder, title facts, selection rebasing |
 | [`session.rs`](../src/session.rs), [`app/session.rs`](../src/app/session.rs) | Session snapshot format/validation; snapshot, restore, and exit decision |
 | [`app/keyboard.rs`](../src/app/keyboard.rs), [`app/mouse.rs`](../src/app/mouse.rs) | Input dispatch, local shortcuts/selection, terminal reporting |
 | [`app/pty_io.rs`](../src/app/pty_io.rs), [`app/scheduling.rs`](../src/app/scheduling.rs) | Output drain, fair shared budget, resize, visual wake decisions |
@@ -41,7 +42,7 @@ This distinction matters when diagnosing memory or invalidating shared caches.
 | [`config.rs`](../src/config.rs), [`theme.rs`](../src/theme.rs) | Typed settings/defaults and resolved colors |
 | [`logbuf.rs`](../src/logbuf.rs), [`logging.rs`](../src/logging.rs), [`perf.rs`](../src/perf.rs) | Bounded logs and opt-in aggregate diagnostics |
 | [`tabbar.rs`](../src/tabbar.rs), [`scrollbar.rs`](../src/scrollbar.rs) | Testable chrome geometry and animation decisions |
-| [`procinfo.rs`](../src/procinfo.rs), [`menu.rs`](../src/menu.rs), [`icon.rs`](../src/icon.rs), [`platform.rs`](../src/platform.rs) | Best-effort OS integration and launch-context detection |
+| [`procinfo.rs`](../src/procinfo.rs), [`menu.rs`](../src/menu.rs), [`icon.rs`](../src/icon.rs), [`platform.rs`](../src/platform.rs), [`platform/titlebar.rs`](../src/platform/titlebar.rs) | Best-effort OS integration, launch-context detection, and app-owned macOS titlebar gestures |
 
 Panel state belongs in `app/`; egui widgets belong in `renderer/`. Platform
 clipboard access stays in the app, not in the terminal parser.
@@ -114,7 +115,8 @@ egui-winit asks for a repaint on every `CursorMoved`, `CursorEntered`, and
 Pointer motion instead requests a frame only when chrome under the pointer can
 look different (`app::mouse::pointer_repaint`):
 
-- while egui uses the pointer (a scrollbar-thumb or panel drag);
+- while a native tab-strip press captures the pointer, or egui uses it (a
+  scrollbar-thumb or panel drag);
 - on every move over the find bar, and while a settings or log panel is open
   (their widgets, popups, and tooltips have their own hover states);
 - when the hovered element changes among a tab, its close `×`, the `+` button,
@@ -213,7 +215,7 @@ owner-only `scrollback/` directory.
   snapshot is atomically renamed, then every unreferenced dump is deleted. A
   crash leaves either the old pair or the new one. Removal deletes the snapshot
   before the directory.
-- **While running:** tab spawn/close/exit, active-tab switches, shell cwd changes,
+- **While running:** tab spawn/close/exit/reorder, active-tab switches, shell cwd changes,
   window moves/resizes, and restore-setting edits mark the snapshot dirty.
   `SessionSaver` writes at most once per second, anchored at the first change, so
   a crash restores recent state. These runtime writes are tabs-only (no dumps),

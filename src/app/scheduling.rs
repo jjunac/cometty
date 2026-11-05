@@ -113,6 +113,10 @@ impl DrainSchedule {
     pub(crate) fn removed(&mut self, removed: &[usize], len: usize) {
         self.next = super::tab::active_after_removals(self.next, removed, len);
     }
+
+    pub(crate) fn moved(&mut self, from: usize, to: usize) {
+        self.next = crate::tabbar::index_after_move(self.next, from, to);
+    }
 }
 
 /// Synchronized output suppresses presentation, never parsing. A missing
@@ -316,6 +320,40 @@ mod tests {
         schedule.removed(&[0, 1, 2], 0);
         assert_eq!(schedule.next_tab(0, 0), None);
         assert_eq!(schedule.next_tab(1, 0), Some(0));
+    }
+
+    #[test]
+    fn reorder_keeps_the_next_service_identity_phase_and_shared_allowance() {
+        for from in 0..5 {
+            for to in 0..5 {
+                for next in 0..5 {
+                    let mut tabs: Vec<_> = (0..5).collect();
+                    let mut schedule = DrainSchedule {
+                        next,
+                        active_next: true,
+                        bytes: MAX_DRAIN_BYTES,
+                        spent: MAX_DRAIN_TIME / 2,
+                    };
+                    let tab = tabs.remove(from);
+                    tabs.insert(to, tab);
+                    schedule.moved(from, to);
+                    assert_eq!(tabs[schedule.next], next);
+                    assert!(schedule.active_next);
+                    assert_eq!(schedule.bytes, MAX_DRAIN_BYTES);
+                    assert_eq!(schedule.spent, MAX_DRAIN_TIME / 2);
+                    assert!(schedule.exhausted(Duration::ZERO));
+                    // Budget reset is still only at the next event-loop turn.
+                    schedule.begin_turn();
+                    assert!(!schedule.exhausted(Duration::ZERO));
+                    let active = tabs.iter().position(|&id| id == 4).unwrap();
+                    let mut seen = [false; 5];
+                    for _ in 0..10 {
+                        seen[tabs[schedule.next_tab(5, active).unwrap()]] = true;
+                    }
+                    assert!(seen.into_iter().all(|seen| seen));
+                }
+            }
+        }
     }
 
     #[test]

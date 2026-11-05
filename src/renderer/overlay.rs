@@ -1,13 +1,15 @@
 //! egui overlay: tab strip + scrollbar chrome (terminal cells stay glyphon).
 
 use super::search_ui::{self, SearchUiOutput};
+use super::tabbar_ui::TabbarView;
 use super::{Renderer, ScrollCtx};
 
 pub(crate) struct OverlayOutput {
     pub(crate) scroll_to: Option<usize>,
-    pub(crate) selected_tab: Option<usize>,
-    pub(crate) close_tab: Option<usize>,
+    pub(crate) selected_tab: Option<u64>,
+    pub(crate) close_tab: Option<u64>,
     pub(crate) new_tab: bool,
+    pub(crate) reordered_tab: Option<crate::tabbar::TabMove>,
     pub(crate) search: SearchUiOutput,
     pub(crate) paint_jobs: Vec<egui::ClippedPrimitive>,
     pub(crate) screen_descriptor: egui_wgpu::ScreenDescriptor,
@@ -48,8 +50,9 @@ impl Renderer {
             visible,
             offset,
             is_alt,
-            tab_titles,
+            tabs,
             active_tab,
+            tab_drag,
             settings,
             config,
             logs,
@@ -61,15 +64,12 @@ impl Renderer {
         let screen_w_pts = self.width as f32 / scale;
         let screen_h_pts = self.height as f32 / scale;
         // Hidden for a single tab: the grid gets the full window height.
-        let tab_h = crate::app::tab::bar_height_points(tab_titles.len(), &self.user_config.tabbar);
+        let tab_h = crate::app::tab::bar_height_points(tabs.len(), &self.user_config.tabbar);
         let tabbar_cfg = self.user_config.tabbar.clone();
         let scrollbar_cfg = self.user_config.scrollbar.clone();
         let theme = self.theme;
         let opacity = scrollbar.opacity;
         let mut scroll_to: Option<usize> = None;
-        let mut selected_tab: Option<usize> = None;
-        let mut close_tab: Option<usize> = None;
-        let mut new_tab = false;
         let mut hovered = false;
 
         // No chrome visible: skip the egui pass entirely (tessellation +
@@ -87,7 +87,9 @@ impl Renderer {
         {
             let _ = self.egui_state.take_egui_input(window);
             self.search_bar_rect = None;
-            self.tab_strip_targets.clear();
+            self.tabbar_ui.clear();
+            tab_drag.retain_source(false);
+            tab_drag.finish_frame();
             // No chrome is visible, so any egui focus left over from a panel
             // or find bar that just closed is stale. This early return skips
             // the full pass that would run egui's dead-man's-switch, so drop
@@ -108,6 +110,7 @@ impl Renderer {
                 selected_tab: None,
                 close_tab: None,
                 new_tab: false,
+                reordered_tab: None,
                 search: super::search_ui::SearchUiOutput::default(),
                 paint_jobs: Vec::new(),
                 screen_descriptor,
@@ -134,326 +137,18 @@ impl Renderer {
                     });
                 });
         }
-        // Tab strip along the top. Hidden for a single tab (except on
-        // macOS, where it lives in the OS titlebar and is always shown);
-        // a lone tab renders as a plain title next to the `+` button.
-        // Ghostty style: an inset pill container holds equal-width tabs.
-        // On macOS the container starts right of the traffic lights. The
-        // active tab is a nested pill with a 1px border; inactive tabs are
-        // separated by thin dividers. Close `×` is reserved on the left of
-        // each tab (painted on hover only); `⌘N` sits right-aligned.
-        // Each hover-painted element's interactive rect is recorded, so
-        // pointer motion repaints only when the hovered element changes.
-        let mut strip_targets = std::mem::take(&mut self.tab_strip_targets);
-        strip_targets.clear();
-        let mut record = |target: crate::tabbar::StripTarget, rect: egui::Rect| {
-            strip_targets.push((target, [rect.min.x, rect.min.y, rect.max.x, rect.max.y]));
-        };
-        if crate::app::tab::bar_height_points(tab_titles.len(), &tabbar_cfg) > 0.0 {
-            egui::Area::new(egui::Id::new("tabbar"))
-                .fixed_pos(egui::pos2(0.0, 0.0))
-                .order(egui::Order::Foreground)
-                .show(&ctx, |ui| {
-                    ui.set_width(screen_w_pts);
-                    ui.set_height(tab_h);
-                    ui.painter().rect_filled(
-                        egui::Rect::from_min_size(
-                            egui::pos2(0.0, 0.0),
-                            egui::vec2(screen_w_pts, tab_h),
-                        ),
-                        0.0,
-                        theme.background.as_egui_color(),
-                    );
-                    let bar_inset_y = tabbar_cfg.inset_y;
-                    let plus_d = tabbar_cfg.plus_diameter;
-                    let plus_gap = tabbar_cfg.plus_gap;
-                    // macOS: the container starts right of the traffic
-                    // lights; elsewhere `leading` is just the margin.
-                    let leading = crate::tabbar::leading_inset_points(&tabbar_cfg);
-                    let container_w =
-                        crate::tabbar::container_width_points(screen_w_pts, &tabbar_cfg);
-                    let container_h = (tab_h - bar_inset_y * 2.0).max(1.0);
-                    let container_rect = egui::Rect::from_min_size(
-                        egui::pos2(leading, bar_inset_y),
-                        egui::vec2(container_w, container_h),
-                    );
-                    ui.painter().rect_filled(
-                        container_rect,
-                        egui::CornerRadius::same(tabbar_cfg.corner_radius_bar),
-                        theme.background.as_egui_color(),
-                    );
-                    let tab_count = tab_titles.len();
-                    let single_tab = tab_count == 1;
-                    let tab_w = crate::tabbar::tab_width(container_w, tab_count, &tabbar_cfg);
-                    let font_id = egui::TextStyle::Body.resolve(ui.style());
-                    let fg = theme.foreground.as_egui_color();
-                    let dim = fg.gamma_multiply(0.55);
-                    let active_bg = theme.tab_active_bg.as_egui_color();
-                    let border = theme.tab_border.as_egui_color();
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        ui.add_space(leading);
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            ui.add_space(bar_inset_y);
-                            egui::ScrollArea::horizontal()
-                                .max_width(container_w)
-                                .max_height(container_h)
-                                .auto_shrink([false, false])
-                                // The strip still scrolls with the wheel or
-                                // a trackpad, but never paints egui's
-                                // scrollbar: once tabs bottom out at
-                                // `min_tab_width` it drew a thumb inside the
-                                // pills.
-                                .scroll_bar_visibility(
-                                    egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                                )
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 0.0;
-                                        // Scroll-content painter: tab coords shift
-                                        // with the scroll offset, unlike the
-                                        // fixed container rect above.
-                                        let painter = ui.painter().clone();
-                                        // Cached widths: titles rarely change
-                                        // but shaping ran per title per frame.
-                                        if self.title_width_font.as_ref() != Some(&font_id) {
-                                            self.title_width_cache.clear();
-                                            self.title_width_font = Some(font_id.clone());
-                                        }
-                                        if self.title_width_cache.len() > 512 {
-                                            self.title_width_cache.clear();
-                                        }
-                                        let cache = &mut self.title_width_cache;
-                                        let mut measure = |s: &str| {
-                                            if let Some(w) = cache.get(s) {
-                                                return *w;
-                                            }
-                                            let w = painter
-                                                .layout_no_wrap(
-                                                    s.to_owned(),
-                                                    font_id.clone(),
-                                                    egui::Color32::WHITE,
-                                                )
-                                                .size()
-                                                .x;
-                                            cache.insert(s.to_owned(), w);
-                                            w
-                                        };
-                                        for (i, title) in tab_titles.iter().enumerate() {
-                                            ui.push_id(i, |ui| {
-                                                let (tab_rect, tab_resp) = ui.allocate_exact_size(
-                                                    egui::vec2(tab_w, container_h),
-                                                    // Non-focusable click: the strip must
-                                                    // never steal Tab/focus from the PTY.
-                                                    egui::Sense::CLICK,
-                                                );
-                                                let is_active = i == active_tab;
-                                                let tab_hovered = tab_resp.hovered();
-                                                record(
-                                                    crate::tabbar::StripTarget::Tab(i),
-                                                    tab_resp.interact_rect,
-                                                );
-                                                let pill = tab_rect.shrink2(egui::vec2(
-                                                    crate::tabbar::TAB_PILL_INSET_X,
-                                                    crate::tabbar::TAB_PILL_INSET_Y,
-                                                ));
-                                                let pill_radius = egui::CornerRadius::same(
-                                                    tabbar_cfg.corner_radius_tab,
-                                                );
-                                                if is_active && !single_tab {
-                                                    painter.rect_filled(
-                                                        pill,
-                                                        pill_radius,
-                                                        active_bg,
-                                                    );
-                                                    painter.rect_stroke(
-                                                        pill,
-                                                        pill_radius,
-                                                        egui::Stroke::new(1.0, border),
-                                                        egui::StrokeKind::Inside,
-                                                    );
-                                                } else if !single_tab {
-                                                    if tab_hovered {
-                                                        painter.rect_filled(
-                                                            pill,
-                                                            pill_radius,
-                                                            active_bg.gamma_multiply(0.45),
-                                                        );
-                                                    } else if i + 1 < tab_count
-                                                        && i + 1 != active_tab
-                                                    {
-                                                        // Divider between inactive
-                                                        // neighbours; hidden next
-                                                        // to the active pill.
-                                                        painter.line_segment(
-                                                            [
-                                                                egui::pos2(
-                                                                    tab_rect.max.x,
-                                                                    pill.min.y + 4.0,
-                                                                ),
-                                                                egui::pos2(
-                                                                    tab_rect.max.x,
-                                                                    pill.max.y - 4.0,
-                                                                ),
-                                                            ],
-                                                            egui::Stroke::new(
-                                                                1.0,
-                                                                border.gamma_multiply(0.5),
-                                                            ),
-                                                        );
-                                                    }
-                                                }
-                                                // Title: centered. A multi-tab
-                                                // bar fits it between the left
-                                                // close reserve and the right
-                                                // shortcut reserve; a lone tab
-                                                // has neither.
-                                                let shortcut = if single_tab {
-                                                    None
-                                                } else {
-                                                    crate::tabbar::shortcut_label(i)
-                                                };
-                                                let max_title = if single_tab {
-                                                    crate::tabbar::single_tab_title_max_width(
-                                                        tab_w,
-                                                        &tabbar_cfg,
-                                                    )
-                                                } else {
-                                                    crate::tabbar::title_max_width(
-                                                        tab_w,
-                                                        shortcut.is_some(),
-                                                        &tabbar_cfg,
-                                                    )
-                                                };
-                                                let fitted = crate::tabbar::fit_title(
-                                                    title,
-                                                    max_title,
-                                                    &mut measure,
-                                                );
-                                                painter.text(
-                                                    tab_rect.center(),
-                                                    egui::Align2::CENTER_CENTER,
-                                                    fitted,
-                                                    font_id.clone(),
-                                                    if is_active || tab_hovered { fg } else { dim },
-                                                );
-                                                if let Some(label) = shortcut {
-                                                    painter.text(
-                                                        egui::pos2(
-                                                            tab_rect.max.x - 8.0,
-                                                            tab_rect.center().y,
-                                                        ),
-                                                        egui::Align2::RIGHT_CENTER,
-                                                        label,
-                                                        font_id.clone(),
-                                                        dim,
-                                                    );
-                                                }
-                                                // Close box on the left: always
-                                                // allocated (stable hit area),
-                                                // only painted on tab hover. A
-                                                // lone tab draws none: closing it
-                                                // would exit the app and the
-                                                // strip is just its title.
-                                                if !single_tab {
-                                                    let ch = crate::tabbar::close_hit(
-                                                        tab_rect.min.x,
-                                                        container_h,
-                                                        &tabbar_cfg,
-                                                    );
-                                                    let ch_rect = egui::Rect::from_min_size(
-                                                        egui::pos2(ch[0], tab_rect.min.y),
-                                                        egui::vec2(ch[2], ch[3]),
-                                                    );
-                                                    let close_resp = ui.allocate_rect(
-                                                        ch_rect,
-                                                        // Non-focusable like the pill itself.
-                                                        egui::Sense::CLICK,
-                                                    );
-                                                    record(
-                                                        crate::tabbar::StripTarget::Close(i),
-                                                        close_resp.interact_rect,
-                                                    );
-                                                    let close_hovered = close_resp.hovered();
-                                                    // `close_hovered` included: the close rect
-                                                    // overlaps the tab and steals its hover
-                                                    // once the pointer moves onto the ×.
-                                                    if tab_hovered || close_hovered {
-                                                        if close_hovered {
-                                                            painter.circle_filled(
-                                                                ch_rect.center(),
-                                                                8.0,
-                                                                border.gamma_multiply(0.6),
-                                                            );
-                                                        }
-                                                        painter.text(
-                                                            ch_rect.center(),
-                                                            egui::Align2::CENTER_CENTER,
-                                                            "×",
-                                                            font_id.clone(),
-                                                            if close_hovered { fg } else { dim },
-                                                        );
-                                                    }
-                                                    if close_resp.clicked() {
-                                                        // Per-tab close; the last
-                                                        // tab's close exits the app
-                                                        // (App::close_tab).
-                                                        close_tab = Some(i);
-                                                    } else if tab_resp.clicked() {
-                                                        selected_tab = Some(i);
-                                                    }
-                                                } else if tab_resp.clicked() {
-                                                    selected_tab = Some(i);
-                                                }
-                                            });
-                                        }
-                                    });
-                                });
-                        });
-                        ui.add_space(plus_gap);
-                        ui.vertical(|ui| {
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            ui.add_space(bar_inset_y);
-                            ui.push_id("new_tab", |ui| {
-                                let (plus_rect, plus_resp) = ui.allocate_exact_size(
-                                    egui::vec2(plus_d, plus_d),
-                                    // Non-focusable like the tab pills.
-                                    egui::Sense::CLICK,
-                                );
-                                let plus_hovered = plus_resp.hovered();
-                                record(crate::tabbar::StripTarget::NewTab, plus_resp.interact_rect);
-                                let plus_painter = ui.painter().clone();
-                                plus_painter.circle_filled(
-                                    plus_rect.center(),
-                                    plus_d * 0.5 - 1.0,
-                                    if plus_hovered {
-                                        active_bg
-                                    } else {
-                                        theme.background.as_egui_color()
-                                    },
-                                );
-                                plus_painter.circle_stroke(
-                                    plus_rect.center(),
-                                    plus_d * 0.5 - 1.0,
-                                    egui::Stroke::new(1.0, border),
-                                );
-                                plus_painter.text(
-                                    plus_rect.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "+",
-                                    font_id.clone(),
-                                    if plus_hovered { fg } else { dim },
-                                );
-                                if plus_resp.clicked() {
-                                    new_tab = true;
-                                }
-                            });
-                        });
-                    });
-                });
-        }
-        self.tab_strip_targets = strip_targets;
+        let tab_actions = self.tabbar_ui.show(
+            &ctx,
+            TabbarView {
+                width: screen_w_pts,
+                height: tab_h,
+                tabs,
+                active: active_tab,
+            },
+            tab_drag,
+            &tabbar_cfg,
+            theme,
+        );
         egui::Area::new(egui::Id::new("scrollbar"))
             .fixed_pos(egui::pos2(0.0, 0.0))
             .order(egui::Order::Foreground)
@@ -592,9 +287,10 @@ impl Renderer {
         };
         OverlayOutput {
             scroll_to,
-            selected_tab,
-            close_tab,
-            new_tab,
+            selected_tab: tab_actions.selected_tab,
+            close_tab: tab_actions.close_tab,
+            new_tab: tab_actions.new_tab,
+            reordered_tab: tab_actions.reordered_tab,
             search: search_actions,
             paint_jobs,
             screen_descriptor,

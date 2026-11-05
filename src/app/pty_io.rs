@@ -201,6 +201,9 @@ impl App {
         for i in exited.iter().rev() {
             self.tabs.remove(*i);
         }
+        if removed {
+            self.reconcile_tab_drag();
+        }
         if removed || cwd_changed {
             self.session_changed();
         }
@@ -418,6 +421,29 @@ mod tests {
         assert_eq!(app.tabs[0].id, 3);
         assert_eq!(app.active, 0);
         assert_ne!(app.snapshot_tab, Some(app.tabs[0].id));
+    }
+
+    #[test]
+    fn pty_exit_during_a_tab_drag_retains_neighbours_but_cancels_a_vanished_source() {
+        let mut app = app();
+        let (first, _) = add_tab(&mut app);
+        let (source, _) = add_tab(&mut app);
+        let (_last, _) = add_tab(&mut app);
+        app.tab_drag
+            .begin(Some((1, [100.0, 5.0, 200.0, 35.0])), [150.0, 20.0]);
+        app.on_cursor_moved(350.0, 20.0);
+        assert_eq!(app.tabs[app.active].id, 1);
+        first(PtyEvent::Exit);
+        finish_draining(&mut app);
+        assert_eq!(app.tab_drag.source(), Some(1));
+        assert_eq!(app.tabs[app.active].id, 1);
+        source(PtyEvent::Exit);
+        finish_draining(&mut app);
+        assert_eq!(app.tab_drag.source(), None);
+        assert!(app.tab_drag.captures_pointer());
+        assert!(app.tab_drag.release());
+        assert!(app.tab_drag.suppress_clicks());
+        assert_eq!(app.tabs[app.active].id, 2);
     }
 
     #[test]

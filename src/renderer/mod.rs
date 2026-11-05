@@ -7,6 +7,7 @@ mod log_ui;
 mod overlay;
 mod search_ui;
 mod settings_ui;
+mod tabbar_ui;
 pub(crate) mod text;
 
 use background::{BG_SHADER, BgVertex};
@@ -160,8 +161,9 @@ pub struct ScrollCtx<'a> {
     pub visible: usize,
     pub offset: usize,
     pub is_alt: bool,
-    pub tab_titles: &'a [String],
+    pub tabs: &'a [crate::tabbar::TabLabel],
     pub active_tab: usize,
+    pub tab_drag: &'a mut crate::tabbar::TabDrag,
     pub settings: &'a mut crate::app::settings::SettingsPanel,
     pub config: &'a mut Config,
     pub logs: &'a mut crate::app::logs::LogsPanel,
@@ -194,14 +196,16 @@ pub struct CursorCtx {
 }
 
 /// [`Renderer::render`] output: scrollbar scrolling plus tab-strip actions
-/// the app applies after the frame (switch/close/new).
+/// the app applies after the frame (switch/close/new/reorder). Tab actions carry
+/// stable identities rather than indices into a possibly changed tab list.
 pub struct RenderOutput {
     /// True only after a frame was actually submitted and presented.
     pub presented: bool,
     pub scroll_to: Option<usize>,
-    pub selected_tab: Option<usize>,
-    pub close_tab: Option<usize>,
+    pub selected_tab: Option<u64>,
+    pub close_tab: Option<u64>,
     pub new_tab: bool,
+    pub reordered_tab: Option<crate::tabbar::TabMove>,
     /// Find-bar buttons clicked this frame (next/prev/close).
     pub search: search_ui::SearchUiOutput,
     /// Earliest delay egui wants the next frame after (`Duration::MAX` =
@@ -254,9 +258,7 @@ pub struct Renderer {
     fullscreen: bool,
     /// Painted find-bar rect (logical points), for press hit-testing.
     search_bar_rect: Option<egui::Rect>,
-    /// Hover-painted tab-strip elements of the last egui pass (logical
-    /// points, paint order), for pointer-motion repaint decisions.
-    tab_strip_targets: Vec<(crate::tabbar::StripTarget, [f32; 4])>,
+    tabbar_ui: tabbar_ui::TabbarUi,
     last_grid_version: u64,
     /// Cached "terminal forced window IME on" state (see
     /// [`Self::ensure_terminal_ime`]). Cleared while egui owns a text field
@@ -266,10 +268,6 @@ pub struct Renderer {
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
-    /// Cached tab-title widths for the current egui font: titles rarely
-    /// change but were shaped every frame via `layout_no_wrap`.
-    title_width_cache: std::collections::HashMap<String, f32>,
-    title_width_font: Option<egui::FontId>,
     /// Natural-advance cache for fixed-cell normalization (see
     /// `renderer::text::AdvanceCache`); cleared when family/size changes.
     advance_cache: text::AdvanceCache,
@@ -484,14 +482,12 @@ impl Renderer {
             // fullscreen resize goes through `resize`.
             fullscreen: false,
             search_bar_rect: None,
-            tab_strip_targets: Vec::new(),
+            tabbar_ui: tabbar_ui::TabbarUi::default(),
             last_grid_version: u64::MAX,
             ime_terminal_enabled: false,
             egui_ctx,
             egui_state,
             egui_renderer,
-            title_width_cache: std::collections::HashMap::new(),
-            title_width_font: None,
             advance_cache: text::AdvanceCache::new(),
             // Empty: the first render takes the full path below, which
             // fills it; every config change clears it for the same reason.
@@ -763,7 +759,13 @@ impl Renderer {
     /// egui pass (horizontal strip scrolling included).
     pub fn tab_strip_target(&self, x_phys: f32, y_phys: f32) -> crate::tabbar::StripTarget {
         let scale = self.scale_factor.max(1.0);
-        crate::tabbar::strip_target_at(&self.tab_strip_targets, x_phys / scale, y_phys / scale)
+        self.tabbar_ui.target_at(x_phys / scale, y_phys / scale)
+    }
+
+    /// Stable source identity and full logical rect, excluding close/plus hits.
+    pub fn tab_strip_source(&self, x_phys: f32, y_phys: f32) -> Option<(u64, [f32; 4])> {
+        let scale = self.scale_factor.max(1.0);
+        self.tabbar_ui.source_at(x_phys / scale, y_phys / scale)
     }
 
     /// egui owns the pointer, for example while dragging the scrollbar.
@@ -838,7 +840,7 @@ impl Renderer {
             Duration::ZERO
         };
 
-        let tab_count = scroll.tab_titles.len();
+        let tab_count = scroll.tabs.len();
         let overlay_start = Instant::now();
         let overlay_timing = crate::perf::measure(crate::perf::Metric::Overlay);
         let overlay::OverlayOutput {
@@ -846,6 +848,7 @@ impl Renderer {
             selected_tab,
             close_tab,
             new_tab,
+            reordered_tab,
             search,
             paint_jobs,
             screen_descriptor,
@@ -862,6 +865,7 @@ impl Renderer {
             selected_tab,
             close_tab,
             new_tab,
+            reordered_tab,
             search,
             egui_repaint_delay,
         };

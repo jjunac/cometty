@@ -8,7 +8,9 @@ shared app concerns.
 
 ## Keyboard and IME ownership
 
-[`app/keyboard.rs`](../src/app/keyboard.rs) intentionally dispatches in this order:
+In [`app/keyboard.rs`](../src/app/keyboard.rs), a captured tab-strip gesture gets
+Escape first (cancelling only that gesture). Otherwise dispatch is intentionally
+in this order:
 
 1. Settings and Logs shortcuts, including while settings is open.
 2. Settings early return: all remaining keys belong to the panel; Esc closes it.
@@ -115,6 +117,68 @@ OSC 52 parsing emits requests, not clipboard API calls. The app applies
 clipboard contents. Decode and final-text caps are separate from the raw OSC
 bound. Handle operations before tab-index removal so replies stay with the
 requesting tab. Log sizes/policy decisions, never clipboard payload contents.
+
+## Tab ordering and pointer ownership
+
+Tab bodies support primary-button drag-to-reorder within the existing window.
+The app owns the toolkit-free [`TabDrag`](../src/tabbar.rs) gesture; native
+press/motion/release events advance it even between painted frames. A horizontal
+move of **6 logical points** starts the drag and activates its source. A click
+below that threshold keeps the normal tab-switch behavior. Close `×`, `+`, and
+empty titlebar chrome capture their release but never become reorder sources;
+empty chrome retains macOS native window drag/zoom handling.
+
+The default 24-point side margins (`tabbar.inset_x`) leave empty chrome before
+the tabs (after the macOS traffic-light reserve) and after `+` for window dragging.
+Painting and window-drag hit testing share the same inset geometry.
+
+On macOS, transparency and a full-size content view alone do **not** disable
+AppKit's implicit titlebar window drag: it can steal a tab's press before winit
+dispatches it. [`platform/titlebar.rs`](../src/platform/titlebar.rs) installs an
+ivar-free subclass on this window's content view before renderer/IME setup. Its
+`_opaqueRectForWindowMoveWhenInTitlebar` override returns the current view bounds,
+marking the titlebar content as app-owned. This is an isolated, undocumented
+AppKit hook: recheck it when upgrading winit or supported macOS. It does not
+modify the global winit view class, replace event/GPU/IME methods, or turn off
+`NSWindow.isMovable` (which would also affect system tiling/display management).
+The app's explicit window-drag/zoom path accepts only empty chrome; painted
+tab/close/plus hit rects take precedence over geometric fallback, and a latched
+tab press cannot fall through to a native window move before its threshold.
+
+[`renderer/tabbar_ui.rs`](../src/renderer/tabbar_ui.rs) owns the widgets, clipped
+hit rectangles, horizontal scroll position, and title-width cache. Both tab and
+close-widget IDs use the stable `Tab::id`, not an index or title. The grabbed tab
+follows the pointer horizontally and paints above neighbours, which shift to
+preview its destination. This is only a projection: the model order changes once
+on a valid release inside the tab-row viewport, excluding traffic lights and
+`+`. The destination uses the grabbed fraction of the tab width and the current
+scrolled layout, so a partially visible tab or a resized strip keeps its source.
+
+Escape, focus loss, a vanished source, dropping outside the viewport, or having
+fewer than two tabs cancels the reorder, not the terminal's selection/search.
+Cancellation suppresses a trailing click and retains the matching release guard.
+Focus loss releases motion capture immediately so an outside button release
+cannot leave the window stuck. A new primary press retires that guard. During
+capture, motion, additional presses, wheel input and the primary release never
+reach terminal selection or mouse reporting; Escape precedes panel/search/PTY
+handling and is withheld from egui too. Strip controls remain non-focusable.
+
+Overflow still scrolls with the wheel/trackpad. A held drag in the viewport's
+24-point edge bands scrolls at up to 600 points/second; only a changing offset
+requests another frame. Release/cancellation, leaving the edge, or reaching the
+scroll limit stops that source of wakeups. Pending strip presses also repaint on
+motion before egui has processed the press, so threshold crossing cannot be
+stranded by hover-motion coalescing.
+
+The returned drop action carries a stable source ID. [`app/tab.rs`](../src/app/tab.rs)
+moves the entire existing `Tab`, remaps the active index and PTY round-robin cursor,
+and marks the session dirty. It does not respawn/resize terminals, invalidate
+search or shaping caches, reset the shared drain allowance, or change the active
+terminal identity. `$tab` labels and direct-tab shortcuts follow the committed
+order; the session snapshot and quit-time dumps use that order too. Headless
+gesture/widget/state tests cover these decisions, not native drag feel or latency.
+The macOS-only windowless Objective-C test checks subclass installation, ABI,
+inherited state and per-view isolation, not Window Server drag arbitration.
 
 ## Tab-label source policy
 

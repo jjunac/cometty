@@ -65,11 +65,20 @@ impl App {
         event: &winit::event::KeyEvent,
         egui_consumed: bool,
     ) -> bool {
+        // A strip drag owns Escape before panels/search/the PTY. `main` also
+        // withholds it from egui so a focused query is not closed as a side effect.
+        if event.state == ElementState::Pressed
+            && event.logical_key == Key::Named(NamedKey::Escape)
+            && self.cancel_tab_drag()
+        {
+            return true;
+        }
         // Settings toggle works whether or not the panel is open, and takes
         // precedence over egui + terminal so the combo never reaches the PTY.
         if event.state == ElementState::Pressed
             && crate::app::settings::is_settings_toggle(&event.logical_key, &self.modifiers)
         {
+            self.cancel_tab_drag();
             self.settings.toggle();
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
@@ -81,6 +90,7 @@ impl App {
         if event.state == ElementState::Pressed
             && crate::app::logs::is_logs_toggle(&event.logical_key, &self.modifiers)
         {
+            self.cancel_tab_drag();
             self.logs.toggle();
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();

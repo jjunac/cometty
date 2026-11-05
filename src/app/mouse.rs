@@ -38,8 +38,9 @@ pub(crate) enum ChromeHover {
 }
 
 /// Pointer motion (`CursorMoved`/`CursorLeft`) repaints only when chrome under
-/// it can look different: while egui uses the pointer (a scrollbar or panel
-/// drag), on every move over the find bar or an open panel, and when the
+/// it can look different: during native strip capture or while egui uses the
+/// pointer (a scrollbar or panel drag), on every move over the find bar or an
+/// open panel, and when the
 /// hovered strip element or scrollbar changes, including one frame on leaving
 /// chrome to clear its hover. Motion over the grid alone paints nothing.
 pub(crate) fn pointer_repaint(
@@ -201,10 +202,28 @@ impl App {
 
     pub(crate) fn on_cursor_moved(&mut self, x: f32, y: f32) {
         self.cursor_pos = Some((x, y));
+        let strip_capture = self.tab_drag.captures_pointer();
+        if strip_capture {
+            let scale = self
+                .renderer
+                .as_ref()
+                .map_or(1.0, |r| r.scale_factor().max(1.0));
+            if let Some(id) = self.tab_drag.moved([x / scale, y / scale])
+                && let Some(index) = self.tab_index(id)
+            {
+                self.switch_tab(index);
+            }
+        }
         // Hovering a link (modifier held) switches to the pointer cursor; no
         // frame is needed for that.
         self.update_link_cursor();
         self.update_chrome_hover(Some((x, y)));
+        // A tab-strip press owns the whole gesture, including motion over the
+        // grid. Never turn its held primary button into a TUI drag/hover report.
+        if strip_capture {
+            self.last_mouse_report = None;
+            return;
+        }
         // Mouse reporting: forward motion instead of extending a selection.
         if let Some((mode, sgr)) = self.mouse_report_state() {
             let button_held = self.mouse_pressed != 0;
@@ -330,6 +349,7 @@ impl App {
     pub(crate) fn on_cursor_left(&mut self) {
         self.last_mouse_report = None;
         self.cursor_pos = None;
+        self.tab_drag.pointer_gone();
         self.set_link_cursor_icon(winit::window::CursorIcon::Default);
         self.update_chrome_hover(None);
     }
@@ -369,10 +389,11 @@ impl App {
     fn update_chrome_hover(&mut self, pos: Option<(f32, f32)>) {
         let current = pos.map_or(ChromeHover::None, |(x, y)| self.chrome_hover_at(x, y));
         let previous = std::mem::replace(&mut self.chrome_hover, current);
-        let using = self
-            .renderer
-            .as_ref()
-            .is_some_and(|r| r.egui_is_using_pointer());
+        let using = self.tab_drag.captures_pointer()
+            || self
+                .renderer
+                .as_ref()
+                .is_some_and(|r| r.egui_is_using_pointer());
         if pointer_repaint(previous, current, using) {
             if let Some(w) = self.window.as_ref() {
                 crate::perf::add(crate::perf::Metric::RequestPointer, 1);
@@ -394,6 +415,7 @@ impl App {
         }
         super::scheduling::blink_restart(now, &mut self.last_blink, &mut self.cursor_visible);
         if !focused {
+            self.tab_drag.focus_lost();
             self.last_mouse_report = None;
             self.mouse_pressed = 0;
             self.link_press = false;
@@ -418,6 +440,24 @@ impl App {
         egui_consumed: bool,
     ) {
         self.last_mouse_report = None;
+        if button == MouseButton::Left {
+            if state == ElementState::Pressed {
+                // A fresh press also retires a focus-loss release guard when
+                // the previous button was released outside this window.
+                self.tab_drag = crate::tabbar::TabDrag::default();
+            } else if self.tab_drag.release() {
+                self.mouse_pressed &= !1;
+                return;
+            }
+        }
+        if self.tab_drag.captures_pointer() {
+            if state == ElementState::Released
+                && let Some(bit) = mouse_bit(button)
+            {
+                self.mouse_pressed &= !bit;
+            }
+            return;
+        }
         // While the settings panel is open, presses over egui chrome belong
         // to the panel (window drag, widget clicks), not to
         // terminal selection. Releases always flow through so a drag started
@@ -436,6 +476,17 @@ impl App {
                         .cursor_pos
                         .is_some_and(|(x, y)| self.press_on_chrome(x, y))
                     {
+                        if button == MouseButton::Left
+                            && let Some((x, y)) = self.cursor_pos
+                            && let Some(renderer) = self.renderer.as_ref()
+                            && renderer.over_tab_bar(y, self.tabs.len())
+                        {
+                            let scale = renderer.scale_factor().max(1.0);
+                            let source = renderer.tab_strip_source(x, y).filter(|(id, _)| {
+                                self.tabs.len() > 1 && self.tab_index(*id).is_some()
+                            });
+                            self.tab_drag.begin(source, [x / scale, y / scale]);
+                        }
                         // Merged macOS titlebar: single click on empty chrome
                         // drags the window like Brave, double-click toggles
                         // native zoom. No-op on other platforms.
@@ -645,12 +696,28 @@ impl App {
         }
     }
 
+    /// Escape/panel changes cancel the preview, but keep pointer capture until
+    /// the primary release so it cannot leak into terminal mouse reporting.
+    pub(crate) fn cancel_tab_drag(&mut self) -> bool {
+        let cancelled = self.tab_drag.cancel();
+        if cancelled && let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+        cancelled
+    }
+
     /// Single click on empty titlebar chrome starts a native window drag;
     /// double-click toggles native macOS zoom (`set_maximized`, which maps
     /// to `zoom:`). Empty chrome only: tabs, the `+` button and the traffic
     /// lights are excluded by `is_titlebar_drag`. Compiled everywhere so
     /// Linux CI type-checks it; only called on macOS.
     fn handle_titlebar_press(&mut self, button: MouseButton) {
+        // Ownership was chosen on the press. A real tab source must never fall
+        // through to a native window move, even before its drag threshold.
+        if self.tab_drag.source().is_some() {
+            self.last_titlebar_click = None;
+            return;
+        }
         let Some((x_phys, y_phys)) = self.cursor_pos else {
             return;
         };
@@ -669,7 +736,9 @@ impl App {
             screen_w_pts,
             bar_h,
             &self.config.tabbar,
+            renderer.tab_strip_target(x_phys, y_phys),
         ) {
+            self.last_titlebar_click = None;
             return;
         }
         if button != MouseButton::Left {
@@ -690,6 +759,17 @@ impl App {
     }
 
     pub(crate) fn on_wheel(&mut self, delta: MouseScrollDelta, egui_consumed: bool) {
+        // The horizontal strip consumes its own wheel/trackpad input. A held
+        // strip gesture must not scroll/report to the terminal underneath it.
+        if self.tab_drag.captures_pointer()
+            || self.cursor_pos.is_some_and(|(_, y)| {
+                self.renderer
+                    .as_ref()
+                    .is_some_and(|r| r.over_tab_bar(y, self.tabs.len()))
+            })
+        {
+            return;
+        }
         // Scrolling over the open settings panel scrolls the panel.
         if self.settings.open && egui_consumed {
             return;
@@ -792,6 +872,95 @@ mod tests {
     };
     use crate::tabbar::StripTarget;
     use std::time::{Duration, Instant};
+
+    fn mouse_app() -> (super::App, Vec<crate::pty::input::InputReceiver>) {
+        let mut app = super::App::new(
+            None,
+            crate::theme::Theme::default(),
+            crate::config::Config::default(),
+            crate::app::AppStartup {
+                config_path_override: None,
+                cli_theme: None,
+                config_corrupt: false,
+            },
+            std::sync::Arc::new(std::sync::Mutex::new(crate::logbuf::LogBuffer::new(10))),
+        );
+        let mut inputs = Vec::new();
+        for id in [37, 91] {
+            let (pty, _, input) = crate::pty::test_support::session();
+            let mut terminal = crate::term::Terminal::new(20, 2, crate::theme::Theme::default());
+            terminal.feed(b"one\r\ntwo\r\nthree\r\nfour\r\n");
+            app.tabs.push(crate::app::Tab::new(id, terminal, pty));
+            inputs.push(input);
+        }
+        (app, inputs)
+    }
+
+    #[test]
+    fn tab_drag_activates_once_and_captures_motion_wheel_other_presses_and_release() {
+        use winit::event::{ElementState, MouseButton, MouseScrollDelta};
+        let (mut app, inputs) = mouse_app();
+        app.tabs[1].selecting = true;
+        app.tabs[1].selection = Some(crate::selection::Selection::new(
+            crate::selection::CellPos { x: 0, y: 1 },
+        ));
+        app.tab_drag
+            .begin(Some((91, [100.0, 5.0, 200.0, 35.0])), [150.0, 20.0]);
+        app.on_cursor_moved(154.0, 20.0);
+        assert_eq!(app.active, 0, "jitter is still a click");
+        app.on_cursor_moved(170.0, 100.0);
+        assert_eq!(app.tabs[app.active].id, 91);
+        app.on_mouse_input(MouseButton::Right, ElementState::Pressed, false);
+        assert_eq!(
+            app.mouse_pressed, 0,
+            "chrome presses do not become terminal buttons"
+        );
+        app.on_wheel(MouseScrollDelta::LineDelta(0.0, 3.0), false);
+        assert_eq!(
+            app.tabs[1].terminal.scroll_offset(),
+            0,
+            "wheel over the captured grid does not scroll it"
+        );
+        app.on_mouse_input(MouseButton::Left, ElementState::Released, false);
+        assert!(
+            app.tabs[1].selecting,
+            "a strip release does not finalize a terminal selection"
+        );
+        assert!(inputs.iter().all(|input| input.try_recv().is_err()));
+        assert!(!app.tab_drag.captures_pointer());
+        assert!(app.terminal_owns_keyboard());
+        app.on_ime(&winit::event::Ime::Commit("é".into()));
+        assert_eq!(inputs[1].try_recv().unwrap(), "é".as_bytes());
+        assert!(inputs[0].try_recv().is_err());
+    }
+
+    #[test]
+    fn cancelled_drag_keeps_its_release_guard_across_escape_or_focus_loss() {
+        use winit::event::{ElementState, MouseButton};
+        for lose_focus in [false, true] {
+            let (mut app, inputs) = mouse_app();
+            app.tab_drag
+                .begin(Some((91, [100.0, 5.0, 200.0, 35.0])), [150.0, 20.0]);
+            app.on_cursor_moved(350.0, 20.0);
+            app.tabs[1].selecting = true;
+            if lose_focus {
+                app.on_focused(false);
+                assert!(!app.tab_drag.captures_pointer());
+                app.on_focused(true);
+            } else {
+                assert!(app.cancel_tab_drag());
+                assert!(app.tab_drag.captures_pointer());
+            }
+            assert_eq!(app.tab_drag.source(), None);
+            app.on_mouse_input(MouseButton::Left, ElementState::Released, false);
+            assert!(
+                app.tabs[1].selecting,
+                "cancelled release still belongs to the strip"
+            );
+            assert!(inputs.iter().all(|input| input.try_recv().is_err()));
+            assert!(app.tab_drag.suppress_clicks());
+        }
+    }
 
     #[test]
     fn pointer_motion_repaints_only_when_chrome_under_it_can_change() {
