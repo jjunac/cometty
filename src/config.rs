@@ -163,6 +163,9 @@ fn d_key_v() -> String {
 fn d_key_t() -> String {
     "t".to_string()
 }
+fn d_key_b() -> String {
+    "b".to_string()
+}
 fn d_key_f() -> String {
     "f".to_string()
 }
@@ -566,6 +569,9 @@ pub struct InputConfig {
     pub new_tab_key: String,
     #[serde(default = "d_key_f")]
     pub search_key: String,
+    /// Park the active tab into the background tray (`Cmd+B` / `Ctrl+Shift+B`).
+    #[serde(default = "d_key_b")]
+    pub background_key: String,
     #[serde(default = "d_true")]
     pub copy_ctrl_shift: bool,
     #[serde(default = "d_true")]
@@ -586,6 +592,19 @@ pub struct InputConfig {
     pub tab_switch_ctrl: bool,
     #[serde(default = "d_true")]
     pub tab_switch_super: bool,
+    /// `Cmd+B` parks/unparks the active foreground tab.
+    #[serde(default = "d_true")]
+    pub background_super: bool,
+    /// `Ctrl+Shift+B` parks/unparks on keyboards without Cmd/Super.
+    #[serde(default = "d_true")]
+    pub background_ctrl_shift: bool,
+    /// `Cmd+Shift+B` peeks the most recent background tab.
+    #[serde(default = "d_true")]
+    pub peek_super_shift: bool,
+    /// opt-in `Ctrl+Shift+Alt+B` peek fallback (off: many layouts use the
+    /// Ctrl+Alt "AltGr" combination for text input).
+    #[serde(default)]
+    pub peek_ctrl_shift_alt: bool,
     #[serde(default = "d_true")]
     pub shift_page_scroll: bool,
     #[serde(default = "d_lines_per_tick")]
@@ -601,6 +620,7 @@ impl Default for InputConfig {
             paste_key: d_key_v(),
             new_tab_key: d_key_t(),
             search_key: d_key_f(),
+            background_key: d_key_b(),
             copy_ctrl_shift: true,
             copy_super: true,
             paste_ctrl_shift: true,
@@ -611,6 +631,10 @@ impl Default for InputConfig {
             search_super: true,
             tab_switch_ctrl: true,
             tab_switch_super: true,
+            background_super: true,
+            background_ctrl_shift: true,
+            peek_super_shift: true,
+            peek_ctrl_shift_alt: false,
             shift_page_scroll: true,
             lines_per_tick: d_lines_per_tick(),
             pixel_fallback_line_height: d_pixel_fallback(),

@@ -278,6 +278,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if !opens_settings && !opens_logs {
                     return;
                 }
+                self.bg_popover_open = false;
                 if opens_settings {
                     self.settings.open = true;
                     self.settings.notice = None;
@@ -321,7 +322,8 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { event, .. }
             if event.logical_key == Key::Named(NamedKey::Escape)
         ) && (self.tab_drag.captures_pointer()
-            || self.tab_drag.source().is_some());
+            || self.tab_drag.source().is_some()
+            || self.bg_popover_open);
         let response = match (self.renderer.as_mut(), self.window.as_ref()) {
             (Some(r), Some(w)) if !skip_egui_for_tab && !skip_egui_for_drag_escape => {
                 r.on_window_event(w, &event)

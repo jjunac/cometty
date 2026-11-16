@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::config::TabbarConfig;
-use crate::tabbar::{self, DragLayout, StripTarget, TabDrag, TabLabel, TabMove};
+use crate::tabbar::{
+    self, BackgroundTabLabel, DragLayout, StripTarget, TabDrag, TabLabel, TabMove,
+};
 use crate::theme::Theme;
 
 #[derive(Default)]
@@ -14,13 +16,26 @@ pub(crate) struct TabbarOutput {
     pub close_tab: Option<u64>,
     pub new_tab: bool,
     pub reordered_tab: Option<TabMove>,
+    /// Tray badge clicked: open/close the popover.
+    pub toggle_popover: bool,
+    /// Popover row clicked: peek this parked tab in place.
+    pub peek_tab: Option<u64>,
+    /// Popover `↑` clicked: move this parked tab back to the strip.
+    pub unpark_tab: Option<u64>,
 }
 
 pub(crate) struct TabbarView<'a> {
     pub width: f32,
     pub height: f32,
+    /// Foreground tabs only.
     pub tabs: &'a [TabLabel],
-    pub active: usize,
+    /// Active foreground index; `None` while peeking a parked tab.
+    pub active: Option<usize>,
+    /// Parked tabs listed by the tray popover.
+    pub background: &'a [BackgroundTabLabel],
+    /// The parked tab currently shown in place.
+    pub peeking: Option<u64>,
+    pub popover_open: bool,
 }
 
 #[derive(Default)]
@@ -31,6 +46,8 @@ pub(crate) struct TabbarUi {
     scroll_offset: f32,
     title_widths: HashMap<String, f32>,
     title_font: Option<egui::FontId>,
+    /// Painted popover rect (logical points) for pointer hit-testing.
+    popover_rect: Option<[f32; 4]>,
 }
 
 struct TabCell<'a> {
@@ -49,7 +66,7 @@ struct TabStyle<'a> {
     clip: egui::Rect,
     suppress_clicks: bool,
     count: usize,
-    active: usize,
+    active: Option<usize>,
 }
 
 fn coords(rect: egui::Rect) -> [f32; 4] {
@@ -60,6 +77,7 @@ impl TabbarUi {
     pub(crate) fn clear(&mut self) {
         self.targets.clear();
         self.rects.clear();
+        self.popover_rect = None;
     }
 
     pub(crate) fn target_at(&self, x: f32, y: f32) -> StripTarget {
@@ -71,6 +89,12 @@ impl TabbarUi {
             return None;
         };
         self.rects.iter().find(|(tab, _)| *tab == id).copied()
+    }
+
+    /// True when logical `(x, y)` falls on the painted tray popover.
+    pub(crate) fn popover_contains(&self, x: f32, y: f32) -> bool {
+        self.popover_rect
+            .is_some_and(|r| x >= r[0] && x < r[2] && y >= r[1] && y < r[3])
     }
 
     fn record(&mut self, target: StripTarget, rect: egui::Rect, clip: egui::Rect) {
@@ -97,6 +121,7 @@ impl TabbarUi {
             drag.finish_frame();
             return out;
         }
+        let tray = tabbar::tray_rect(view.width, view.background.len(), config);
         let suppress_clicks = drag.suppress_clicks();
         egui::Area::new(egui::Id::new("tabbar"))
             .fixed_pos(egui::Pos2::ZERO)
@@ -113,7 +138,8 @@ impl TabbarUi {
                     0.0,
                     theme.background.as_egui_color(),
                 );
-                let container_w = tabbar::container_width_points(view.width, config);
+                let container_w =
+                    tabbar::container_width_points(view.width, view.background.len(), config);
                 let container_h = (view.height - config.inset_y * 2.0).max(1.0);
                 let container = egui::Rect::from_min_size(
                     egui::pos2(tabbar::leading_inset_points(config), config.inset_y),
@@ -208,7 +234,7 @@ impl TabbarUi {
                                                     egui::vec2(tab_w, container_h),
                                                 ),
                                                 index: i,
-                                                active: i == view.active,
+                                                active: view.active == Some(i),
                                                 single: view.tabs.len() == 1,
                                                 dragging: false,
                                             },
@@ -252,7 +278,7 @@ impl TabbarUi {
                         egui::StrokeKind::Inside,
                     );
                 }
-                let p = tabbar::plus_rect(view.width, config);
+                let p = tabbar::plus_rect(view.width, view.background.len(), config);
                 let rect =
                     egui::Rect::from_min_size(egui::pos2(p[0], p[1]), egui::vec2(p[2], p[3]));
                 let response = ui.interact(rect, egui::Id::new("new_tab"), egui::Sense::CLICK);
@@ -277,7 +303,7 @@ impl TabbarUi {
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
                     "+",
-                    font,
+                    font.clone(),
                     if response.hovered() {
                         fg
                     } else {
@@ -285,12 +311,250 @@ impl TabbarUi {
                     },
                 );
                 out.new_tab = response.clicked() && !suppress_clicks;
+                if let Some(tray) = tray {
+                    self.paint_tray(
+                        ui,
+                        tray,
+                        &view,
+                        config,
+                        theme,
+                        &font,
+                        suppress_clicks,
+                        &mut out,
+                    );
+                }
             });
+        if view.popover_open && !view.background.is_empty() && view.height > 0.0 {
+            self.show_popover(ctx, &view, config, theme, &mut out);
+        }
         if drag.dragging() && drag.captures_pointer() {
             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
         }
         drag.finish_frame();
         out
+    }
+
+    /// Tray badge: count + running/finished state dot. Non-focusable, so it
+    /// never takes keyboard ownership from the terminal.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_tray(
+        &mut self,
+        ui: &egui::Ui,
+        tray: [f32; 4],
+        view: &TabbarView<'_>,
+        config: &TabbarConfig,
+        theme: Theme,
+        font: &egui::FontId,
+        suppress_clicks: bool,
+        out: &mut TabbarOutput,
+    ) {
+        let rect =
+            egui::Rect::from_min_size(egui::pos2(tray[0], tray[1]), egui::vec2(tray[2], tray[3]));
+        let response = ui.interact(rect, egui::Id::new("background_tray"), egui::Sense::CLICK);
+        self.record(StripTarget::BackgroundTray, rect, ui.clip_rect());
+        let radius = egui::CornerRadius::same(config.corner_radius_tab);
+        let fill = theme.tab_active_bg.as_egui_color();
+        let painter = ui.painter();
+        let background = if view.peeking.is_some() || view.popover_open {
+            fill
+        } else if response.hovered() {
+            fill.gamma_multiply(0.65)
+        } else {
+            fill.gamma_multiply(0.35)
+        };
+        painter.rect_filled(rect, radius, background);
+        painter.rect_stroke(
+            rect,
+            radius,
+            egui::Stroke::new(1.0, theme.tab_border.as_egui_color()),
+            egui::StrokeKind::Inside,
+        );
+        let attention = view.background.iter().any(|tab| tab.attention);
+        let running = view.background.iter().any(|tab| tab.running);
+        let dot = if attention {
+            theme.palette[3]
+        } else if running {
+            theme.palette[2]
+        } else {
+            theme.tab_border
+        };
+        painter.circle_filled(
+            egui::pos2(rect.left() + 8.0, rect.center().y),
+            3.0,
+            dot.as_egui_color(),
+        );
+        painter.text(
+            egui::pos2(rect.center().x + 4.0, rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            view.background.len().to_string(),
+            font.clone(),
+            theme.foreground.as_egui_color(),
+        );
+        out.toggle_popover = response.clicked() && !suppress_clicks;
+    }
+
+    /// Drop-down list of parked tabs, anchored under the tray badge. Every
+    /// control uses non-focusable click senses so the terminal keeps
+    /// keyboard/IME ownership; the app closes the popover on outside
+    /// presses and Escape.
+    fn show_popover(
+        &mut self,
+        ctx: &egui::Context,
+        view: &TabbarView<'_>,
+        config: &TabbarConfig,
+        theme: Theme,
+        out: &mut TabbarOutput,
+    ) {
+        let Some(tray) = tabbar::tray_rect(view.width, view.background.len(), config) else {
+            return;
+        };
+        let anchor = egui::pos2(tray[0] + tray[2], view.height + 6.0);
+        let area = egui::Area::new(egui::Id::new("background-tabs"))
+            // Above the foreground tab strip and scrollbar chrome: the
+            // popover overlaps the scrollbar's right edge.
+            .order(egui::Order::Tooltip)
+            .fixed_pos(anchor)
+            .pivot(egui::Align2::RIGHT_TOP)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width(260.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("background-tabs-scroll")
+                        .max_height(320.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            let font = egui::TextStyle::Body.resolve(ui.style());
+                            if self.title_font.as_ref() != Some(&font)
+                                || self.title_widths.len() > 512
+                            {
+                                self.title_widths.clear();
+                                self.title_font = Some(font.clone());
+                            }
+                            for tab in view.background {
+                                self.paint_background_row(
+                                    ui,
+                                    tab,
+                                    view.peeking == Some(tab.id),
+                                    theme,
+                                    &font,
+                                    out,
+                                );
+                            }
+                        });
+                });
+            });
+        self.popover_rect = Some(coords(area.response.rect));
+    }
+
+    fn paint_background_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        tab: &BackgroundTabLabel,
+        peeking: bool,
+        theme: Theme,
+        font: &egui::FontId,
+        out: &mut TabbarOutput,
+    ) {
+        let row_h = 26.0;
+        let width = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, row_h), egui::Sense::hover());
+        let response = ui.interact(rect, egui::Id::new(("bg-tab", tab.id)), egui::Sense::CLICK);
+        let close = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - 20.0, rect.top()),
+            egui::vec2(20.0, row_h),
+        );
+        let unpark = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - 40.0, rect.top()),
+            egui::vec2(20.0, row_h),
+        );
+        let close_response = ui.interact(
+            close,
+            egui::Id::new(("bg-tab-close", tab.id)),
+            egui::Sense::CLICK,
+        );
+        let unpark_response = ui.interact(
+            unpark,
+            egui::Id::new(("bg-tab-unpark", tab.id)),
+            egui::Sense::CLICK,
+        );
+        let hovered = response.hovered() || close_response.hovered() || unpark_response.hovered();
+        let fill = theme.tab_active_bg.as_egui_color();
+        let painter = ui.painter();
+        let radius = egui::CornerRadius::same(4);
+        if peeking {
+            painter.rect_filled(rect, radius, fill.gamma_multiply(0.8));
+        } else if hovered {
+            painter.rect_filled(rect, radius, fill.gamma_multiply(0.4));
+        }
+        let dot = if tab.attention {
+            theme.palette[3]
+        } else if tab.running {
+            theme.palette[2]
+        } else {
+            theme.tab_border
+        };
+        painter.circle_filled(
+            egui::pos2(rect.left() + 10.0, rect.center().y),
+            3.0,
+            dot.as_egui_color(),
+        );
+        let max_title = (rect.width() - 58.0).max(0.0);
+        let mut measure = |text: &str| {
+            if let Some(width) = self.title_widths.get(text) {
+                return *width;
+            }
+            let width = painter
+                .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+                .size()
+                .x;
+            self.title_widths.insert(text.to_owned(), width);
+            width
+        };
+        let title = tabbar::fit_title(&tab.title, max_title, &mut measure);
+        let fg = theme.foreground.as_egui_color();
+        painter.text(
+            egui::pos2(rect.left() + 20.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            title,
+            font.clone(),
+            if peeking || hovered {
+                fg
+            } else {
+                fg.gamma_multiply(0.75)
+            },
+        );
+        let dim = fg.gamma_multiply(0.55);
+        // Painted arrow: bundled egui fonts do not reliably supply the
+        // desired up-arrow glyph (same reason as the find-bar chevrons).
+        let arrow_color = if unpark_response.hovered() { fg } else { dim };
+        let arrow = egui::Stroke::new(1.5, arrow_color);
+        let c = unpark.center();
+        painter.line_segment(
+            [egui::pos2(c.x, c.y + 4.0), egui::pos2(c.x, c.y - 4.0)],
+            arrow,
+        );
+        painter.line_segment(
+            [egui::pos2(c.x - 3.5, c.y - 0.5), egui::pos2(c.x, c.y - 4.0)],
+            arrow,
+        );
+        painter.line_segment(
+            [egui::pos2(c.x, c.y - 4.0), egui::pos2(c.x + 3.5, c.y - 0.5)],
+            arrow,
+        );
+        painter.text(
+            close.center(),
+            egui::Align2::CENTER_CENTER,
+            "×",
+            font.clone(),
+            if close_response.hovered() { fg } else { dim },
+        );
+        if close_response.clicked() {
+            out.close_tab = Some(tab.id);
+        } else if unpark_response.clicked() {
+            out.unpark_tab = Some(tab.id);
+        } else if response.clicked() {
+            out.peek_tab = Some(tab.id);
+        }
     }
 
     fn paint_tab(
@@ -367,7 +631,7 @@ impl TabbarUi {
         } else if !single
             && !style.suppress_clicks
             && index + 1 < style.count
-            && index + 1 != style.active
+            && style.active != Some(index + 1)
         {
             painter.line_segment(
                 [
@@ -446,7 +710,10 @@ mod tests {
         drag: TabDrag,
         config: TabbarConfig,
         tabs: Vec<TabLabel>,
-        active: usize,
+        background: Vec<BackgroundTabLabel>,
+        active: Option<usize>,
+        peeking: Option<u64>,
+        popover_open: bool,
         width: f32,
         time: f64,
         delay: Duration,
@@ -466,7 +733,10 @@ mod tests {
                         title: "same label".into(),
                     })
                     .collect(),
-                active: 0,
+                background: Vec::new(),
+                active: Some(0),
+                peeking: None,
+                popover_open: false,
                 width,
                 time: 0.0,
                 delay: Duration::MAX,
@@ -486,7 +756,7 @@ mod tests {
                         if self.drag.captures_pointer()
                             && let Some(id) = self.drag.moved([pos.x, pos.y])
                         {
-                            self.active = self.tabs.iter().position(|tab| tab.id == id).unwrap();
+                            self.active = self.tabs.iter().position(|tab| tab.id == id);
                         }
                     }
                     Event::PointerButton {
@@ -526,6 +796,9 @@ mod tests {
                     height: self.config.height,
                     tabs: &self.tabs,
                     active: self.active,
+                    background: &self.background,
+                    peeking: self.peeking,
+                    popover_open: self.popover_open,
                 },
                 &mut self.drag,
                 &self.config,
@@ -597,7 +870,7 @@ mod tests {
                 let container = egui::Rect::from_min_size(
                     pos2(tabbar::leading_inset_points(&h.config), h.config.inset_y),
                     egui::vec2(
-                        tabbar::container_width_points(h.width, &h.config),
+                        tabbar::container_width_points(h.width, h.background.len(), &h.config),
                         h.config.height - h.config.inset_y * 2.0,
                     ),
                 );
@@ -624,7 +897,10 @@ mod tests {
                 );
                 assert_eq!(border.stroke_kind, egui::StrokeKind::Inside);
                 assert_eq!(border.fill, egui::Color32::TRANSPARENT);
-                assert!(container.right() < tabbar::plus_rect(h.width, &h.config)[0]);
+                assert!(
+                    container.right()
+                        < tabbar::plus_rect(h.width, h.background.len(), &h.config)[0]
+                );
                 assert!(
                     h.shapes.iter().all(|clipped| !matches!(
                         &clipped.shape,
@@ -659,7 +935,7 @@ mod tests {
         assert_eq!(out.selected_tab, None);
         assert_eq!(out.reordered_tab, None);
 
-        let p = tabbar::plus_rect(h.width, &h.config);
+        let p = tabbar::plus_rect(h.width, h.background.len(), &h.config);
         let plus = pos2(p[0] + p[2] * 0.5, p[1] + p[3] * 0.5);
         assert!(h.strip.source_at(plus.x, plus.y).is_none());
         h.frame(Harness::button(plus, true));
@@ -678,7 +954,15 @@ mod tests {
             for &(target, rect) in &h.strip.targets {
                 let (x, y) = ((rect[0] + rect[2]) * 0.5, (rect[1] + rect[3]) * 0.5);
                 assert!(
-                    !tabbar::is_titlebar_drag(x, y, h.width, h.config.height, &h.config, target),
+                    !tabbar::is_titlebar_drag(
+                        x,
+                        y,
+                        h.width,
+                        h.config.height,
+                        &h.config,
+                        target,
+                        h.background.len()
+                    ),
                     "{target:?}: {rect:?}"
                 );
             }
@@ -699,7 +983,8 @@ mod tests {
                     h.width,
                     h.config.height,
                     &h.config,
-                    target
+                    target,
+                    h.background.len()
                 ));
             }
         }
@@ -727,14 +1012,18 @@ mod tests {
     fn drag_previews_neighbours_then_emits_one_stable_drop_in_either_direction() {
         for (id, destination) in [(100, 2), (120, 0)] {
             let mut h = Harness::new(3, 800.0);
-            h.active = 1;
+            h.active = Some(1);
             let from = h.body(id);
             let to = h.body(if destination == 2 { 120 } else { 100 });
             let neighbour_left = h.rect(110)[0];
             h.frame(Harness::button(from, true));
             let out = h.frame(vec![Event::PointerMoved(to)]);
             assert_eq!(out.reordered_tab, None, "preview does not commit");
-            assert_eq!(h.tabs[h.active].id, id, "drag activates the source");
+            assert_eq!(
+                h.tabs[h.active.unwrap()].id,
+                id,
+                "drag activates the source"
+            );
             assert_eq!(
                 h.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
                 [100, 110, 120]
@@ -773,7 +1062,7 @@ mod tests {
     fn close_and_plus_presses_cannot_become_reorders() {
         let mut h = Harness::new(3, 800.0);
         let rect = h.rect(100);
-        let p = tabbar::plus_rect(h.width, &h.config);
+        let p = tabbar::plus_rect(h.width, h.background.len(), &h.config);
         for from in [pos2(rect[0] + 8.0, 20.0), pos2(p[0] + 10.0, p[1] + 10.0)] {
             h.frame(Harness::button(from, true));
             let to = h.body(120);
@@ -802,7 +1091,7 @@ mod tests {
                 }
                 1 => {
                     h.tabs.remove(0);
-                    h.active = 0;
+                    h.active = Some(0);
                     to
                 }
                 2 => pos2(to.x, 100.0),
@@ -842,7 +1131,7 @@ mod tests {
         let mut h = Harness::new(8, 380.0);
         let from = h.body(100);
         let leading = tabbar::leading_inset_points(&h.config);
-        let available = tabbar::container_width_points(h.width, &h.config);
+        let available = tabbar::container_width_points(h.width, h.background.len(), &h.config);
         let to = pos2(leading + available - 1.0, 20.0);
         h.frame(Harness::button(from, true));
         h.frame(vec![Event::PointerMoved(to)]);
@@ -893,5 +1182,53 @@ mod tests {
         assert!(h.strip.scroll_offset > 0.0);
         assert!(!h.drag.dragging());
         h.idle();
+    }
+
+    #[test]
+    fn tray_badge_and_popover_emit_actions_without_taking_keyboard_focus() {
+        let mut h = Harness::new(2, 800.0);
+        h.background = vec![BackgroundTabLabel {
+            id: 900,
+            title: "cargo watch".into(),
+            running: true,
+            attention: false,
+        }];
+        h.frame(Vec::new());
+        let tray = tabbar::tray_rect(h.width, h.background.len(), &h.config).unwrap();
+        let tray_pos = pos2(tray[0] + tray[2] * 0.5, tray[1] + tray[3] * 0.5);
+        assert_eq!(
+            h.strip.target_at(tray_pos.x, tray_pos.y),
+            StripTarget::BackgroundTray
+        );
+        assert!(h.strip.source_at(tray_pos.x, tray_pos.y).is_none());
+
+        h.frame(Harness::button(tray_pos, true));
+        let out = h.frame(Harness::button(tray_pos, false));
+        assert!(out.toggle_popover);
+        assert_eq!(out.selected_tab, None);
+
+        h.popover_open = true;
+        for _ in 0..5 {
+            h.frame(Vec::new());
+        }
+        let r = h.strip.popover_rect.expect("popover painted while open");
+        assert!(h.strip.popover_contains(r[0] + 20.0, r[1] + 20.0));
+        assert!(!h.strip.popover_contains(r[0] - 4.0, r[1] + 20.0));
+
+        let row = pos2(r[0] + 30.0, r[1] + 16.0);
+        h.frame(Harness::button(row, true));
+        let out = h.frame(Harness::button(row, false));
+        assert_eq!(out.peek_tab, Some(900));
+
+        let unpark = pos2(r[2] - 36.0, r[1] + 16.0);
+        h.frame(Harness::button(unpark, true));
+        let out = h.frame(Harness::button(unpark, false));
+        assert_eq!(out.unpark_tab, Some(900));
+
+        let close = pos2(r[2] - 16.0, r[1] + 16.0);
+        h.frame(Harness::button(close, true));
+        let out = h.frame(Harness::button(close, false));
+        assert_eq!(out.close_tab, Some(900));
+        assert_eq!(h.ctx.memory(|m| m.focused()), None);
     }
 }

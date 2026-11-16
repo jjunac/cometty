@@ -161,8 +161,17 @@ pub struct ScrollCtx<'a> {
     pub visible: usize,
     pub offset: usize,
     pub is_alt: bool,
+    /// Foreground tabs only (the main strip).
     pub tabs: &'a [crate::tabbar::TabLabel],
-    pub active_tab: usize,
+    /// Parked tabs shown by the tray popover.
+    pub background_tabs: &'a [crate::tabbar::BackgroundTabLabel],
+    /// Active foreground index, or `None` while peeking a background tab.
+    pub active_tab: Option<usize>,
+    /// The parked tab currently shown in place, if any.
+    pub peeking: Option<u64>,
+    /// Total tabs (foreground + background) decide the bar's visibility.
+    pub total_tabs: usize,
+    pub bg_popover_open: bool,
     pub tab_drag: &'a mut crate::tabbar::TabDrag,
     pub settings: &'a mut crate::app::settings::SettingsPanel,
     pub config: &'a mut Config,
@@ -206,6 +215,12 @@ pub struct RenderOutput {
     pub close_tab: Option<u64>,
     pub new_tab: bool,
     pub reordered_tab: Option<crate::tabbar::TabMove>,
+    /// Tray badge clicked: open/close the background-tab popover.
+    pub toggle_bg_popover: bool,
+    /// Show this parked tab in place (popover row click).
+    pub peek_tab: Option<u64>,
+    /// Move this parked tab back to the main strip (popover `↑`).
+    pub unpark_tab: Option<u64>,
     /// Find-bar buttons clicked this frame (next/prev/close).
     pub search: search_ui::SearchUiOutput,
     /// Earliest delay egui wants the next frame after (`Duration::MAX` =
@@ -768,6 +783,13 @@ impl Renderer {
         self.tabbar_ui.source_at(x_phys / scale, y_phys / scale)
     }
 
+    /// True when physical `(x, y)` falls on the open background-tab popover.
+    pub fn over_tab_popover(&self, x_phys: f32, y_phys: f32) -> bool {
+        let scale = self.scale_factor.max(1.0);
+        self.tabbar_ui
+            .popover_contains(x_phys / scale, y_phys / scale)
+    }
+
     /// egui owns the pointer, for example while dragging the scrollbar.
     pub fn egui_is_using_pointer(&self) -> bool {
         self.egui_ctx.egui_is_using_pointer()
@@ -840,7 +862,7 @@ impl Renderer {
             Duration::ZERO
         };
 
-        let tab_count = scroll.tabs.len();
+        let tab_count = scroll.total_tabs;
         let overlay_start = Instant::now();
         let overlay_timing = crate::perf::measure(crate::perf::Metric::Overlay);
         let overlay::OverlayOutput {
@@ -849,6 +871,9 @@ impl Renderer {
             close_tab,
             new_tab,
             reordered_tab,
+            toggle_bg_popover,
+            peek_tab,
+            unpark_tab,
             search,
             paint_jobs,
             screen_descriptor,
@@ -866,6 +891,9 @@ impl Renderer {
             close_tab,
             new_tab,
             reordered_tab,
+            toggle_bg_popover,
+            peek_tab,
+            unpark_tab,
             search,
             egui_repaint_delay,
         };

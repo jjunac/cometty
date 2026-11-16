@@ -180,6 +180,45 @@ gesture/widget/state tests cover these decisions, not native drag feel or latenc
 The macOS-only windowless Objective-C test checks subclass installation, ABI,
 inherited state and per-view isolation, not Window Server drag arbitration.
 
+## Background tabs and in-place peek
+
+Parked tabs stay in the same `App::tabs` vector (PTY scheduling, resize,
+snapshot, search, and session all remain uniform) but occupy a prefix/suffix
+split: foreground tabs fill `0..foreground_count`, parked tabs follow. That
+keeps strip indices, `Cmd+1..9`, `Ctrl+Tab`, reorder, and foreground `$tab`
+labels index-aligned; only the strip's label projection filters the suffix out
+(a parked tab keeps its combined position for a unique `$tab`).
+
+- **Park/unpark** moves the whole tab and never respawns or resizes it.
+  Parking the only foreground tab first spawns a replacement prompt in the
+  tab's `shell_cwd`, so a window always keeps one foreground tab.
+- **Peek** sets `App::active` to the parked tab without moving it. The strip
+  paints `active: None` (no inner pill) and the tray badge is highlighted;
+  keyboard/IME, search, selection, and mouse reporting then act on the peeked
+  tab. Leaving a peek returns to `last_foreground_tab`; `Ctrl+Tab` and
+  `Cmd+1..9` always target the foreground prefix and therefore exit the peek.
+- **Closing** the last foreground tab promotes a parked tab instead of
+  quitting; closing the peeked tab returns to the foreground tab.
+- **State dot:** `Tab::refresh_title` derives running/idle from
+  `tcgetpgrp` versus the shell pid (no timer). A running→idle transition on a
+  parked tab that is not displayed sets `bg_attention`, cleared on peek or
+  unpark. The badge prefers the attention color over the running color.
+- **Geometry:** `background_tray_width`/`tray_rect` reserve one `plus_gap` plus
+  a pill to the right of `+`; the tab container loses exactly that width.
+  Painted tray rects are `StripTarget::BackgroundTray`, so they beat the macOS
+  empty-chrome window drag, like tabs/close/plus.
+- **Popover:** an egui area anchored right-top under the tray, painted only
+  while open. Rows, the painted unpark arrow, and `×` use non-focusable
+  `Sense::CLICK`, so the terminal keeps keyboard/IME ownership. The painted
+  rect is recorded for `ChromeHover::Popover` (pointer repaint),
+  `press_on_chrome`, and wheel consumption. Escape, an outside press, tab
+  switch, focus loss, or an empty parked list closes it; a press on the badge
+  toggles it once (the outside-press close excludes the badge itself).
+- **Session:** `TabState.background` restores the parked list. Restore
+  partitions foreground tabs first, maps the saved active tab by identity
+  (failed spawns do not shift it), and promotes the active tab if a hand-edited
+  snapshot parks everything.
+
 ## Tab-label source policy
 
 [`app/tab.rs`](../src/app/tab.rs) formats `$title`, `$command`, `$cwd`, and `$tab`

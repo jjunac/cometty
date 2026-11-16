@@ -310,6 +310,7 @@ impl App {
 
     /// Find-bar shortcut: open the find bar (or re-focus it) and repaint.
     pub(crate) fn focus_search(&mut self) {
+        self.bg_popover_open = false;
         if let Some(tab) = self.active_tab_mut()
             && tab.search.focus_or_open()
         {

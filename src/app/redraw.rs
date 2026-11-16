@@ -154,8 +154,14 @@ impl App {
         // Keep the OS chrome in sync with the active tab's OSC title.
         self.sync_window_title();
         // Owned: the overlay borrows titles while also taking
-        // `&mut` to the active tab's scrollbar.
+        // `&mut` to the active tab's scrollbar. Parked tabs are listed by
+        // the tray popover instead of the main strip.
         let labels = self.tab_labels();
+        let background_labels = self.background_labels();
+        let total_tabs = self.tabs.len();
+        let active_is_background = self.tabs.get(active).is_some_and(|tab| tab.background);
+        let active_foreground = (!active_is_background).then_some(active);
+        let peeking = active_is_background.then(|| self.tabs[active].id);
         self.settings.history_usage = self.tabs.get(active).map(|tab| {
             let grid = tab.terminal.grid();
             (
@@ -214,7 +220,11 @@ impl App {
                     offset,
                     is_alt,
                     tabs: &labels,
-                    active_tab: active,
+                    background_tabs: &background_labels,
+                    active_tab: active_foreground,
+                    peeking,
+                    total_tabs,
+                    bg_popover_open: self.bg_popover_open && !self.settings.open && !self.logs.open,
                     tab_drag: &mut self.tab_drag,
                     settings: &mut self.settings,
                     config: &mut self.config,
@@ -331,6 +341,18 @@ impl App {
         }
         if output.new_tab {
             self.spawn_tab_for_window();
+        }
+        if output.toggle_bg_popover {
+            self.bg_popover_open = !self.bg_popover_open && self.background_count() > 0;
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
+        if let Some(id) = output.peek_tab {
+            self.peek_background_tab(id);
+        }
+        if let Some(id) = output.unpark_tab {
+            self.unpark_tab(id);
         }
         if let Some(i) = output.close_tab.and_then(|id| self.tab_index(id)) {
             self.close_tab(i);

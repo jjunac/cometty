@@ -92,15 +92,20 @@ impl App {
     ) -> bool {
         if let Some(restored) = restored {
             let replay = self.config.session.restores_scrollback();
-            for saved in &restored.tabs {
+            let session_path = self.session.path.clone();
+            let mut ids = Vec::with_capacity(restored.tabs.len());
+            for (saved_index, saved) in restored.tabs.iter().enumerate() {
                 if !self.spawn_tab(cols, rows, saved.cwd.as_deref()) {
                     continue;
                 }
-                let dump = match (&self.session.path, &saved.scrollback) {
+                let id = self.tabs[self.active].id;
+                self.tabs[self.active].background = saved.background;
+                ids.push((saved_index, id));
+                let dump = match (&session_path, &saved.scrollback) {
                     (Some(path), Some(name)) if replay => session::open_scrollback(path, name),
                     _ => None,
                 };
-                if let Some(tab) = self.tabs.last_mut() {
+                if let Some(tab) = self.active_tab_mut() {
                     let replayed = dump.is_some();
                     if let Some(dump) = dump
                         && let Err(e) = tab.terminal.replay(dump)
@@ -113,7 +118,15 @@ impl App {
             }
             if !self.tabs.is_empty() {
                 log::info!("restored {} tabs", self.tabs.len());
-                self.switch_tab(restored.active.min(self.tabs.len() - 1));
+                let active_id = ids
+                    .iter()
+                    .find(|(index, _)| *index == restored.active)
+                    .map(|(_, id)| *id);
+                // Foreground tabs are a prefix, so strip indices and
+                // shortcuts stay index-aligned after restore.
+                self.tabs.sort_by_key(|tab| tab.background);
+                self.active = active_id.and_then(|id| self.tab_index(id)).unwrap_or(0);
+                self.reconcile_removed_tabs(Some(self.tabs[self.active].id), self.active);
                 return true;
             }
             log::warn!("no restored tab could be spawned; opening a default tab");
@@ -178,6 +191,7 @@ impl App {
             let mut state = TabState {
                 cwd: t.shell_cwd().map(str::to_string),
                 scrollback: None,
+                background: t.background,
             };
             let dump = if scrollback {
                 t.terminal.dump_scrollback()
@@ -193,7 +207,12 @@ impl App {
             }
             tabs.push(state);
         }
-        let snapshot = Session::new(self.active, self.session.window.clone(), tabs);
+        let active = if self.is_peeking() {
+            self.focus_foreground_index()
+        } else {
+            self.active
+        };
+        let snapshot = Session::new(active, self.session.window.clone(), tabs);
         (snapshot, dumps)
     }
 }
@@ -336,6 +355,34 @@ mod tests {
         app.finish_session();
         assert!(session::load(&path).unwrap().tabs[0].scrollback.is_none());
         assert!(!session::scrollback_dir(&path).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parked_tabs_keep_their_background_flag_in_the_snapshot() {
+        let dir = std::env::temp_dir().join(format!("cometty-app-bg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.toml");
+        let mut app = app_at(&path);
+        add_tab(&mut app, "/");
+        add_tab(&mut app, "/");
+        add_tab(&mut app, "/");
+        app.active = 1;
+        app.park_tab(1);
+        // A quit while peeking saves the foreground home, not the peek.
+        app.toggle_peek_background();
+        assert!(app.is_peeking());
+        app.finish_session();
+        let saved = session::load(&path).unwrap();
+        assert_eq!(
+            saved
+                .tabs
+                .iter()
+                .map(|tab| tab.background)
+                .collect::<Vec<_>>(),
+            [false, false, true]
+        );
+        assert_eq!(saved.active, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

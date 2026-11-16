@@ -79,6 +79,7 @@ impl App {
             && crate::app::settings::is_settings_toggle(&event.logical_key, &self.modifiers)
         {
             self.cancel_tab_drag();
+            self.bg_popover_open = false;
             self.settings.toggle();
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
@@ -91,6 +92,7 @@ impl App {
             && crate::app::logs::is_logs_toggle(&event.logical_key, &self.modifiers)
         {
             self.cancel_tab_drag();
+            self.bg_popover_open = false;
             self.logs.toggle();
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
@@ -123,6 +125,18 @@ impl App {
             self.focus_search();
             return true;
         }
+        // The background-tray popover is app chrome with no text field:
+        // Escape closes it before search/PTY handling.
+        if self.bg_popover_open
+            && event.state == ElementState::Pressed
+            && event.logical_key == Key::Named(NamedKey::Escape)
+        {
+            self.bg_popover_open = false;
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+            return true;
+        }
         // While the bar is open: Esc closes; Enter / Shift+Enter and
         // F3 / Shift+F3 walk the matches. All other keys go to the focused
         // egui field (egui's `consumed` flag below) — or to the shell if the
@@ -153,6 +167,22 @@ impl App {
         }
         // Explicit copy/paste never reaches the PTY.
         if event.state == ElementState::Pressed {
+            if crate::input::is_background_tab_shortcut(
+                &event.logical_key,
+                &self.modifiers,
+                &self.config.input,
+            ) {
+                self.toggle_background_tab();
+                return true;
+            }
+            if crate::input::is_peek_background_shortcut(
+                &event.logical_key,
+                &self.modifiers,
+                &self.config.input,
+            ) {
+                self.toggle_peek_background();
+                return true;
+            }
             if crate::input::is_copy_shortcut(
                 &event.logical_key,
                 &self.modifiers,

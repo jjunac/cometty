@@ -10,6 +10,9 @@ pub(crate) struct OverlayOutput {
     pub(crate) close_tab: Option<u64>,
     pub(crate) new_tab: bool,
     pub(crate) reordered_tab: Option<crate::tabbar::TabMove>,
+    pub(crate) toggle_bg_popover: bool,
+    pub(crate) peek_tab: Option<u64>,
+    pub(crate) unpark_tab: Option<u64>,
     pub(crate) search: SearchUiOutput,
     pub(crate) paint_jobs: Vec<egui::ClippedPrimitive>,
     pub(crate) screen_descriptor: egui_wgpu::ScreenDescriptor,
@@ -51,7 +54,11 @@ impl Renderer {
             offset,
             is_alt,
             tabs,
+            background_tabs,
             active_tab,
+            peeking,
+            total_tabs,
+            bg_popover_open,
             tab_drag,
             settings,
             config,
@@ -63,8 +70,9 @@ impl Renderer {
         let scale = self.scale_factor.max(1.0);
         let screen_w_pts = self.width as f32 / scale;
         let screen_h_pts = self.height as f32 / scale;
-        // Hidden for a single tab: the grid gets the full window height.
-        let tab_h = crate::app::tab::bar_height_points(tabs.len(), &self.user_config.tabbar);
+        // Hidden for a single tab (and no parked tabs): the grid gets the
+        // full window height.
+        let tab_h = crate::app::tab::bar_height_points(total_tabs, &self.user_config.tabbar);
         let tabbar_cfg = self.user_config.tabbar.clone();
         let scrollbar_cfg = self.user_config.scrollbar.clone();
         let theme = self.theme;
@@ -111,6 +119,9 @@ impl Renderer {
                 close_tab: None,
                 new_tab: false,
                 reordered_tab: None,
+                toggle_bg_popover: false,
+                peek_tab: None,
+                unpark_tab: None,
                 search: super::search_ui::SearchUiOutput::default(),
                 paint_jobs: Vec::new(),
                 screen_descriptor,
@@ -144,6 +155,9 @@ impl Renderer {
                 height: tab_h,
                 tabs,
                 active: active_tab,
+                background: background_tabs,
+                peeking,
+                popover_open: bg_popover_open,
             },
             tab_drag,
             &tabbar_cfg,
@@ -291,6 +305,9 @@ impl Renderer {
             close_tab: tab_actions.close_tab,
             new_tab: tab_actions.new_tab,
             reordered_tab: tab_actions.reordered_tab,
+            toggle_bg_popover: tab_actions.toggle_popover,
+            peek_tab: tab_actions.peek_tab,
+            unpark_tab: tab_actions.unpark_tab,
             search: search_actions,
             paint_jobs,
             screen_descriptor,

@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use super::App;
-use crate::app::tab::{active_after_removals, term_height_px};
+use crate::app::tab::term_height_px;
 use crate::pty::PtyEvent;
 
 use super::scheduling::MAX_DRAIN_TIME;
@@ -164,8 +164,11 @@ impl App {
             if let Some(before) = before {
                 // Metadata queries stay off the render path and run once
                 // per touched tab, not once per scheduling quantum.
+                let displayed = i == self.active;
                 let tab = &mut self.tabs[i];
-                cwd_changed |= tab.refresh_title();
+                let refresh = tab.refresh_title(displayed);
+                cwd_changed |= refresh.cwd_changed;
+                chrome_changed |= refresh.chrome_changed;
                 if tab.visual_dirty && !tab.selecting {
                     tab.selection = None;
                     tab.select_mode = crate::selection::SelectMode::Char;
@@ -194,10 +197,12 @@ impl App {
             self.handle_clipboard_ops(clipboard_ops);
         }
         // Remove exited tabs from the back so indices stay valid, then
-        // remap the active index once (tabs before it may have vanished).
+        // restore the displayed tab's identity (a peek may survive) and the
+        // foreground/background partition.
         exited.sort_unstable();
         exited.dedup();
         let removed = !exited.is_empty();
+        let active_before = self.tabs.get(self.active).map(|tab| tab.id);
         for i in exited.iter().rev() {
             self.tabs.remove(*i);
         }
@@ -211,7 +216,7 @@ impl App {
             return true;
         }
         if removed {
-            self.active = active_after_removals(self.active, &exited, self.tabs.len());
+            self.reconcile_removed_tabs(active_before, exited[0]);
             self.pty_schedule.removed(&exited, self.tabs.len());
             if let Some(renderer) = self.renderer.as_mut() {
                 renderer.invalidate();

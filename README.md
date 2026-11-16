@@ -75,6 +75,8 @@ cometty --help
 | Copy / paste | Cmd+C / Cmd+V | Ctrl+Shift+C / Ctrl+Shift+V |
 | Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab | Ctrl+Tab / Ctrl+Shift+Tab |
 | Jump to tab 1–9 | Cmd+1–9 | Super+1–9 |
+| Park / unpark background tab | Cmd+B | Ctrl+Shift+B |
+| Peek background tab | Cmd+Shift+B | Click the tray badge |
 | Find / re-focus search | Cmd+F | Ctrl+F |
 | Settings | Cmd+, | Ctrl+, |
 | Logs | Cmd+Shift+L | Ctrl+Shift+L |
@@ -97,6 +99,16 @@ the strip cancels rather than opening a new window. Tab order is saved with the
 session.
 On macOS, drag the empty space around the tabs to move the window—not the tabs
 or their buttons.
+
+Press **Cmd+B** (macOS) or **Ctrl+Shift+B** (Linux) to park the active tab: it
+leaves the strip and appears behind a small count badge beside **+**. Use this
+for a dev server or watcher you want to keep running without losing a tab slot.
+Click the badge to list parked tabs: click a row to preview it in place (the
+strip stays unchanged), **↑** to move it back to the strip, or **×** to close
+it. A badge dot marks a running job and changes color when a background task
+finishes. Parking the only visible tab opens a fresh prompt in the same
+directory, so the window always keeps one foreground tab. Parked tabs are saved
+with the session.
 
 ## Preferences
 

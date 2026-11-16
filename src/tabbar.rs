@@ -12,6 +12,8 @@
 //! tab (painted on hover only, layout-stable); the `⌘N` shortcut hint sits
 //! on the right for the first 9 tabs. A lone tab keeps the container outline
 //! but renders as a plain title (no nested pill, close box or shortcut).
+//! When parked tabs exist, a count pill after `+` reserves its width from
+//! the container and opens the background-tab popover.
 
 use crate::config::TabbarConfig;
 
@@ -19,6 +21,16 @@ use crate::config::TabbarConfig;
 pub struct TabLabel {
     pub id: u64,
     pub title: String,
+}
+
+/// One row of the background-tab tray popover.
+pub struct BackgroundTabLabel {
+    pub id: u64,
+    pub title: String,
+    /// A foreground job (not the shell prompt) owns the terminal.
+    pub running: bool,
+    /// The job finished while the tab was backgrounded and unseen.
+    pub attention: bool,
 }
 
 /// Move an existing tab to this final, zero-based position.
@@ -262,26 +274,64 @@ pub fn leading_inset_points(config: &TabbarConfig) -> f32 {
 
 /// Width available for the tab container given the full window width
 /// `screen_w` in points (minus leading/trailing insets, the `+` button
-/// and its gap). Never negative.
-pub fn container_width_points(screen_w: f32, config: &TabbarConfig) -> f32 {
+/// and its gap). A non-empty background tray reserves one more gap plus
+/// its pill to the right of `+`. Never negative.
+pub fn container_width_points(screen_w: f32, background: usize, config: &TabbarConfig) -> f32 {
+    let tray = background_tray_width(background, config);
+    let tray_reserve = if tray > 0.0 {
+        config.plus_gap + tray
+    } else {
+        0.0
+    };
     (screen_w
         - leading_inset_points(config)
         - config.inset_x
         - config.plus_diameter
-        - config.plus_gap)
+        - config.plus_gap
+        - tray_reserve)
         .max(0.0)
 }
 
 /// `+` new-tab button rect `[x, y, w, h]` in bar-local points.
-pub fn plus_rect(screen_w: f32, config: &TabbarConfig) -> [f32; 4] {
+pub fn plus_rect(screen_w: f32, background: usize, config: &TabbarConfig) -> [f32; 4] {
     let leading = leading_inset_points(config);
-    let cw = container_width_points(screen_w, config);
+    let cw = container_width_points(screen_w, background, config);
     [
         leading + cw + config.plus_gap,
         config.inset_y,
         config.plus_diameter,
         config.plus_diameter,
     ]
+}
+
+/// Width of the background-tray pill: hidden at zero, otherwise one `+`
+/// diameter plus room for the count's extra digit(s).
+pub fn background_tray_width(count: usize, config: &TabbarConfig) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
+    let extra = match count {
+        0..=9 => 0.0,
+        10..=99 => 8.0,
+        _ => 16.0,
+    };
+    config.plus_diameter + extra
+}
+
+/// Background-tray pill rect `[x, y, w, h]` in bar-local points, or `None`
+/// when no background tab exists.
+pub fn tray_rect(screen_w: f32, background: usize, config: &TabbarConfig) -> Option<[f32; 4]> {
+    let width = background_tray_width(background, config);
+    if width <= 0.0 {
+        return None;
+    }
+    let plus = plus_rect(screen_w, background, config);
+    Some([
+        plus[0] + plus[2] + config.plus_gap,
+        config.inset_y,
+        width,
+        config.plus_diameter,
+    ])
 }
 
 /// True when `(x, y)` (bar-local points) is empty draggable chrome: inside
@@ -295,6 +345,7 @@ pub fn is_titlebar_drag(
     bar_h: f32,
     config: &TabbarConfig,
     painted: StripTarget,
+    background: usize,
 ) -> bool {
     // The last painted controls take precedence over geometric fallback (for
     // example during a resize/config transition). Never reinterpret a tab,
@@ -315,14 +366,22 @@ pub fn is_titlebar_drag(
     // Tabs tile the container; only the vertical insets above/below them
     // count as empty when `x` falls inside the container range.
     let leading = leading_inset_points(config);
-    let cw = container_width_points(screen_w, config);
+    let cw = container_width_points(screen_w, background, config);
     let container_h = (bar_h - config.inset_y * 2.0).max(0.0);
     let in_tab_row = y >= config.inset_y && y < config.inset_y + container_h;
     if in_tab_row && x >= leading && x < leading + cw {
         return false;
     }
-    let p = plus_rect(screen_w, config);
+    let p = plus_rect(screen_w, background, config);
     if x >= p[0] && x < p[0] + p[2] && y >= p[1] && y < p[1] + p[3] {
+        return false;
+    }
+    if let Some(t) = tray_rect(screen_w, background, config)
+        && x >= t[0]
+        && x < t[0] + t[2]
+        && y >= t[1]
+        && y < t[1] + t[3]
+    {
         return false;
     }
     true
@@ -408,6 +467,8 @@ pub enum StripTarget {
     Tab(u64),
     Close(u64),
     NewTab,
+    /// The background-tab tray pill (opens/closes its popover).
+    BackgroundTray,
 }
 
 /// Hovered element at `(x, y)` points, from the interactive rects
@@ -736,18 +797,35 @@ mod tests {
         let cfg = cfg();
         let leading = leading_inset_points(&cfg);
         assert_eq!(
-            container_width_points(800.0, &cfg),
+            container_width_points(800.0, 0, &cfg),
             800.0 - leading - cfg.inset_x - cfg.plus_diameter - cfg.plus_gap
         );
-        assert_eq!(container_width_points(0.0, &cfg), 0.0);
-        let p = plus_rect(800.0, &cfg);
+        assert_eq!(container_width_points(0.0, 0, &cfg), 0.0);
+        let p = plus_rect(800.0, 0, &cfg);
         assert_eq!(
             p[0],
-            leading + container_width_points(800.0, &cfg) + cfg.plus_gap
+            leading + container_width_points(800.0, 0, &cfg) + cfg.plus_gap
         );
         assert_eq!(p[1], cfg.inset_y);
         assert_eq!((p[2], p[3]), (cfg.plus_diameter, cfg.plus_diameter));
         assert_eq!(800.0 - (p[0] + p[2]), cfg.inset_x);
+        assert_eq!(tray_rect(800.0, 0, &cfg), None);
+
+        // A background tray takes one more gap + pill before the trailing
+        // margin, and never overlaps `+` or the tab container.
+        let p_bg = plus_rect(800.0, 3, &cfg);
+        let tray = tray_rect(800.0, 3, &cfg).unwrap();
+        assert_eq!(tray[0], p_bg[0] + p_bg[2] + cfg.plus_gap);
+        assert_eq!(tray[2], cfg.plus_diameter);
+        assert_eq!(800.0 - (tray[0] + tray[2]), cfg.inset_x);
+        assert!(container_width_points(800.0, 3, &cfg) < container_width_points(800.0, 0, &cfg));
+        assert_eq!(
+            plus_rect(800.0, 3, &cfg)[0],
+            leading + container_width_points(800.0, 3, &cfg) + cfg.plus_gap
+        );
+        // Two digits get a little more room; a narrow window clamps at 0.
+        assert!(background_tray_width(12, &cfg) > background_tray_width(3, &cfg));
+        assert_eq!(container_width_points(10.0, 3, &cfg), 0.0);
     }
 
     #[test]
@@ -763,7 +841,8 @@ mod tests {
             screen_w,
             0.0,
             &cfg,
-            StripTarget::Empty
+            StripTarget::Empty,
+            0,
         ));
         // On a tab: not draggable.
         assert!(!is_titlebar_drag(
@@ -772,17 +851,19 @@ mod tests {
             screen_w,
             bar_h,
             &cfg,
-            StripTarget::Empty
+            StripTarget::Empty,
+            0,
         ));
         // On the `+` button: not draggable.
-        let p = plus_rect(screen_w, &cfg);
+        let p = plus_rect(screen_w, 0, &cfg);
         assert!(!is_titlebar_drag(
             p[0] + 1.0,
             p[1] + 1.0,
             screen_w,
             bar_h,
             &cfg,
-            StripTarget::Empty
+            StripTarget::Empty,
+            0,
         ));
         // Trailing margin past the `+` button: draggable.
         assert!(is_titlebar_drag(
@@ -791,7 +872,8 @@ mod tests {
             screen_w,
             bar_h,
             &cfg,
-            StripTarget::Empty
+            StripTarget::Empty,
+            0,
         ));
         // Vertical inset above the tab row, inside the container x-range:
         // draggable.
@@ -801,7 +883,8 @@ mod tests {
             screen_w,
             bar_h,
             &cfg,
-            StripTarget::Empty
+            StripTarget::Empty,
+            0,
         ));
         // Left margin: draggable on plain platforms, traffic lights on macOS.
         if cfg!(target_os = "macos") {
@@ -811,7 +894,8 @@ mod tests {
                 screen_w,
                 bar_h,
                 &cfg,
-                StripTarget::Empty
+                StripTarget::Empty,
+                0,
             ));
         } else {
             assert!(is_titlebar_drag(
@@ -820,9 +904,31 @@ mod tests {
                 screen_w,
                 bar_h,
                 &cfg,
-                StripTarget::Empty
+                StripTarget::Empty,
+                0,
             ));
         }
+        // The tray pill is a painted control, never window-drag chrome.
+        let tray = tray_rect(screen_w, 2, &cfg).unwrap();
+        let (tx, ty) = (tray[0] + 1.0, tray[1] + 1.0);
+        assert!(!is_titlebar_drag(
+            tx,
+            ty,
+            screen_w,
+            bar_h,
+            &cfg,
+            StripTarget::BackgroundTray,
+            2,
+        ));
+        assert!(!is_titlebar_drag(
+            tx,
+            ty,
+            screen_w,
+            bar_h,
+            &cfg,
+            StripTarget::Empty,
+            2,
+        ));
     }
 
     #[test]
@@ -837,15 +943,17 @@ mod tests {
             800.0,
             38.0,
             &cfg,
-            StripTarget::Empty
+            StripTarget::Empty,
+            0,
         ));
         for target in [
             StripTarget::Tab(42),
             StripTarget::Close(42),
             StripTarget::NewTab,
+            StripTarget::BackgroundTray,
         ] {
             assert!(
-                !is_titlebar_drag(x, y, 800.0, 38.0, &cfg, target),
+                !is_titlebar_drag(x, y, 800.0, 38.0, &cfg, target, 0),
                 "{target:?}"
             );
         }

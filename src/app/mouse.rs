@@ -33,6 +33,8 @@ pub(crate) enum ChromeHover {
     Scrollbar,
     /// The find bar: a text field and buttons with their own hover states.
     SearchBar,
+    /// The background-tab tray popover: clickable rows/buttons.
+    Popover,
     /// An open settings or log panel, including its popups and tooltips.
     Panel,
 }
@@ -49,7 +51,10 @@ pub(crate) fn pointer_repaint(
     egui_using_pointer: bool,
 ) -> bool {
     egui_using_pointer
-        || matches!(current, ChromeHover::SearchBar | ChromeHover::Panel)
+        || matches!(
+            current,
+            ChromeHover::SearchBar | ChromeHover::Popover | ChromeHover::Panel
+        )
         || current != previous
 }
 
@@ -367,6 +372,9 @@ impl App {
         if self.search_open() && renderer.over_search_bar(x, y) {
             return ChromeHover::SearchBar;
         }
+        if self.bg_popover_open && renderer.over_tab_popover(x, y) {
+            return ChromeHover::Popover;
+        }
         if renderer.over_tab_bar(y, self.tabs.len()) {
             return match renderer.tab_strip_target(x, y) {
                 crate::tabbar::StripTarget::Empty => ChromeHover::None,
@@ -416,6 +424,7 @@ impl App {
         super::scheduling::blink_restart(now, &mut self.last_blink, &mut self.cursor_visible);
         if !focused {
             self.tab_drag.focus_lost();
+            self.bg_popover_open = false;
             self.last_mouse_report = None;
             self.mouse_pressed = 0;
             self.link_press = false;
@@ -440,6 +449,28 @@ impl App {
         egui_consumed: bool,
     ) {
         self.last_mouse_report = None;
+        // A press anywhere but the popover (or its tray toggle) dismisses
+        // the menu, then continues as a normal click. The tray press is
+        // excluded so its release toggles the popover exactly once.
+        if button == MouseButton::Left
+            && state == ElementState::Pressed
+            && self.bg_popover_open
+            && let Some((x, y)) = self.cursor_pos
+        {
+            let over_chrome = self.renderer.as_ref().is_some_and(|r| {
+                r.over_tab_popover(x, y)
+                    || matches!(
+                        r.tab_strip_target(x, y),
+                        crate::tabbar::StripTarget::BackgroundTray
+                    )
+            });
+            if !over_chrome {
+                self.bg_popover_open = false;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+        }
         if button == MouseButton::Left {
             if state == ElementState::Pressed {
                 // A fresh press also retires a focus-loss release guard when
@@ -737,6 +768,7 @@ impl App {
             bar_h,
             &self.config.tabbar,
             renderer.tab_strip_target(x_phys, y_phys),
+            self.background_count(),
         ) {
             self.last_titlebar_click = None;
             return;
@@ -772,6 +804,17 @@ impl App {
         }
         // Scrolling over the open settings panel scrolls the panel.
         if self.settings.open && egui_consumed {
+            return;
+        }
+        // The tray popover owns wheel input (its own scroll area), never
+        // the terminal underneath it.
+        if self.bg_popover_open
+            && self.cursor_pos.is_some_and(|(x, y)| {
+                self.renderer
+                    .as_ref()
+                    .is_some_and(|r| r.over_tab_popover(x, y))
+            })
+        {
             return;
         }
         // Wheel over the find bar belongs to the bar (nothing scrollable

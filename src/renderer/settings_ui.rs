@@ -988,6 +988,11 @@ fn show_section(
                     &mut config.input.search_key,
                     d.input.search_key.as_str(),
                 ),
+                (
+                    "Background key",
+                    &mut config.input.background_key,
+                    d.input.background_key.as_str(),
+                ),
             ] {
                 ui.horizontal(|ui| {
                     let slot = begin_reset_slot(ui);
@@ -1055,6 +1060,30 @@ fn show_section(
                 "Tab switch on Cmd/Super",
                 &mut config.input.tab_switch_super,
                 true,
+            );
+            ed.flag(
+                ui,
+                "Background on Ctrl+Shift",
+                &mut config.input.background_ctrl_shift,
+                true,
+            );
+            ed.flag(
+                ui,
+                "Background on Cmd/Super",
+                &mut config.input.background_super,
+                true,
+            );
+            ed.flag(
+                ui,
+                "Peek background on Cmd/Super+Shift",
+                &mut config.input.peek_super_shift,
+                true,
+            );
+            ed.flag(
+                ui,
+                "Peek on Ctrl+Shift+Alt",
+                &mut config.input.peek_ctrl_shift_alt,
+                false,
             );
             ed.flag(
                 ui,

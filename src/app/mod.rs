@@ -87,6 +87,14 @@ pub struct App {
     pub(crate) chrome_hover: mouse::ChromeHover,
     /// Native pointer capture + pure drag preview state for the tab strip.
     pub(crate) tab_drag: crate::tabbar::TabDrag,
+    /// Background-tab tray popover (list of parked tabs).
+    pub(crate) bg_popover_open: bool,
+    /// Stable id of the last foreground tab the user viewed, so leaving a
+    /// background peek (or parking the active tab) has a visible home.
+    pub(crate) last_foreground_tab: Option<u64>,
+    /// Stable id of the most recently parked/peeked background tab, for
+    /// the quick-peek toggle.
+    pub(crate) last_background_tab: Option<u64>,
     /// Multi-click chain for word/line select: last press time, view cell,
     /// and count (1 single, 2 word, 3 line). Separate from
     /// `last_titlebar_click` (macOS zoom).
@@ -158,6 +166,9 @@ impl App {
             cursor_pos: None,
             chrome_hover: mouse::ChromeHover::None,
             tab_drag: crate::tabbar::TabDrag::default(),
+            bg_popover_open: false,
+            last_foreground_tab: None,
+            last_background_tab: None,
             last_click: None,
             last_titlebar_click: None,
             mouse_pressed: 0,

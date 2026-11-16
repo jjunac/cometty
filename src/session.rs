@@ -61,6 +61,9 @@ pub struct TabState {
     /// contents to replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scrollback: Option<String>,
+    /// Parked behind the tab strip in the background tray.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background: bool,
 }
 
 /// A physical monitor rectangle: `(x, y, width, height)`.
@@ -133,6 +136,11 @@ impl Session {
             }
         }
         self.active = self.active.min(self.tabs.len() - 1);
+        // A window always needs one foreground tab; promote the saved
+        // active tab if a hand-edited snapshot parks everything.
+        if self.tabs.iter().all(|tab| tab.background) {
+            self.tabs[self.active].background = false;
+        }
         if self.window.as_ref().is_some_and(|w| {
             !(w.width.is_finite() && w.width >= 1.0 && w.height.is_finite() && w.height >= 1.0)
         }) {
@@ -401,6 +409,7 @@ mod tests {
         TabState {
             cwd: Some(cwd.to_string()),
             scrollback: None,
+            background: false,
         }
     }
 
@@ -424,6 +433,25 @@ mod tests {
         );
         let text = toml::to_string_pretty(&session).unwrap();
         assert_eq!(parse(&text, |_| true).unwrap(), Some(session));
+    }
+
+    #[test]
+    fn background_flags_round_trip_and_all_background_snapshots_promote_active() {
+        let mut session = Session::new(1, None, vec![tab("/a"), tab("/b")]);
+        session.tabs[1].background = true;
+        let text = toml::to_string(&session).unwrap();
+        assert!(text.contains("background = true"));
+        let back = parse(&text, |_| true).unwrap().unwrap();
+        assert!(!back.tabs[0].background);
+        assert!(back.tabs[1].background);
+
+        // A hand-edited snapshot that parks every tab keeps one foreground.
+        let text = "version = 1\nactive = 1\n[[tabs]]\nbackground = true\n\
+                    [[tabs]]\nbackground = true\n";
+        let fixed = parse(text, |_| true).unwrap().unwrap();
+        assert_eq!(fixed.active, 1);
+        assert!(!fixed.tabs[1].background);
+        assert!(fixed.tabs[0].background);
     }
 
     #[test]

@@ -110,6 +110,13 @@ fn map_key(
     if tab_direct_index(logical_key, key_without_modifiers, modifiers, input_config).is_some() {
         return None;
     }
+    // Background park/peek shortcuts are app-local too. Plain `Ctrl+B`
+    // still passes through because the Ctrl variant requires Shift.
+    if is_background_tab_shortcut(logical_key, modifiers, input_config)
+        || is_peek_background_shortcut(logical_key, modifiers, input_config)
+    {
+        return None;
+    }
     // Super combos never reach the PTY (OS / app shortcuts),
     // except Cmd+Left/Right for beginning/end of line (all platforms).
     if modifiers.super_key() {
@@ -581,6 +588,59 @@ pub fn is_new_tab_shortcut(
     let ctrl = config.new_tab_ctrl && modifiers.control_key() && !modifiers.super_key();
     let sup = config.new_tab_super && modifiers.super_key() && !modifiers.control_key();
     ctrl != sup
+}
+
+/// Park/unpark shortcut, gated by [`crate::config::InputConfig`].
+/// `Cmd+B` on macOS, `Ctrl+Shift+B` elsewhere; plain `Ctrl+B` stays free
+/// for tmux/vim because `Shift` is required. Consumed locally, never
+/// reaches the PTY.
+pub fn is_background_tab_shortcut(
+    logical_key: &Key,
+    modifiers: &ModifiersState,
+    config: &crate::config::InputConfig,
+) -> bool {
+    let Key::Character(s) = logical_key else {
+        return false;
+    };
+    if s.to_ascii_lowercase() != config.background_key.to_ascii_lowercase() {
+        return false;
+    }
+    if modifiers.alt_key() {
+        return false;
+    }
+    let sup = config.background_super
+        && modifiers.super_key()
+        && !modifiers.control_key()
+        && !modifiers.shift_key();
+    let ctrl = config.background_ctrl_shift
+        && modifiers.control_key()
+        && modifiers.shift_key()
+        && !modifiers.super_key();
+    sup != ctrl
+}
+
+/// Peek toggle shortcut: `Cmd+Shift+B` (and the opt-in
+/// `Ctrl+Shift+Alt+B` fallback, off by default because Ctrl+Alt is AltGr
+/// on many layouts). Consumed locally, never reaches the PTY.
+pub fn is_peek_background_shortcut(
+    logical_key: &Key,
+    modifiers: &ModifiersState,
+    config: &crate::config::InputConfig,
+) -> bool {
+    let Key::Character(s) = logical_key else {
+        return false;
+    };
+    if s.to_ascii_lowercase() != config.background_key.to_ascii_lowercase() {
+        return false;
+    }
+    if modifiers.control_key() && modifiers.alt_key() {
+        return config.peek_ctrl_shift_alt && modifiers.shift_key() && !modifiers.super_key();
+    }
+    config.peek_super_shift
+        && modifiers.super_key()
+        && modifiers.shift_key()
+        && !modifiers.control_key()
+        && !modifiers.alt_key()
 }
 
 /// Tab-cycle shortcut, gated by [`crate::config::InputConfig`].
@@ -1314,6 +1374,54 @@ mod tests {
         // Unsupported buttons drop.
         assert_eq!(
             encode_mouse_press(MouseButton::Back, 0, 0, &none, true),
+            None
+        );
+    }
+
+    #[test]
+    fn background_shortcuts_are_app_local_and_plain_ctrl_b_still_reaches_the_pty() {
+        let cfg = InputConfig::default();
+        let b = Key::Character("b".into());
+        let ctrl = ModifiersState::CONTROL;
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        let sup = ModifiersState::SUPER;
+        let sup_shift = ModifiersState::SUPER | ModifiersState::SHIFT;
+        let ctrl_shift_alt = ctrl_shift | ModifiersState::ALT;
+
+        assert!(is_background_tab_shortcut(&b, &sup, &cfg));
+        assert!(is_background_tab_shortcut(&b, &ctrl_shift, &cfg));
+        // Plain Ctrl+B is the tmux prefix, not a park shortcut.
+        assert!(!is_background_tab_shortcut(&b, &ctrl, &cfg));
+        assert!(!is_background_tab_shortcut(&b, &sup_shift, &cfg));
+        assert!(is_peek_background_shortcut(&b, &sup_shift, &cfg));
+        assert!(!is_peek_background_shortcut(&b, &ctrl_shift_alt, &cfg));
+
+        // Consumed locally: no bytes reach the PTY.
+        assert_eq!(plain(&b, Some("b"), &sup), None);
+        assert_eq!(plain(&b, Some("b"), &sup_shift), None);
+        assert_eq!(plain(&b, Some("b"), &ctrl_shift), None);
+        // Plain Ctrl+B still maps to the control byte.
+        assert_eq!(plain(&b, Some("b"), &ctrl), Some(vec![0x02]));
+
+        // The opt-in AltGr-shaped fallback is honored when enabled.
+        let opt_in = InputConfig {
+            peek_ctrl_shift_alt: true,
+            ..InputConfig::default()
+        };
+        assert!(is_peek_background_shortcut(&b, &ctrl_shift_alt, &opt_in));
+        assert_eq!(
+            map_key(
+                &b,
+                &b,
+                Some("b"),
+                Some("b"),
+                KeyLocation::Standard,
+                true,
+                &ctrl_shift_alt,
+                false,
+                false,
+                &opt_in,
+            ),
             None
         );
     }

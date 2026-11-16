@@ -33,6 +33,14 @@ pub(crate) struct Foreground {
     cwd_baseline: u64,
 }
 
+/// Result of [`Tab::refresh_title`]: which cached facts moved.
+pub(crate) struct TitleRefresh {
+    /// The shell's working directory changed (session-snapshot input).
+    pub cwd_changed: bool,
+    /// Running/idle state changed (tray badge repaint input).
+    pub chrome_changed: bool,
+}
+
 /// Cached view-space link runs for the hint underlines. Rebuilt only when
 /// the grid view or the URL-detection toggle changed, so holding the hint
 /// modifier does not re-scan the screen every frame.
@@ -58,6 +66,15 @@ pub struct Tab {
     pub(crate) id: u64,
     pub(crate) terminal: Terminal,
     pub(crate) pty: PtySession,
+    /// Parked in the background tray: hidden from the main tab strip,
+    /// reachable through the tray popover and in-place peek.
+    pub(crate) background: bool,
+    /// A foreground job (not the shell prompt) owns the terminal, tracked
+    /// by [`Tab::refresh_title`] from the kernel. Never polled at idle.
+    pub(crate) running: bool,
+    /// The foreground job finished while this tab was parked and unseen:
+    /// the tray badge keeps an accent dot until the user peeks/unparks.
+    pub(crate) bg_attention: bool,
     pub(crate) selection: Option<Selection>,
     pub(crate) selecting: bool,
     /// Granularity of the in-progress drag (char / word / line).
@@ -124,6 +141,9 @@ impl Tab {
             id,
             terminal,
             pty,
+            background: false,
+            running: false,
+            bg_attention: false,
             selection: None,
             selecting: false,
             select_mode: crate::selection::SelectMode::Char,
@@ -170,11 +190,13 @@ impl Tab {
     /// terminal the OSC 7 baseline is refreshed, so only reports emitted
     /// by a job itself count as live (see [`osc7_is_live`]).
     ///
-    /// Returns whether the shell's cwd changed (a session-snapshot input).
-    pub(crate) fn refresh_title(&mut self) -> bool {
+    /// Returns whether the shell's cwd changed (a session-snapshot input)
+    /// and whether job state changed (a tray-badge repaint input).
+    pub(crate) fn refresh_title(&mut self, displayed: bool) -> TitleRefresh {
         // Latency probe: this runs on the UI thread between echo and
         // paint, so a slow query delays every keystroke's frame.
         let start = Instant::now();
+        let shell_pid = self.pty.shell_pid();
         let pgid = self.pty.foreground_pgid();
         if pgid != self.foreground.pgid {
             self.foreground.pgid = pgid;
@@ -182,8 +204,20 @@ impl Tab {
                 self.foreground.command = Some(command);
             }
         }
+        // A shell prompt is idle; any other foreground process group is a
+        // running job. This transition marks a parked, unseen tab as
+        // "finished" without any timer of its own.
+        let running = job_is_running(pgid, shell_pid);
+        let mut chrome_changed = false;
+        if running != self.running {
+            self.running = running;
+            chrome_changed = true;
+            if !running && self.background && !displayed {
+                self.bg_attention = true;
+            }
+        }
         let mut cwd_changed = false;
-        if let Some(cwd) = self.pty.shell_pid().or(pgid).and_then(procinfo::cwd)
+        if let Some(cwd) = shell_pid.or(pgid).and_then(procinfo::cwd)
             && self.foreground.cwd.as_ref() != Some(&cwd)
         {
             self.foreground.cwd = Some(cwd);
@@ -192,7 +226,7 @@ impl Tab {
         // Every OSC 7 seen while the shell owns the terminal is accounted
         // for; a later report (from the next job) is the only one allowed
         // to move `$cwd` away from the shell's own directory.
-        if self.pty.shell_pid().is_some_and(|pid| pgid == Some(pid)) {
+        if shell_pid.is_some_and(|pid| pgid == Some(pid)) {
             self.foreground.cwd_baseline = self.terminal.cwd_version();
         }
         let elapsed = start.elapsed();
@@ -200,7 +234,10 @@ impl Tab {
         if elapsed >= Duration::from_millis(2) {
             log::debug!("slow refresh_title {elapsed:?}");
         }
-        cwd_changed
+        TitleRefresh {
+            cwd_changed,
+            chrome_changed,
+        }
     }
 
     /// The shell's last known working directory, for session snapshots.
@@ -213,7 +250,9 @@ impl Tab {
 /// there is a single tab (or none) — except on macOS, where the strip
 /// lives inside the OS titlebar (transparent titlebar + fullsize content
 /// view, Brave-style) and is always shown so terminal content never
-/// slides under the traffic lights.
+/// slides under the traffic lights. `tab_count` is the total including
+/// parked tabs: one foreground tab plus one parked tab keeps the strip
+/// (and its tray badge) visible.
 pub fn bar_height_points(tab_count: usize, config: &TabbarConfig) -> f32 {
     if tab_count <= 1 && !cfg!(target_os = "macos") {
         0.0
@@ -404,6 +443,17 @@ pub fn preferred_cwd<'a>(
     }
 }
 
+/// Whether the terminal is owned by a foreground job rather than the shell
+/// prompt. An unknown shell pid still counts a known foreground group as
+/// running; no foreground group at all is the prompt.
+pub(crate) fn job_is_running(pgid: Option<i32>, shell_pid: Option<i32>) -> bool {
+    match (pgid, shell_pid) {
+        (Some(pgid), Some(shell)) => pgid != shell,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
 /// Whether an `OSC 7` report is live for the current foreground job.
 ///
 /// While a job owns the terminal only a report emitted since the shell
@@ -459,16 +509,59 @@ impl App {
         self.tabs.get_mut(self.active)
     }
 
-    /// Labels for every tab in order, for the tab-bar overlay.
+    /// Labels for the foreground tabs in order, for the tab-bar strip.
     pub(crate) fn tab_labels(&self) -> Vec<crate::tabbar::TabLabel> {
         self.tabs
             .iter()
             .enumerate()
+            .filter(|(_, t)| !t.background)
             .map(|(i, t)| crate::tabbar::TabLabel {
                 id: t.id,
                 title: self.title_for_tab(i, t),
             })
             .collect()
+    }
+
+    /// Labels for the parked tabs, for the tray popover.
+    pub(crate) fn background_labels(&self) -> Vec<crate::tabbar::BackgroundTabLabel> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.background)
+            .map(|(i, t)| crate::tabbar::BackgroundTabLabel {
+                id: t.id,
+                title: self.title_for_tab(i, t),
+                running: t.running,
+                attention: t.bg_attention,
+            })
+            .collect()
+    }
+
+    /// Foreground tabs occupy a prefix of `App::tabs`, so strip indices,
+    /// `Cmd+1..9`, and `Ctrl+Tab` need no translation.
+    pub(crate) fn foreground_count(&self) -> usize {
+        self.tabs.iter().take_while(|tab| !tab.background).count()
+    }
+
+    pub(crate) fn background_count(&self) -> usize {
+        self.tabs.len() - self.foreground_count()
+    }
+
+    pub(crate) fn is_peeking(&self) -> bool {
+        self.active_tab().is_some_and(|tab| tab.background)
+    }
+
+    /// Foreground index to return to when leaving a peek: the last viewed
+    /// foreground tab, else the first one.
+    pub(crate) fn focus_foreground_index(&self) -> usize {
+        let fg = self.foreground_count();
+        if fg == 0 {
+            return 0;
+        }
+        self.last_foreground_tab
+            .and_then(|id| self.tab_index(id))
+            .filter(|&index| index < fg)
+            .unwrap_or(0)
     }
 
     pub(crate) fn tab_index(&self, id: u64) -> Option<usize> {
@@ -477,12 +570,14 @@ impl App {
 
     /// Commit one drop, moving the entire tab (including its transport and
     /// caches). A positional change is not a content switch or a grid resize.
+    /// Only foreground tabs participate in the strip.
     pub(crate) fn reorder_tab(&mut self, movement: crate::tabbar::TabMove) -> bool {
-        let Some(from) = self.tab_index(movement.id) else {
+        let foreground = self.foreground_count();
+        let Some(from) = self.tab_index(movement.id).filter(|&i| i < foreground) else {
             return false;
         };
         let to = movement.to;
-        if to >= self.tabs.len() || from == to {
+        if to >= foreground || from == to {
             return false;
         }
         let tab = self.tabs.remove(from);
@@ -497,11 +592,12 @@ impl App {
     }
 
     pub(crate) fn reconcile_tab_drag(&mut self) {
-        let valid = self.tabs.len() > 1
+        let foreground = self.foreground_count();
+        let valid = foreground > 1
             && self
                 .tab_drag
                 .source()
-                .is_some_and(|id| self.tab_index(id).is_some());
+                .is_some_and(|id| self.tab_index(id).is_some_and(|i| i < foreground));
         self.tab_drag.retain_source(valid);
     }
 
@@ -627,8 +723,13 @@ impl App {
         let mut tab = Tab::new(id, terminal, pty);
         tab.spawn_cwd = cwd.map(str::to_string);
         self.cancel_tab_drag();
-        self.tabs.push(tab);
-        self.active = self.tabs.len() - 1;
+        self.bg_popover_open = false;
+        // New foreground tabs go at the end of the foreground prefix so
+        // parked tabs stay contiguous behind it.
+        let insert = self.foreground_count();
+        self.tabs.insert(insert, tab);
+        self.active = insert;
+        self.last_foreground_tab = Some(id);
         self.spawned_any = true;
         self.session_changed();
         log::debug!("spawned tab {} ({}x{})", self.tabs.len(), cols, rows);
@@ -645,12 +746,20 @@ impl App {
     }
 
     /// Spawn a tab sized for the current window, for `Ctrl+T` / `Cmd+T`.
-    pub(crate) fn spawn_tab_for_window(&mut self) {
+    /// Returns false when the window/renderer is not ready or the PTY
+    /// failed to spawn.
+    pub(crate) fn spawn_tab_for_window(&mut self) -> bool {
+        self.spawn_tab_for_window_at(None)
+    }
+
+    /// [`Self::spawn_tab_for_window`] with a cwd for the new shell (parking
+    /// the only foreground tab leaves its replacement in the same place).
+    fn spawn_tab_for_window_at(&mut self, cwd: Option<&str>) -> bool {
         let Some(renderer) = self.renderer.as_ref() else {
-            return;
+            return false;
         };
         let Some(window) = self.window.as_ref() else {
-            return;
+            return false;
         };
         let size = window.inner_size();
         let w = size.width.max(1);
@@ -670,12 +779,25 @@ impl App {
             renderer.line_height,
             &self.config.terminal,
         );
-        self.spawn_tab(cols, rows, None);
+        self.spawn_tab(cols, rows, cwd)
     }
 
-    /// Switch to tab `index`. No-op when out of range or already active.
+    /// Switch to tab `index`. No-op when out of range.
+    ///
+    /// A foreground index shows that tab and records it as the return point
+    /// for a later peek. A background index is an in-place peek: the main
+    /// strip keeps its foreground tabs without an inner active pill.
     pub(crate) fn switch_tab(&mut self, index: usize) {
-        if index >= self.tabs.len() || index == self.active {
+        if index >= self.tabs.len() {
+            return;
+        }
+        if index == self.active {
+            if self.bg_popover_open {
+                self.bg_popover_open = false;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
             return;
         }
         if self
@@ -690,6 +812,15 @@ impl App {
             old.last_key_write = None;
         }
         self.active = index;
+        let id = self.tabs[index].id;
+        if self.tabs[index].background {
+            // Seeing the tab clears its "job finished" marker.
+            self.tabs[index].bg_attention = false;
+            self.last_background_tab = Some(id);
+        } else {
+            self.last_foreground_tab = Some(id);
+        }
+        self.bg_popover_open = false;
         self.session_changed();
         log::debug!("switched to tab {index}");
         // Two tabs can share a grid version while holding different
@@ -706,11 +837,160 @@ impl App {
         }
     }
 
-    /// Cycle tabs by `delta` with wrap-around (`+1` next, `-1` prev).
-    /// No-op with fewer than 2 tabs.
+    /// Cycle foreground tabs by `delta` with wrap-around (`+1` next, `-1`
+    /// prev). A peek exits to the last foreground tab first, so the main
+    /// strip keeps its usual cycle.
     pub(crate) fn switch_relative(&mut self, delta: isize) {
-        let next = next_tab_index(self.active, self.tabs.len(), delta);
-        self.switch_tab(next);
+        let foreground = self.foreground_count();
+        let current = if self.is_peeking() {
+            self.focus_foreground_index()
+        } else {
+            self.active
+        };
+        if foreground >= 2 {
+            let next = next_tab_index(current, foreground, delta);
+            self.switch_tab(next);
+        } else if self.is_peeking() {
+            self.switch_tab(current);
+        }
+    }
+
+    /// Park the active foreground tab in the background tray, or unpark it
+    /// when the view is a peek.
+    pub(crate) fn toggle_background_tab(&mut self) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let id = tab.id;
+        if tab.background {
+            self.unpark_tab(id);
+            return;
+        }
+        if self.foreground_count() > 1 {
+            self.park_tab(id);
+            return;
+        }
+        // Parking the only main tab would leave no foreground tab. Spawn a
+        // fresh prompt in the same directory first, then park the old tab.
+        let cwd = tab.shell_cwd().map(str::to_string);
+        if self.spawn_tab_for_window_at(cwd.as_deref()) {
+            self.park_tab(id);
+        }
+    }
+
+    /// Toggle an in-place peek at the most recent background tab, returning
+    /// to the last foreground tab when already peeking.
+    pub(crate) fn toggle_peek_background(&mut self) {
+        if self.is_peeking() {
+            self.switch_tab(self.focus_foreground_index());
+            return;
+        }
+        if let Some(index) = self.pick_background_index() {
+            self.switch_tab(index);
+        }
+    }
+
+    fn pick_background_index(&self) -> Option<usize> {
+        let foreground = self.foreground_count();
+        if foreground >= self.tabs.len() {
+            return None;
+        }
+        self.last_background_tab
+            .and_then(|id| self.tab_index(id))
+            .filter(|&index| self.tabs[index].background)
+            .or_else(|| {
+                (foreground..self.tabs.len())
+                    .rev()
+                    .find(|&i| self.tabs[i].background)
+            })
+    }
+
+    /// Show a parked tab in place, without moving it back to the strip.
+    pub(crate) fn peek_background_tab(&mut self, id: u64) {
+        if let Some(index) = self
+            .tab_index(id)
+            .filter(|&index| self.tabs[index].background)
+        {
+            self.switch_tab(index);
+        }
+    }
+
+    /// Move one foreground tab behind the strip. No-op for a background tab
+    /// or the last foreground tab (callers spawn a replacement first).
+    pub(crate) fn park_tab(&mut self, id: u64) {
+        let Some(from) = self.tab_index(id) else {
+            return;
+        };
+        if self.tabs[from].background || self.foreground_count() <= 1 {
+            return;
+        }
+        let target = if from == self.active {
+            let fallback = self.focus_foreground_index();
+            if fallback != from {
+                fallback
+            } else if from > 0 {
+                // `last_foreground_tab` is normally the active tab itself;
+                // park to its previous neighbour, or the next for tab 0.
+                from - 1
+            } else {
+                1
+            }
+        } else {
+            self.active
+        };
+        let mut tab = self.tabs.remove(from);
+        tab.background = true;
+        tab.bg_attention = false;
+        self.tabs.push(tab);
+        self.active = if target > from { target - 1 } else { target };
+        self.pty_schedule.moved(from, self.tabs.len() - 1);
+        self.last_background_tab = Some(id);
+        if let Some(tab) = self.tabs.get(self.active)
+            && !tab.background
+        {
+            self.last_foreground_tab = Some(tab.id);
+        }
+        self.reconcile_tab_drag();
+        self.session_changed();
+        log::debug!("parked tab {id} ({} background)", self.background_count());
+        if let Some(r) = self.renderer.as_mut() {
+            r.invalidate();
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+        self.sync_tab_sizes();
+    }
+
+    /// Bring a parked tab back to the end of the main strip and show it.
+    pub(crate) fn unpark_tab(&mut self, id: u64) {
+        let Some(from) = self.tab_index(id) else {
+            return;
+        };
+        if !self.tabs[from].background {
+            return;
+        }
+        let mut tab = self.tabs.remove(from);
+        tab.background = false;
+        tab.bg_attention = false;
+        let insert = self.foreground_count();
+        self.tabs.insert(insert, tab);
+        self.active = insert;
+        self.last_foreground_tab = Some(id);
+        self.bg_popover_open = false;
+        self.pty_schedule.moved(from, insert);
+        if self.background_count() == 0 {
+            self.last_background_tab = None;
+        }
+        self.session_changed();
+        log::debug!("unparked tab {id}");
+        if let Some(r) = self.renderer.as_mut() {
+            r.invalidate();
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+        self.sync_tab_sizes();
     }
 
     /// Close tab `index`. Returns true when no tabs remain and the
@@ -720,6 +1000,7 @@ impl App {
             return self.tabs.is_empty();
         }
         log::debug!("closed tab {index} ({} left)", self.tabs.len() - 1);
+        let active_id = (index != self.active).then(|| self.tabs[self.active].id);
         self.tabs.remove(index);
         self.pty_schedule.removed(&[index], self.tabs.len());
         self.reconcile_tab_drag();
@@ -727,7 +1008,7 @@ impl App {
         if self.tabs.is_empty() {
             return true;
         }
-        self.active = active_after_removals(self.active, &[index], self.tabs.len());
+        self.reconcile_removed_tabs(active_id, index);
         if let Some(r) = self.renderer.as_mut() {
             r.invalidate();
         }
@@ -737,6 +1018,77 @@ impl App {
         // Closing down to 1 tab hides the bar and hands the space back.
         self.sync_tab_sizes();
         false
+    }
+
+    /// Restore active/focus bookkeeping after removals. Keeps the surviving
+    /// displayed tab by identity (a peek stays a peek), leaves background
+    /// tabs out of the main strip, and promotes a parked tab when the last
+    /// foreground tab disappeared so the window never becomes all-background.
+    pub(crate) fn reconcile_removed_tabs(&mut self, active_before: Option<u64>, slot: usize) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        self.active = match active_before.and_then(|id| self.tab_index(id)) {
+            Some(index) => index,
+            None => {
+                let index = slot.min(self.tabs.len() - 1);
+                if self.tabs[index].background {
+                    self.focus_foreground_index()
+                } else {
+                    index
+                }
+            }
+        };
+        if self.foreground_count() == 0 {
+            let promote = self
+                .tabs
+                .get(self.active)
+                .filter(|tab| tab.background)
+                .map(|_| self.active)
+                .unwrap_or(self.tabs.len() - 1);
+            let mut tab = self.tabs.remove(promote);
+            tab.background = false;
+            tab.bg_attention = false;
+            self.tabs.insert(0, tab);
+            self.pty_schedule.moved(promote, 0);
+            self.active = 0;
+        }
+        let (id, background) = self
+            .tabs
+            .get(self.active)
+            .map(|tab| (tab.id, tab.background))
+            .unwrap_or((0, false));
+        if background {
+            self.last_background_tab = Some(id);
+        } else {
+            self.last_foreground_tab = Some(id);
+        }
+        if self
+            .last_foreground_tab
+            .and_then(|id| self.tab_index(id))
+            .is_none_or(|index| self.tabs[index].background)
+        {
+            self.last_foreground_tab = self
+                .tabs
+                .iter()
+                .find(|tab| !tab.background)
+                .map(|tab| tab.id);
+        }
+        if self
+            .last_background_tab
+            .and_then(|id| self.tab_index(id))
+            .is_none_or(|index| !self.tabs[index].background)
+        {
+            self.last_background_tab = self
+                .tabs
+                .iter()
+                .rev()
+                .find(|tab| tab.background)
+                .map(|tab| tab.id);
+        }
+        if self.background_count() == 0 {
+            self.bg_popover_open = false;
+        }
     }
 }
 
@@ -869,6 +1221,106 @@ mod tests {
         }
         app.tabs.clear();
         assert!(!app.reorder_tab(crate::tabbar::TabMove { id: 1, to: 0 }));
+    }
+
+    #[test]
+    fn parking_switches_to_a_neighbour_and_keeps_foreground_indices_dense() {
+        let (mut app, _) = app_with_tabs(3);
+        app.active = 1;
+        app.park_tab(1);
+        assert_eq!(
+            app.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            [0, 2, 1]
+        );
+        assert_eq!(app.tabs[app.active].id, 0);
+        assert_eq!(app.foreground_count(), 2);
+        assert_eq!(app.background_count(), 1);
+        assert_eq!(
+            app.tab_labels()
+                .iter()
+                .map(|label| label.id)
+                .collect::<Vec<_>>(),
+            [0, 2]
+        );
+        let background = app.background_labels();
+        assert_eq!(background.len(), 1);
+        assert_eq!(background[0].id, 1);
+        assert_eq!(background[0].title, "3", "$tab keeps the saved position");
+
+        // Ctrl+Tab cycles the two remaining foreground tabs only.
+        app.switch_relative(1);
+        assert_eq!(app.tabs[app.active].id, 2);
+        app.switch_relative(1);
+        assert_eq!(app.tabs[app.active].id, 0);
+    }
+
+    #[test]
+    fn peek_shows_a_parked_tab_without_moving_it_and_ctrl_tab_returns_to_the_strip() {
+        let (mut app, _) = app_with_tabs(2);
+        let parked = app.tabs[1].id;
+        app.active = 0;
+        app.park_tab(parked);
+        assert!(!app.is_peeking());
+        app.toggle_peek_background();
+        assert!(app.is_peeking());
+        assert_eq!(app.tabs[app.active].id, parked);
+        assert_eq!(app.foreground_count(), 1);
+        assert!(app.tab_labels().iter().all(|label| label.id != parked));
+
+        // Ctrl+Tab exits the peek and cycles the foreground strip.
+        app.switch_relative(1);
+        assert!(!app.is_peeking());
+        assert_eq!(app.tabs[app.active].id, 0);
+
+        app.peek_background_tab(parked);
+        assert!(app.is_peeking());
+        app.unpark_tab(parked);
+        assert!(!app.is_peeking());
+        assert_eq!(app.tabs[app.active].id, parked);
+        assert_eq!(app.foreground_count(), 2);
+        assert!(app.tabs.iter().all(|tab| !tab.background));
+    }
+
+    #[test]
+    fn closing_the_last_foreground_tab_promotes_a_parked_task_instead_of_quitting() {
+        let (mut app, _) = app_with_tabs(2);
+        let parked = app.tabs[1].id;
+        app.active = 1;
+        app.park_tab(parked);
+        assert_eq!(app.foreground_count(), 1);
+        // Closing the only visible tab must not kill the running task.
+        assert!(!app.close_tab(0));
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[0].id, parked);
+        assert!(!app.tabs[0].background);
+        assert_eq!(app.active, 0);
+        assert_eq!(app.foreground_count(), 1);
+    }
+
+    #[test]
+    fn reorder_and_drag_only_consider_foreground_tabs() {
+        let (mut app, _) = app_with_tabs(3);
+        app.park_tab(2);
+        assert!(!app.reorder_tab(crate::tabbar::TabMove { id: 2, to: 0 }));
+        assert!(app.reorder_tab(crate::tabbar::TabMove { id: 0, to: 1 }));
+        assert_eq!(
+            app.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            [1, 0, 2]
+        );
+        app.tab_drag
+            .begin(Some((0, [100.0, 5.0, 200.0, 35.0])), [150.0, 20.0]);
+        app.tab_drag.moved([350.0, 20.0]);
+        app.reconcile_tab_drag();
+        assert_eq!(app.tab_drag.source(), Some(0));
+    }
+
+    #[test]
+    fn job_state_distinguishes_a_prompt_from_a_foreground_task() {
+        assert!(!job_is_running(None, Some(10)));
+        assert!(!job_is_running(Some(10), Some(10)));
+        assert!(job_is_running(Some(11), Some(10)));
+        // Unknown shell: a known foreground group still counts as a job.
+        assert!(job_is_running(Some(11), None));
     }
 
     #[test]

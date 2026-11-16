@@ -53,6 +53,14 @@ impl App {
         if self.press_on_search_bar(x_phys, y_phys) {
             return true;
         }
+        if self.bg_popover_open
+            && self
+                .renderer
+                .as_ref()
+                .is_some_and(|r| r.over_tab_popover(x_phys, y_phys))
+        {
+            return true;
+        }
         self.scrollbar_visible()
             && self
                 .renderer
