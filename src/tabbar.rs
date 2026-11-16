@@ -2,16 +2,18 @@
 //!
 //! Pure, toolkit-free geometry so it stays unit-testable: the egui overlay
 //! only paints what these helpers return. All values are logical points.
-//! Dimensions come from [`crate::config::TabbarConfig`].
+//! Dimensions come from [`crate::config::TabbarConfig`] and the fixed control
+//! metrics below.
 //!
 //! Layout: an inset pill container holds equal-width tabs splitting the
 //! available width (50% each for 2, 33% each for 3, …) down to
 //! `min_tab_width`, then scrolling. On macOS the container starts
 //! right of the traffic lights (see [`leading_inset_points`]). The active
 //! tab is a nested pill. The close `×` is reserved on the **left** of each
-//! tab (painted on hover only, layout-stable); the `⌘N` shortcut hint sits
-//! on the right for the first 9 tabs. A lone tab keeps the container outline
-//! but renders as a plain title (no nested pill, close box or shortcut).
+//! tab, followed immediately by park `↓` (both painted on hover only,
+//! layout-stable). The `⌘N` shortcut hint sits on the right for the first 9
+//! tabs when enough title space remains. A lone tab keeps the container
+//! outline and left-hand park button, without a close box or shortcut.
 //! When parked tabs exist, a count pill after `+` reserves its width from
 //! the container and opens the background-tab popover.
 
@@ -87,7 +89,7 @@ fn contains(rect: [f32; 4], [x, y]: [f32; 2]) -> bool {
 
 impl TabDrag {
     /// Begin a primary press on the strip. Only a tab body supplies a source;
-    /// close/plus/empty chrome still own their release, but cannot start a drag.
+    /// close/park/plus/empty chrome still own their release, but cannot start a drag.
     pub(crate) fn begin(&mut self, source: Option<(u64, [f32; 4])>, pointer: [f32; 2]) {
         *self = Self {
             press: source.and_then(|(id, rect)| {
@@ -259,12 +261,14 @@ pub(crate) fn index_after_move(index: usize, from: usize, to: usize) -> usize {
 /// Width reserved on the left of the bar for the OS traffic lights
 /// (lights + margin). 76pt on macOS, 0 elsewhere. A single `cfg!`
 /// definition so every platform type-checks the same code.
-pub const TRAFFIC_LIGHTS_WIDTH_POINTS: f32 = if cfg!(target_os = "macos") { 76.0 } else { 0.0 };
+pub const TRAFFIC_LIGHTS_WIDTH_POINTS: f32 = if cfg!(target_os = "macos") { 64.0 } else { 0.0 };
 
 /// Visual inset of the active/hover pill inside its tab cell.
 pub const TAB_PILL_INSET_X: f32 = 1.0;
 /// Visual inset of the active/hover pill inside its tab cell.
 pub const TAB_PILL_INSET_Y: f32 = 2.0;
+/// Park-button hit width, immediately after the optional left close box.
+pub const TAB_PARK_RESERVE: f32 = 24.0;
 
 /// Leading inset before the tab container: the normal margin plus the
 /// traffic-light reserve on macOS.
@@ -416,10 +420,18 @@ pub fn close_hit(tab_x: f32, bar_h: f32, config: &TabbarConfig) -> [f32; 4] {
     [tab_x, 0.0, config.close_reserve, bar_h]
 }
 
+/// Park hit box `[x, y, w, h]` at `left`, after the optional close box.
+/// Clamp its width to the remaining tab space.
+pub fn park_hit(left: f32, available: f32, bar_h: f32) -> [f32; 4] {
+    let width = TAB_PARK_RESERVE.min(available.max(0.0));
+    [left, 0.0, width, bar_h]
+}
+
 /// Max title width for a tab of width `tab_w`, reserving the left close
-/// box and (when present) the right shortcut hint. Never negative.
+/// and park boxes plus the optional right shortcut hint. Never negative.
 pub fn title_max_width(tab_w: f32, has_shortcut: bool, config: &TabbarConfig) -> f32 {
     let reserved = config.close_reserve
+        + TAB_PARK_RESERVE
         + config.gap * 2.0
         + if has_shortcut {
             config.shortcut_reserve
@@ -430,10 +442,10 @@ pub fn title_max_width(tab_w: f32, has_shortcut: bool, config: &TabbarConfig) ->
 }
 
 /// Max title width for the lone tab, which spans the whole container and
-/// renders without a close box or shortcut hint: only a side gap is kept
-/// so the text never touches the container edge. Never negative.
+/// renders without a close box or shortcut hint. Reserve the park button
+/// even while it is hidden so hovering never moves the title. Never negative.
 pub fn single_tab_title_max_width(tab_w: f32, config: &TabbarConfig) -> f32 {
-    (tab_w - config.gap * 2.0).max(0.0)
+    (tab_w - TAB_PARK_RESERVE - config.gap * 2.0).max(0.0)
 }
 
 /// Truncate `title` with an ellipsis so `measure(fitted) <= max_width`.
@@ -459,13 +471,14 @@ pub fn fit_title(title: &str, max_width: f32, measure: &mut dyn FnMut(&str) -> f
 }
 
 /// Tab-strip element whose hover state is painted: a tab's pill, its close
-/// `×`, or the `+` button. Elsewhere on the strip nothing reacts to hover.
+/// `×`, park `↓`, or the `+` button. Elsewhere nothing reacts to hover.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StripTarget {
     #[default]
     Empty,
     Tab(u64),
     Close(u64),
+    Park(u64),
     NewTab,
     /// The background-tab tray pill (opens/closes its popover).
     BackgroundTray,
@@ -473,7 +486,7 @@ pub enum StripTarget {
 
 /// Hovered element at `(x, y)` points, from the interactive rects
 /// `[min_x, min_y, max_x, max_y]` recorded by the last painted strip in paint
-/// order. Later rects are on top: a close box wins over the tab under it,
+/// order. Later rects are on top: a close/park box wins over the tab under it,
 /// like egui's own hover.
 pub fn strip_target_at(targets: &[(StripTarget, [f32; 4])], x: f32, y: f32) -> StripTarget {
     targets
@@ -684,22 +697,41 @@ mod tests {
     }
 
     #[test]
-    fn strip_hover_follows_painted_rects_with_close_boxes_on_top() {
+    fn park_hit_follows_the_close_box_or_starts_at_the_left_for_a_lone_tab() {
+        let cfg = cfg();
+        for tab_x in [0.0, 180.0] {
+            let close = close_hit(tab_x, 38.0, &cfg);
+            assert_eq!(
+                park_hit(close[0] + close[2], 180.0 - close[2], 38.0),
+                [tab_x + 24.0, 0.0, 24.0, 38.0],
+            );
+        }
+        assert_eq!(park_hit(0.0, 180.0, 38.0), [0.0, 0.0, 24.0, 38.0]);
+        assert_eq!(park_hit(180.0, 10.0, 38.0), [180.0, 0.0, 10.0, 38.0]);
+        assert_eq!(park_hit(180.0, 0.0, 38.0), [180.0, 0.0, 0.0, 38.0]);
+    }
+
+    #[test]
+    fn strip_hover_follows_painted_rects_with_controls_on_top() {
         let targets = [
             (StripTarget::Tab(0), [84.0, 5.0, 284.0, 33.0]),
             (StripTarget::Close(0), [84.0, 5.0, 108.0, 33.0]),
+            (StripTarget::Park(0), [108.0, 5.0, 132.0, 33.0]),
             (StripTarget::Tab(1), [284.0, 5.0, 484.0, 33.0]),
             (StripTarget::Close(1), [284.0, 5.0, 308.0, 33.0]),
+            (StripTarget::Park(1), [308.0, 5.0, 332.0, 33.0]),
             (StripTarget::NewTab, [492.0, 5.0, 520.0, 33.0]),
         ];
         assert_eq!(strip_target_at(&targets, 200.0, 20.0), StripTarget::Tab(0));
         assert_eq!(strip_target_at(&targets, 90.0, 20.0), StripTarget::Close(0));
+        assert_eq!(strip_target_at(&targets, 120.0, 20.0), StripTarget::Park(0));
         // Shared edges belong to the right-hand tab, once.
         assert_eq!(
             strip_target_at(&targets, 284.0, 20.0),
             StripTarget::Close(1)
         );
         assert_eq!(strip_target_at(&targets, 400.0, 20.0), StripTarget::Tab(1));
+        assert_eq!(strip_target_at(&targets, 320.0, 20.0), StripTarget::Park(1));
         assert_eq!(strip_target_at(&targets, 500.0, 20.0), StripTarget::NewTab);
         // Traffic lights, insets and the gap before `+` react to nothing.
         for (x, y) in [(30.0, 20.0), (200.0, 2.0), (488.0, 20.0), (600.0, 20.0)] {
@@ -709,20 +741,22 @@ mod tests {
     }
 
     #[test]
-    fn title_max_width_reserves_close_and_shortcut() {
-        let cfg = cfg();
-        // 180 - 24 - 2*4 - 34 = 114 with shortcut.
-        assert_eq!(title_max_width(180.0, true, &cfg), 114.0);
-        // 180 - 24 - 2*4 = 148 without shortcut.
-        assert_eq!(title_max_width(180.0, false, &cfg), 148.0);
+    fn title_max_width_reserves_both_left_controls_and_the_right_shortcut() {
+        let mut cfg = cfg();
+        // 180 - 24 - 24 - 2*4 - 34 = 90 with shortcut.
+        assert_eq!(title_max_width(180.0, true, &cfg), 90.0);
+        // 180 - 24 - 2*4 - 24 = 124 without shortcut.
+        assert_eq!(title_max_width(180.0, false, &cfg), 124.0);
         assert_eq!(title_max_width(10.0, true, &cfg), 0.0);
+        cfg.shortcut_reserve = 10.0;
+        assert_eq!(title_max_width(180.0, true, &cfg), 114.0);
     }
 
     #[test]
-    fn single_tab_title_max_width_keeps_only_side_gaps() {
+    fn single_tab_title_max_width_reserves_the_park_control_and_side_gaps() {
         let cfg = cfg();
-        // No close box or shortcut reserve: 180 - 2*4 = 172.
-        assert_eq!(single_tab_title_max_width(180.0, &cfg), 172.0);
+        // No close box or shortcut reserve: 180 - 24 - 2*4 = 148.
+        assert_eq!(single_tab_title_max_width(180.0, &cfg), 148.0);
         assert_eq!(single_tab_title_max_width(0.0, &cfg), 0.0);
     }
 
@@ -782,7 +816,7 @@ mod tests {
     fn traffic_reserve_matches_platform() {
         let cfg = cfg();
         if cfg!(target_os = "macos") {
-            assert_eq!(TRAFFIC_LIGHTS_WIDTH_POINTS, 76.0);
+            assert_eq!(TRAFFIC_LIGHTS_WIDTH_POINTS, 64.0);
         } else {
             assert_eq!(TRAFFIC_LIGHTS_WIDTH_POINTS, 0.0);
         }
@@ -949,6 +983,7 @@ mod tests {
         for target in [
             StripTarget::Tab(42),
             StripTarget::Close(42),
+            StripTarget::Park(42),
             StripTarget::NewTab,
             StripTarget::BackgroundTray,
         ] {

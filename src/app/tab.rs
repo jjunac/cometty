@@ -591,13 +591,19 @@ impl App {
         true
     }
 
-    pub(crate) fn reconcile_tab_drag(&mut self) {
+    /// Only foreground tab bodies can start a reorder, and only when the
+    /// strip has a second foreground tab. Parked tabs do not make a lone
+    /// foreground tab draggable: cancelling that source would swallow its click.
+    pub(crate) fn can_drag_tab(&self, id: u64) -> bool {
         let foreground = self.foreground_count();
-        let valid = foreground > 1
-            && self
-                .tab_drag
-                .source()
-                .is_some_and(|id| self.tab_index(id).is_some_and(|i| i < foreground));
+        foreground > 1 && self.tab_index(id).is_some_and(|i| i < foreground)
+    }
+
+    pub(crate) fn reconcile_tab_drag(&mut self) {
+        let valid = self
+            .tab_drag
+            .source()
+            .is_some_and(|id| self.can_drag_tab(id));
         self.tab_drag.retain_source(valid);
     }
 
@@ -864,6 +870,19 @@ impl App {
         let id = tab.id;
         if tab.background {
             self.unpark_tab(id);
+        } else {
+            self.park_tab_for_window(id);
+        }
+    }
+
+    /// Park the requested foreground tab, shared by the strip button and
+    /// shortcut. Parking the last one first needs a replacement prompt.
+    pub(crate) fn park_tab_for_window(&mut self, id: u64) {
+        let Some(index) = self.tab_index(id) else {
+            return;
+        };
+        let tab = &self.tabs[index];
+        if tab.background {
             return;
         }
         if self.foreground_count() > 1 {
@@ -873,7 +892,16 @@ impl App {
         // Parking the only main tab would leave no foreground tab. Spawn a
         // fresh prompt in the same directory first, then park the old tab.
         let cwd = tab.shell_cwd().map(str::to_string);
+        let displayed = self
+            .active_tab()
+            .map(|tab| tab.id)
+            .filter(|&active| active != id);
         if self.spawn_tab_for_window_at(cwd.as_deref()) {
+            // A button on the lone foreground tab may be clicked during a
+            // background peek. Keep displaying that other terminal.
+            if let Some(index) = displayed.and_then(|id| self.tab_index(id)) {
+                self.switch_tab(index);
+            }
             self.park_tab(id);
         }
     }
@@ -1255,6 +1283,77 @@ mod tests {
     }
 
     #[test]
+    fn parking_button_targets_the_requested_tab_and_keeps_its_terminal_and_transport() {
+        for active in [0, 1] {
+            let (mut app, inputs) = app_with_tabs(3);
+            app.active = active;
+            let version = app.tabs[1].terminal.grid().version;
+            let tab = &mut app.tabs[1];
+            let search = tab.search.view(tab.terminal.grid()).unwrap();
+            app.park_tab_for_window(1);
+            assert_eq!(app.tabs[app.active].id, 0);
+            assert_eq!(app.foreground_count(), 2);
+            assert_eq!(app.tabs[2].id, 1);
+            assert!(app.tabs[2].background);
+            let tab = &mut app.tabs[2];
+            assert_eq!(tab.terminal.grid().version, version);
+            assert_eq!(tab.terminal.grid().scrollback_len(), 1);
+            assert!(tab.selection.is_some());
+            assert_eq!(tab.search.query, "1");
+            assert!(std::sync::Arc::ptr_eq(
+                &search,
+                &tab.search.view(tab.terminal.grid()).unwrap()
+            ));
+            assert!(inputs.iter().all(|input| input.try_recv().is_err()));
+            assert!(tab.pty.write(b"same transport".to_vec()));
+            assert_eq!(inputs[1].try_recv().unwrap(), b"same transport");
+            assert!(inputs[0].try_recv().is_err());
+            assert!(inputs[2].try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn parking_button_during_a_peek_parks_its_target_without_unparking_the_preview() {
+        let (mut app, _) = app_with_tabs(4);
+        app.park_tab(3);
+        app.peek_background_tab(3);
+        app.park_tab_for_window(1);
+        assert_eq!(app.tabs[app.active].id, 3);
+        assert!(app.is_peeking());
+        assert_eq!(app.foreground_count(), 2);
+        assert_eq!(app.background_count(), 2);
+        assert!(app.tabs[app.tab_index(1).unwrap()].background);
+        assert!(app.tabs[app.tab_index(3).unwrap()].background);
+        assert_eq!(app.focus_foreground_index(), 0);
+        for id in [1, 3, 99] {
+            app.park_tab_for_window(id);
+            assert_eq!(app.tabs.len(), 4, "parked and vanished targets are no-ops");
+            assert_eq!(app.tabs[app.active].id, 3);
+        }
+    }
+
+    #[test]
+    fn parking_the_lone_foreground_tab_keeps_it_if_a_replacement_cannot_spawn() {
+        for peeking in [false, true] {
+            let (mut app, _) = app_with_tabs(2);
+            app.park_tab(1);
+            if peeking {
+                app.peek_background_tab(1);
+            }
+            let active = app.tabs[app.active].id;
+            let version = app.tabs[0].terminal.grid().version;
+            // Headless App has no window/renderer for a replacement spawn.
+            app.park_tab_for_window(0);
+            assert_eq!(app.tabs.len(), 2);
+            assert_eq!(app.foreground_count(), 1);
+            assert!(!app.tabs[0].background);
+            assert_eq!(app.tabs[app.active].id, active);
+            assert_eq!(app.tabs[0].terminal.grid().version, version);
+            assert!(app.tabs[0].selection.is_some());
+        }
+    }
+
+    #[test]
     fn peek_shows_a_parked_tab_without_moving_it_and_ctrl_tab_returns_to_the_strip() {
         let (mut app, _) = app_with_tabs(2);
         let parked = app.tabs[1].id;
@@ -1301,6 +1400,10 @@ mod tests {
     fn reorder_and_drag_only_consider_foreground_tabs() {
         let (mut app, _) = app_with_tabs(3);
         app.park_tab(2);
+        assert!(app.can_drag_tab(0));
+        assert!(app.can_drag_tab(1));
+        assert!(!app.can_drag_tab(2));
+        assert!(!app.can_drag_tab(99));
         assert!(!app.reorder_tab(crate::tabbar::TabMove { id: 2, to: 0 }));
         assert!(app.reorder_tab(crate::tabbar::TabMove { id: 0, to: 1 }));
         assert_eq!(
@@ -1312,6 +1415,19 @@ mod tests {
         app.tab_drag.moved([350.0, 20.0]);
         app.reconcile_tab_drag();
         assert_eq!(app.tab_drag.source(), Some(0));
+        app.park_tab(1);
+        assert_eq!(app.foreground_count(), 1);
+        assert!(
+            !app.can_drag_tab(0),
+            "parked tabs do not make the lone foreground draggable"
+        );
+        assert_eq!(app.tab_drag.source(), None);
+        assert!(app.tab_drag.captures_pointer());
+        assert!(app.tab_drag.release());
+        assert!(
+            app.tab_drag.suppress_clicks(),
+            "an existing reorder still cancels safely"
+        );
     }
 
     #[test]

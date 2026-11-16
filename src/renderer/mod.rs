@@ -213,6 +213,8 @@ pub struct RenderOutput {
     pub scroll_to: Option<usize>,
     pub selected_tab: Option<u64>,
     pub close_tab: Option<u64>,
+    /// Move this foreground tab into the background tray (strip `↓`).
+    pub park_tab: Option<u64>,
     pub new_tab: bool,
     pub reordered_tab: Option<crate::tabbar::TabMove>,
     /// Tray badge clicked: open/close the background-tab popover.
@@ -777,7 +779,7 @@ impl Renderer {
         self.tabbar_ui.target_at(x_phys / scale, y_phys / scale)
     }
 
-    /// Stable source identity and full logical rect, excluding close/plus hits.
+    /// Stable source identity and full logical rect, excluding close/park/plus hits.
     pub fn tab_strip_source(&self, x_phys: f32, y_phys: f32) -> Option<(u64, [f32; 4])> {
         let scale = self.scale_factor.max(1.0);
         self.tabbar_ui.source_at(x_phys / scale, y_phys / scale)
@@ -869,6 +871,7 @@ impl Renderer {
             scroll_to,
             selected_tab,
             close_tab,
+            park_tab,
             new_tab,
             reordered_tab,
             toggle_bg_popover,
@@ -889,6 +892,7 @@ impl Renderer {
             scroll_to,
             selected_tab,
             close_tab,
+            park_tab,
             new_tab,
             reordered_tab,
             toggle_bg_popover,

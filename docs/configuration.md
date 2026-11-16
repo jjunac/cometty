@@ -84,14 +84,19 @@ restore = "tabs"
 | `tabbar.max_label_chars` | `32` | Label length including an ellipsis |
 | `tabbar.title_format` | `"$command \| $cwd"` | Tab-label template |
 | `tabbar.corner_radius_tab`, `tabbar.corner_radius_bar` | `8`, `10` | Tab/container corner radii |
-| `tabbar.inset_x` | `24.0` | Empty chrome before the tabs (after macOS traffic lights) and after `+`, for window dragging |
+| `tabbar.inset_x` | `38.0` | Empty chrome before the tabs (after macOS traffic lights) and after `+`, for window dragging |
 | `tabbar.inset_y` | `5.0` | Vertical strip inset |
 | `tabbar.close_reserve`, `tabbar.shortcut_reserve` | `24.0`, `34.0` | Space for close and shortcut labels |
 | `tabbar.gap` | `4.0` | Tab spacing |
 | `tabbar.plus_diameter`, `tabbar.plus_gap` | `28.0`, `8.0` | New-tab button size and spacing |
 
 Widths/heights/padding are logical display units. The strip remains visible on
-macOS; on other platforms it hides when only one tab is open.
+macOS; on other platforms it hides when only one tab is open (including parked
+tabs in that count). The hover `↓` button has a fixed 24-unit hit area immediately
+to the right of the left-hand `×` (or in the leftmost slot for a lone foreground
+tab). Its space is always reserved, so hovering never moves the title. Shortcut
+hints stay on the right, omitted only when the two controls leave too little
+title width for an ellipsis.
 
 Templates support `$title` (application-supplied title), `$command` (foreground
 command), `$cwd` (shell directory), and `$tab` (one-based tab number). Use

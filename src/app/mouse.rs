@@ -27,7 +27,7 @@ pub(crate) enum ChromeHover {
     /// outside the window: nothing there paints hover.
     #[default]
     None,
-    /// A tab, its close `×`, or the `+` button.
+    /// A tab, its close `×` / park `↓`, or the `+` button.
     Strip(crate::tabbar::StripTarget),
     /// The visible scrollbar track (highlighted while hovered).
     Scrollbar,
@@ -513,9 +513,9 @@ impl App {
                             && renderer.over_tab_bar(y, self.tabs.len())
                         {
                             let scale = renderer.scale_factor().max(1.0);
-                            let source = renderer.tab_strip_source(x, y).filter(|(id, _)| {
-                                self.tabs.len() > 1 && self.tab_index(*id).is_some()
-                            });
+                            let source = renderer
+                                .tab_strip_source(x, y)
+                                .filter(|(id, _)| self.can_drag_tab(*id));
                             self.tab_drag.begin(source, [x / scale, y / scale]);
                         }
                         // Merged macOS titlebar: single click on empty chrome
@@ -1006,15 +1006,70 @@ mod tests {
     }
 
     #[test]
+    fn lone_foreground_press_captures_release_without_cancelling_the_click_or_losing_input() {
+        use winit::event::{ElementState, MouseButton};
+        for background_count in [1, 3] {
+            let (mut app, inputs) = mouse_app();
+            app.park_tab(91);
+            for i in 1..background_count {
+                let (pty, _, _) = crate::pty::test_support::session();
+                let mut tab = crate::app::Tab::new(
+                    100 + i,
+                    crate::term::Terminal::new(20, 2, crate::theme::Theme::default()),
+                    pty,
+                );
+                tab.background = true;
+                app.tabs.push(tab);
+            }
+            app.peek_background_tab(91);
+            assert_eq!(app.foreground_count(), 1);
+            assert_eq!(app.background_count(), background_count as usize);
+            // Use the same model rule as the native mouse press, rather than
+            // the widget harness's independent foreground-label count.
+            let source = app
+                .can_drag_tab(37)
+                .then_some((37, [100.0, 5.0, 200.0, 35.0]));
+            app.tab_drag.begin(source, [150.0, 20.0]);
+            app.reconcile_tab_drag();
+            assert_eq!(app.tab_drag.source(), None);
+            assert!(app.tab_drag.captures_pointer());
+            app.on_cursor_moved(152.0, 20.0);
+            app.on_mouse_input(MouseButton::Left, ElementState::Released, false);
+            assert!(!app.tab_drag.suppress_clicks());
+            assert!(!app.tab_drag.captures_pointer());
+            assert!(inputs.iter().all(|input| input.try_recv().is_err()));
+
+            // Apply the strip's selected stable ID as redraw does. Leaving
+            // the peek must keep the background task parked and route input
+            // to the foreground terminal again.
+            app.switch_tab(app.tab_index(37).unwrap());
+            assert!(!app.is_peeking());
+            assert_eq!(app.tabs[app.active].id, 37);
+            assert!(app.tabs[app.tab_index(91).unwrap()].background);
+            assert!(app.terminal_owns_keyboard());
+            app.on_ime(&winit::event::Ime::Commit("é".into()));
+            assert_eq!(inputs[0].try_recv().unwrap(), "é".as_bytes());
+            assert!(inputs[1].try_recv().is_err());
+        }
+    }
+
+    #[test]
     fn pointer_motion_repaints_only_when_chrome_under_it_can_change() {
         use ChromeHover::*;
         let tab = |i| Strip(StripTarget::Tab(i));
         let close = |i| Strip(StripTarget::Close(i));
+        let park = |i| Strip(StripTarget::Park(i));
         // Moving over the grid: no frames, whatever the position.
         assert!(!pointer_repaint(None, None, false));
         // Within one tab, × or `+`, or along the visible scrollbar: nothing
         // changes on screen. Entering, switching and leaving do.
-        for steady in [tab(1), close(1), Strip(StripTarget::NewTab), Scrollbar] {
+        for steady in [
+            tab(1),
+            close(1),
+            park(1),
+            Strip(StripTarget::NewTab),
+            Scrollbar,
+        ] {
             assert!(!pointer_repaint(steady, steady, false), "{steady:?}");
             assert!(pointer_repaint(None, steady, false), "enter {steady:?}");
             assert!(
@@ -1024,6 +1079,8 @@ mod tests {
         }
         assert!(pointer_repaint(tab(0), tab(1), false));
         assert!(pointer_repaint(tab(1), close(1), false));
+        assert!(pointer_repaint(tab(1), park(1), false));
+        assert!(pointer_repaint(park(1), tab(1), false));
         assert!(pointer_repaint(Scrollbar, tab(0), false));
         // The find bar and open panels have per-widget hover: every move.
         for busy in [SearchBar, Panel] {

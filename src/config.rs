@@ -113,7 +113,7 @@ fn d_corner_bar() -> u8 {
     10
 }
 fn d_inset_x() -> f32 {
-    24.0
+    38.0
 }
 fn d_inset_y() -> f32 {
     5.0
@@ -917,7 +917,7 @@ mod tests {
         assert_eq!(c.scrollbar.fade_speed, 5.0);
         assert_eq!(c.tabbar.height, 38.0);
         assert_eq!(c.tabbar.min_tab_width, 100.0);
-        assert_eq!(c.tabbar.inset_x, 24.0);
+        assert_eq!(c.tabbar.inset_x, 38.0);
         assert_eq!(c.tabbar.title_format, "$command | $cwd");
         assert_eq!(c.selection.double_click_ms, 400);
         assert_eq!(c.selection.word_regex, "[A-Za-z0-9_]+");

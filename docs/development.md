@@ -132,7 +132,9 @@ headless tests:
 - Tabs: drag first/middle/last in both directions, activate an inactive source,
   crowded-strip edge/trackpad scrolling, click/×/+, Esc/outside/focus-loss
   cancellation, source/other shell exit during a drag, resize/DPI mid-drag,
-  macOS empty-titlebar dragging/zoom (tab bodies, × and + must never move the
+  hover `↓` on active/inactive/lone foreground tabs, replacement prompt cwd,
+  tray peek/↑/×, clicking back to the only foreground tab and resuming input,
+  macOS empty-titlebar dragging/zoom (tab bodies, ×, ↓ and + must never move the
   window), system tiling/fullscreen/display changes, search/terminal Tab and IME
   afterward, and saved order after quit/restore. Headless widget tests do not
   replace this native pass.

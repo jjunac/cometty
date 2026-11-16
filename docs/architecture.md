@@ -119,9 +119,9 @@ look different (`app::mouse::pointer_repaint`):
   scrollbar-thumb or panel drag);
 - on every move over the find bar, and while a settings or log panel is open
   (their widgets, popups, and tooltips have their own hover states);
-- when the hovered element changes among a tab, its close `×`, the `+` button,
-  the visible scrollbar track, and nothing, which includes one frame on leaving
-  chrome to clear its hover.
+- when the hovered element changes among a tab, its close `×` / park `↓`, the
+  `+` button, the visible scrollbar track, and nothing, which includes one frame
+  on leaving chrome to clear its hover.
 
 The hit tests are explicit: tab-strip rects recorded by the last egui pass (so
 horizontal strip scrolling is included), the scrollbar strip while the track is

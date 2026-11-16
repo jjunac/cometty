@@ -14,6 +14,8 @@ use crate::theme::Theme;
 pub(crate) struct TabbarOutput {
     pub selected_tab: Option<u64>,
     pub close_tab: Option<u64>,
+    /// Strip `↓` clicked: park this foreground tab.
+    pub park_tab: Option<u64>,
     pub new_tab: bool,
     pub reordered_tab: Option<TabMove>,
     /// Tray badge clicked: open/close the popover.
@@ -71,6 +73,16 @@ struct TabStyle<'a> {
 
 fn coords(rect: egui::Rect) -> [f32; 4] {
     [rect.min.x, rect.min.y, rect.max.x, rect.max.y]
+}
+
+/// Bundled egui fonts do not reliably supply the up/down-arrow glyphs.
+fn paint_arrow(painter: &egui::Painter, center: egui::Pos2, up: bool, color: egui::Color32) {
+    let direction = if up { -1.0 } else { 1.0 };
+    let tip = center + egui::vec2(0.0, 4.0 * direction);
+    let stroke = egui::Stroke::new(1.5, color);
+    painter.line_segment([center - egui::vec2(0.0, 4.0 * direction), tip], stroke);
+    painter.line_segment([center + egui::vec2(-3.5, 0.5 * direction), tip], stroke);
+    painter.line_segment([tip, center + egui::vec2(3.5, 0.5 * direction)], stroke);
 }
 
 impl TabbarUi {
@@ -524,23 +536,8 @@ impl TabbarUi {
             },
         );
         let dim = fg.gamma_multiply(0.55);
-        // Painted arrow: bundled egui fonts do not reliably supply the
-        // desired up-arrow glyph (same reason as the find-bar chevrons).
         let arrow_color = if unpark_response.hovered() { fg } else { dim };
-        let arrow = egui::Stroke::new(1.5, arrow_color);
-        let c = unpark.center();
-        painter.line_segment(
-            [egui::pos2(c.x, c.y + 4.0), egui::pos2(c.x, c.y - 4.0)],
-            arrow,
-        );
-        painter.line_segment(
-            [egui::pos2(c.x - 3.5, c.y - 0.5), egui::pos2(c.x, c.y - 4.0)],
-            arrow,
-        );
-        painter.line_segment(
-            [egui::pos2(c.x, c.y - 4.0), egui::pos2(c.x + 3.5, c.y - 0.5)],
-            arrow,
-        );
+        paint_arrow(painter, unpark.center(), true, arrow_color);
         painter.text(
             close.center(),
             egui::Align2::CENTER_CENTER,
@@ -574,17 +571,23 @@ impl TabbarUi {
         } = cell;
         let config = style.config;
         let ch = tabbar::close_hit(rect.left(), rect.height(), config);
-        let close = egui::Rect::from_min_size(rect.min, egui::vec2(ch[2], ch[3]));
-        let body = if single {
-            rect
-        } else {
-            egui::Rect::from_min_max(
-                egui::pos2(close.right().min(rect.right()), rect.top()),
-                rect.max,
-            )
-        };
-        // Explicit stable IDs, including the close control. The two hit regions
-        // do not overlap: a press on × can never become a tab drag.
+        let close = egui::Rect::from_min_size(
+            rect.min,
+            egui::vec2(
+                if single {
+                    0.0
+                } else {
+                    ch[2].clamp(0.0, rect.width())
+                },
+                ch[3],
+            ),
+        );
+        let ph = tabbar::park_hit(close.right(), rect.right() - close.right(), rect.height());
+        let park =
+            egui::Rect::from_min_size(egui::pos2(ph[0], rect.top()), egui::vec2(ph[2], ph[3]));
+        let body = egui::Rect::from_min_max(egui::pos2(park.right(), rect.top()), rect.max);
+        // Explicit stable IDs and disjoint hit regions: a press on × or ↓
+        // can never become a tab drag, even while the icons are hidden.
         let response = ui.interact(
             body,
             egui::Id::new(("tab", tab.id)),
@@ -601,13 +604,22 @@ impl TabbarUi {
                 egui::Sense::CLICK,
             )
         });
+        let park_response = ui.interact(
+            park,
+            egui::Id::new(("tab-park", tab.id)),
+            egui::Sense::CLICK,
+        );
         self.rects.push((tab.id, coords(rect)));
         self.record(StripTarget::Tab(tab.id), rect, style.clip);
         if !single && !dragging {
             self.record(StripTarget::Close(tab.id), close, style.clip);
         }
+        if !dragging {
+            self.record(StripTarget::Park(tab.id), park, style.clip);
+        }
         let close_hovered = close_response.as_ref().is_some_and(|r| r.hovered());
-        let hovered = response.hovered() || close_hovered;
+        let park_hovered = park_response.hovered();
+        let hovered = response.hovered() || close_hovered || park_hovered;
         let painter = ui.painter().with_clip_rect(style.clip);
         let fg = style.theme.foreground.as_egui_color();
         let dim = fg.gamma_multiply(0.55);
@@ -618,7 +630,7 @@ impl TabbarUi {
             tabbar::TAB_PILL_INSET_Y,
         ));
         let radius = egui::CornerRadius::same(config.corner_radius_tab);
-        if active && !single {
+        if active {
             painter.rect_filled(pill, radius, bg);
             painter.rect_stroke(
                 pill,
@@ -641,8 +653,8 @@ impl TabbarUi {
                 egui::Stroke::new(1.0, border.gamma_multiply(0.5)),
             );
         }
-        let shortcut = (!single).then(|| tabbar::shortcut_label(index)).flatten();
-        let max_title = if single {
+        let mut shortcut = (!single).then(|| tabbar::shortcut_label(index)).flatten();
+        let mut max_title = if single {
             tabbar::single_tab_title_max_width(rect.width(), config)
         } else {
             tabbar::title_max_width(rect.width(), shortcut.is_some(), config)
@@ -658,9 +670,15 @@ impl TabbarUi {
             self.title_widths.insert(text.to_owned(), width);
             width
         };
+        // Both left controls need their own space. On narrow tabs omit the
+        // shortcut hint rather than losing even the title's ellipsis.
+        if shortcut.is_some() && max_title < measure("…") {
+            shortcut = None;
+            max_title = tabbar::title_max_width(rect.width(), false, config);
+        }
         let title = tabbar::fit_title(&tab.title, max_title, &mut measure);
         painter.text(
-            rect.center(),
+            egui::pos2(body.left() + config.gap + max_title * 0.5, rect.center().y),
             egui::Align2::CENTER_CENTER,
             title,
             style.font.clone(),
@@ -687,12 +705,26 @@ impl TabbarUi {
                 if close_hovered { fg } else { dim },
             );
         }
+        if !style.suppress_clicks && hovered {
+            if park_hovered {
+                painter.circle_filled(park.center(), 8.0, border.gamma_multiply(0.6));
+            }
+            paint_arrow(
+                &painter,
+                park.center(),
+                false,
+                if park_hovered { fg } else { dim },
+            );
+        }
         if !style.suppress_clicks {
             if close_response.is_some_and(|r| r.clicked()) {
                 out.close_tab = Some(tab.id);
+            } else if park_response.clicked() {
+                out.park_tab = Some(tab.id);
             } else if response.clicked() {
                 out.selected_tab = Some(tab.id);
             }
+            park_response.on_hover_text("Send to background");
         }
     }
 }
@@ -823,9 +855,27 @@ mod tests {
                 .1
         }
 
+        fn park_rect(&self, id: u64) -> egui::Rect {
+            let r = self.rect(id);
+            let close = if self.tabs.len() > 1 {
+                self.config.close_reserve.clamp(0.0, r[2] - r[0])
+            } else {
+                0.0
+            };
+            let park = tabbar::park_hit(r[0] + close, r[2] - r[0] - close, r[3] - r[1]);
+            // Painting uses the full cell; the recorded hit rect may have
+            // a subpixel edge clipped by egui's scroll viewport at this DPI.
+            egui::Rect::from_min_size(pos2(park[0], r[1]), egui::vec2(park[2], park[3]))
+        }
+
         fn body(&self, id: u64) -> Pos2 {
             let r = self.rect(id);
-            pos2((r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5)
+            let park = self.park_rect(id);
+            pos2((park.right() + r[2]) * 0.5, park.center().y)
+        }
+
+        fn park(&self, id: u64) -> Pos2 {
+            self.park_rect(id).center()
         }
 
         fn button(pos: Pos2, pressed: bool) -> Vec<Event> {
@@ -944,6 +994,202 @@ mod tests {
     }
 
     #[test]
+    fn park_buttons_target_stable_ids_including_lone_tabs_and_during_peeks() {
+        for (count, index) in [(1, 0), (3, 0), (3, 1), (12, 9)] {
+            for peeking in [false, true] {
+                let mut h = Harness::new(count, count as f32 * 100.0 + 200.0);
+                let id = h.tabs[index].id;
+                if peeking {
+                    h.background.push(BackgroundTabLabel {
+                        id: 900,
+                        title: "background task".into(),
+                        running: true,
+                        attention: false,
+                    });
+                    h.active = None;
+                    h.peeking = Some(900);
+                    h.frame(Vec::new());
+                }
+                let park = h.park(id);
+                assert_eq!(h.strip.target_at(park.x, park.y), StripTarget::Park(id));
+                assert!(h.strip.source_at(park.x, park.y).is_none());
+                h.frame(Harness::button(park, true));
+                assert_eq!(h.drag.source(), None);
+                h.tabs[index].title = "renamed while pressed".into();
+                let out = h.frame(Harness::button(park, false));
+                assert_eq!(out.park_tab, Some(id));
+                assert_eq!(out.selected_tab, None);
+                assert_eq!(out.close_tab, None);
+                assert_eq!(out.reordered_tab, None);
+                assert_eq!(out.unpark_tab, None);
+                assert!(!out.new_tab);
+                assert!(!h.drag.suppress_clicks());
+                h.frame(vec![Event::PointerGone]);
+                h.idle();
+            }
+        }
+    }
+
+    #[test]
+    fn park_arrow_sits_left_beside_close_without_moving_the_title_or_hiding_a_fitting_hint() {
+        for (count, index, width, show_hint) in [
+            (1, 0, 300.0, false),
+            (3, 1, 550.0, true),
+            (8, 0, 380.0, false),
+            (12, 9, 1400.0, false),
+        ] {
+            for scale in [1.0, 1.25, 2.0] {
+                let mut h = Harness::new(count, width);
+                h.ctx.set_pixels_per_point(scale);
+                h.tabs[index].title = "A".repeat(80);
+                h.time += 1.0;
+                h.idle();
+                let title = |h: &Harness| {
+                    h.shapes
+                        .iter()
+                        .find_map(|clipped| match &clipped.shape {
+                            egui::Shape::Text(text) if text.galley.job.text.starts_with('A') => {
+                                Some((
+                                    text.galley.job.text.clone(),
+                                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                                ))
+                            }
+                            _ => None,
+                        })
+                        .expect("tab title painted")
+                };
+                let before = title(&h);
+                let id = h.tabs[index].id;
+                let r = h.rect(id);
+                let park = h.park(id);
+                let stem = [park - egui::vec2(0.0, 4.0), park + egui::vec2(0.0, 4.0)];
+                let arrow_painted = |h: &Harness| {
+                    h.shapes.iter().any(|clipped| {
+                        matches!(
+                            clipped.shape,
+                            egui::Shape::LineSegment { points, .. } if points == stem
+                        )
+                    })
+                };
+                assert!(!arrow_painted(&h), "park arrow hidden without hover");
+                let hint = tabbar::shortcut_label(index);
+                let hint_painted = |h: &Harness| {
+                    h.shapes.iter().any(|clipped| match &clipped.shape {
+                        egui::Shape::Text(text) => Some(&text.galley.job.text) == hint.as_ref(),
+                        _ => false,
+                    })
+                };
+                assert_eq!(hint_painted(&h), show_hint);
+
+                let park_rect = h
+                    .strip
+                    .targets
+                    .iter()
+                    .find(|(target, _)| *target == StripTarget::Park(id))
+                    .unwrap()
+                    .1;
+                let close_rect = h
+                    .strip
+                    .targets
+                    .iter()
+                    .find(|(target, _)| *target == StripTarget::Close(id));
+                if count > 1 {
+                    let close_rect = close_rect.expect("multi-tab close hit box").1;
+                    assert_eq!(park_rect[0], close_rect[2], "↓ immediately follows ×");
+                    assert_eq!(park_rect[1], close_rect[1]);
+                    assert_eq!(park_rect[3], close_rect[3]);
+                } else {
+                    assert!(close_rect.is_none());
+                    assert_eq!(park_rect[0], r[0], "lone tab puts ↓ in the leftmost slot");
+                }
+
+                h.frame(vec![Event::PointerMoved(h.body(id))]);
+                assert!(
+                    arrow_painted(&h),
+                    "down arrow is painted geometry, not a font glyph: count={count}, scale={scale}, stem={stem:?}"
+                );
+                assert_eq!(
+                    hint_painted(&h),
+                    show_hint,
+                    "hover leaves the right hint unchanged"
+                );
+                assert_eq!(title(&h), before, "hover does not move or re-fit the title");
+                assert!(before.1.left() >= park_rect[2]);
+                let right_reserve = if show_hint {
+                    h.config.shortcut_reserve
+                } else {
+                    0.0
+                };
+                assert!(before.1.right() <= r[2] - right_reserve);
+
+                h.frame(vec![Event::PointerGone]);
+                // egui retains PointerGone's interact_pos through this pass
+                // so a same-pass release can still target its widget.
+                h.frame(Vec::new());
+                assert!(!arrow_painted(&h));
+                assert_eq!(title(&h), before);
+                h.idle();
+            }
+        }
+    }
+
+    #[test]
+    fn park_tooltip_settles_without_keyboard_focus_or_permanent_repaints() {
+        let mut h = Harness::new(2, 800.0);
+        h.frame(vec![Event::PointerMoved(h.park(100))]);
+        assert_ne!(h.delay, Duration::MAX, "hover schedules the tooltip delay");
+        h.time += 1.0;
+        h.frame(Vec::new());
+        // Let the tooltip's initial sizing/fade pass settle too.
+        h.time += 1.0;
+        h.idle();
+        assert!(h.shapes.iter().any(|clipped| matches!(
+            &clipped.shape,
+            egui::Shape::Text(text) if text.galley.job.text == "Send to background"
+        )));
+        h.frame(vec![Event::PointerGone]);
+        h.idle();
+    }
+
+    #[test]
+    fn lone_foreground_tab_click_emits_selection_during_a_background_peek() {
+        for background_count in [1, 3] {
+            for between_frames in [false, true] {
+                let mut h = Harness::new(1, 800.0);
+                h.background = (0..background_count)
+                    .map(|i| BackgroundTabLabel {
+                        id: 900 + i,
+                        title: "parked task".into(),
+                        running: true,
+                        attention: false,
+                    })
+                    .collect();
+                h.active = None;
+                h.peeking = Some(900);
+                h.frame(Vec::new());
+                let pos = h.body(100);
+                let mut events = Harness::button(pos, true);
+                if between_frames {
+                    h.frame(std::mem::take(&mut events));
+                    assert_eq!(h.drag.source(), None, "lone tab does not start a drag");
+                }
+                events.extend(Harness::button(pos, false));
+                let out = h.frame(events);
+                assert_eq!(out.selected_tab, Some(100));
+                assert_eq!(out.park_tab, None);
+                assert_eq!(out.close_tab, None);
+                assert_eq!(out.reordered_tab, None);
+                assert_eq!(out.unpark_tab, None);
+                assert!(
+                    !h.drag.suppress_clicks(),
+                    "no cancelled drag swallows the click"
+                );
+                h.idle();
+            }
+        }
+    }
+
+    #[test]
     fn titlebar_window_drag_is_reserved_for_empty_chrome_not_painted_controls() {
         for count in [1, 3, 8] {
             let mut h = Harness::new(count, 380.0);
@@ -1039,6 +1285,7 @@ mod tests {
             );
             assert_eq!(out.selected_tab, None, "drop is not also a click");
             assert_eq!(out.close_tab, None);
+            assert_eq!(out.park_tab, None);
             assert!(!out.new_tab);
             assert_eq!(h.frame(Vec::new()).reordered_tab, None);
             h.idle();
@@ -1059,11 +1306,15 @@ mod tests {
     }
 
     #[test]
-    fn close_and_plus_presses_cannot_become_reorders() {
+    fn close_park_and_plus_presses_cannot_become_reorders() {
         let mut h = Harness::new(3, 800.0);
         let rect = h.rect(100);
         let p = tabbar::plus_rect(h.width, h.background.len(), &h.config);
-        for from in [pos2(rect[0] + 8.0, 20.0), pos2(p[0] + 10.0, p[1] + 10.0)] {
+        for from in [
+            pos2(rect[0] + 8.0, 20.0),
+            h.park(100),
+            pos2(p[0] + 10.0, p[1] + 10.0),
+        ] {
             h.frame(Harness::button(from, true));
             let to = h.body(120);
             h.frame(vec![Event::PointerMoved(to)]);
@@ -1071,6 +1322,7 @@ mod tests {
             let out = h.frame(Harness::button(to, false));
             assert_eq!(out.reordered_tab, None);
             assert_eq!(out.close_tab, None);
+            assert_eq!(out.park_tab, None);
             assert!(!out.new_tab);
         }
         h.idle();
@@ -1105,6 +1357,7 @@ mod tests {
             assert_eq!(out.reordered_tab, None);
             assert_eq!(out.selected_tab, None);
             assert_eq!(out.close_tab, None);
+            assert_eq!(out.park_tab, None);
             assert!(!out.new_tab);
             h.idle();
         }

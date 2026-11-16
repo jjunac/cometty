@@ -100,12 +100,14 @@ session.
 On macOS, drag the empty space around the tabs to move the window—not the tabs
 or their buttons.
 
-Press **Cmd+B** (macOS) or **Ctrl+Shift+B** (Linux) to park the active tab: it
-leaves the strip and appears behind a small count badge beside **+**. Use this
-for a dev server or watcher you want to keep running without losing a tab slot.
+Hover a tab and click **↓** to park it, or press **Cmd+B** (macOS) or
+**Ctrl+Shift+B** (Linux) to park the active tab: it leaves the strip and appears
+behind a small count badge beside **+**. Use this for a dev server or watcher you
+want to keep running without losing a tab slot.
 Click the badge to list parked tabs: click a row to preview it in place (the
 strip stays unchanged), **↑** to move it back to the strip, or **×** to close
-it. A badge dot marks a running job and changes color when a background task
+it. Click a foreground tab to leave the preview; the previewed tab stays parked.
+A badge dot marks a running job and changes color when a background task
 finishes. Parking the only visible tab opens a fresh prompt in the same
 directory, so the window always keeps one foreground tab. Parked tabs are saved
 with the session.

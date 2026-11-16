@@ -33,7 +33,7 @@ code-path descriptions refer to that revision, not to current behavior. Each
    `repaint` for `CursorMoved`/`CursorEntered`/`CursorLeft` is no longer
    forwarded. Motion requests a frame only while egui uses the pointer, on every
    move over the find bar or an open panel, and when the hovered tab, close `×`,
-   `+`, or visible scrollbar track changes, including one frame on leaving
+   park `↓`, `+`, or visible scrollbar track changes, including one frame on leaving
    chrome. Tab-strip rects come from the last egui pass. Unpainted motion is
    coalesced in egui's pending input. See
    [architecture](architecture.md#decisions-that-shape-the-event-loop).
@@ -431,7 +431,7 @@ job actually needs time-based steps.
   means the tab strip, scrollbar strip, find bar, and open panels:
   `Context::is_pointer_over_area()` plus a "was over" flag for the exit frame.
 - Over the tab strip, repaint only when the hovered element changes: tab, close
-  `×`, or `+`. Selection drags, link-hint cursors, and mouse reporting keep
+  `×`, park `↓`, or `+`. Selection drags, link-hint cursors, and mouse reporting keep
   their own repaint and report paths.
 - Expected: no frames while the pointer moves over the terminal area. Measure
   with the `hover` probe before and after. Check hover highlights, scrollbar
@@ -440,13 +440,15 @@ job actually needs time-based steps.
   `Context::is_pointer_over_area()`. egui only knows the previous frame's
   pointer position, and the scrollbar area spans the whole window while the
   scrollbar is shown, so egui's area rects would count the grid as chrome. The
-  tab strip records each tab's, close box's, and `+` button's interactive rect
+  tab strip records each tab's, close/park box's, and `+` button's interactive rect
   during the egui pass. The scrollbar strip counts only while its track is
   visible or dragged, since a faded track ignores hover. Open panels count as
   chrome everywhere. Unpainted motion is collapsed to the newest pending egui
   pointer event, so egui's input cannot grow while no frames run. Tests cover
-  the repaint rule, the strip hit test (close boxes above tabs), the scrollbar's
-  interactive state, and the coalescing.
+  the repaint rule, the strip hit test (close/park boxes above tabs), the scrollbar's
+  interactive state, and the coalescing. A headless widget test checks that the
+  park tooltip's delay/fade settles with no ongoing repaint request; native
+  tooltip behavior still needs the manual checks above.
 
 ### Step 4 — Make the remaining frames cheaper (4.1–4.2 shipped)
 

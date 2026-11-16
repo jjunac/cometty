@@ -351,6 +351,9 @@ impl App {
         if let Some(id) = output.peek_tab {
             self.peek_background_tab(id);
         }
+        if let Some(id) = output.park_tab {
+            self.park_tab_for_window(id);
+        }
         if let Some(id) = output.unpark_tab {
             self.unpark_tab(id);
         }
