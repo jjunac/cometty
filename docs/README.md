@@ -22,6 +22,7 @@ maintaining it.
 | [Memory](memory.md) | Storage budgets, retained capacity, known gaps, or memory diagnostics |
 | [Performance](performance.md) | Release benchmarks, phase counters, profiling, or interpreting results |
 | [Idle CPU and energy](idle.md) | Idle wakeups, frame sources, per-frame costs, the reduction plan, and shipped fixes |
+| [Updates](update.md) | Release checks, download verification, staging, the in-place install, or the trust model |
 | [Throughput fixes and diagnosis](throughput.md) | Shipped fixes, same-host validation, remaining limits, and the preserved investigation baseline |
 | [Roadmap](roadmap.md) | Planned features and proposed designs (not yet implemented) |
 

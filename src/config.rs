@@ -720,6 +720,20 @@ impl SessionConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UpdateConfig {
+    /// Check GitHub for new releases at launch and daily; in an `.app`
+    /// bundle, also download and stage them for a confirmed restart.
+    #[serde(default = "d_true")]
+    pub enabled: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -750,6 +764,8 @@ pub struct Config {
     pub session: SessionConfig,
     #[serde(default)]
     pub log: LogConfig,
+    #[serde(default)]
+    pub update: UpdateConfig,
 }
 
 impl Config {
@@ -936,6 +952,7 @@ mod tests {
         assert_eq!(c.log.level, "debug");
         assert_eq!(c.log.filter, "");
         assert_eq!(c.log.buffer_lines, 1000);
+        assert!(c.update.enabled);
     }
 
     #[test]
@@ -1089,6 +1106,7 @@ mod tests {
         c.font.size = 16.0;
         c.window.title = "test".to_string();
         c.shell.shell = "/bin/zsh".to_string();
+        c.update.enabled = false;
         let dir = std::env::temp_dir().join(format!("cometty-test-{}", std::process::id()));
         let path = dir.join("config.toml");
         c.save_to_path(&path).unwrap();
@@ -1098,6 +1116,30 @@ mod tests {
         assert_eq!(loaded.font.size, 16.0);
         assert_eq!(loaded.window.title, "test");
         assert_eq!(loaded.shell.shell, "/bin/zsh");
+        assert!(!loaded.update.enabled);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_enabled_defaults_true_when_table_or_key_missing() {
+        assert!(Config::default().update.enabled);
+        let dir = std::env::temp_dir().join(format!("cometty-test-update-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let load = |name: &str, text: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, text).unwrap();
+            Config::load_from_path(&path).unwrap()
+        };
+        // Older files predate the `[update]` table entirely.
+        let no_table = load("no-table.toml", "[theme]\nname=\"vscode\"\n");
+        assert!(no_table.update.enabled);
+        assert_eq!(no_table.theme.name, "vscode");
+        // An `[update]` table without `enabled` also keeps the default.
+        let no_key = load("no-key.toml", "[update]\n");
+        assert!(no_key.update.enabled);
+        // An explicit opt-out survives load and sanitize.
+        let off = load("off.toml", "[update]\nenabled=false\n");
+        assert!(!off.update.enabled);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

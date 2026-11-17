@@ -67,6 +67,14 @@ impl SessionState {
     pub fn deadline(&self) -> Option<Instant> {
         self.saver.deadline()
     }
+
+    /// Gives up the snapshot after the final save, so an instance relaunched
+    /// by an update can take the lock and restore it. Nothing is written
+    /// afterwards.
+    pub fn release(&mut self) {
+        self.path = None;
+        self._lock = None;
+    }
 }
 
 impl App {

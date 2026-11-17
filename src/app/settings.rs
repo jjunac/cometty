@@ -28,10 +28,11 @@ pub enum SettingsSection {
     Links,
     Clipboard,
     Logs,
+    Updates,
 }
 
 impl SettingsSection {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Theme,
         Self::Font,
         Self::Window,
@@ -46,6 +47,7 @@ impl SettingsSection {
         Self::Links,
         Self::Clipboard,
         Self::Logs,
+        Self::Updates,
     ];
 
     pub fn title(self) -> &'static str {
@@ -64,6 +66,7 @@ impl SettingsSection {
             Self::Links => "Links",
             Self::Clipboard => "Clipboard",
             Self::Logs => "Logs",
+            Self::Updates => "Updates",
         }
     }
 }
@@ -87,6 +90,21 @@ pub struct SettingsPanel {
     /// Set on clamp/repair, cleared on section switch or close.
     pub notice: Option<String>,
     pub history_usage: Option<(usize, usize, u64)>,
+    /// Read-only updater status for the Updates section. The App refreshes
+    /// it whenever controller state changes; the panel never reads the
+    /// controller directly.
+    pub update_status: UpdateStatusView,
+}
+
+/// Plain snapshot of updater state shown in the Updates section.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UpdateStatusView {
+    /// Running version, e.g. "0.4.0".
+    pub version: String,
+    /// What the updater does in this launch mode (e.g. why it only notifies).
+    pub mode: String,
+    /// Outcome of the most recent check, if any ran this session.
+    pub last_outcome: Option<String>,
 }
 
 impl SettingsPanel {
@@ -100,6 +118,7 @@ impl SettingsPanel {
             last_error: None,
             notice: None,
             history_usage: None,
+            update_status: UpdateStatusView::default(),
         }
     }
 
@@ -157,6 +176,10 @@ pub struct ApplyActions {
     pub terminal: bool,
     pub chrome: bool,
     pub log: bool,
+    /// `[update]` changed. Deliberately not part of `chrome`: an update-only
+    /// edit must not reach `Renderer::apply_config` (keeps shaping caches).
+    /// `apply_settings_changes` forwards it to `update_enabled_changed`.
+    pub update: bool,
     pub any: bool,
 }
 
@@ -175,6 +198,7 @@ pub fn diff_actions(old: &Config, new: &Config) -> ApplyActions {
         || old.links != new.links
         || old.clipboard != new.clipboard;
     let log = old.log != new.log;
+    let update = old.update != new.update;
     let any = old != new;
     ApplyActions {
         theme,
@@ -183,6 +207,7 @@ pub fn diff_actions(old: &Config, new: &Config) -> ApplyActions {
         terminal,
         chrome,
         log,
+        update,
         any,
     }
 }
@@ -205,6 +230,7 @@ pub fn reset_section(config: &mut Config, section: SettingsSection) {
         SettingsSection::Links => config.links = defaults.links,
         SettingsSection::Clipboard => config.clipboard = defaults.clipboard,
         SettingsSection::Logs => config.log = defaults.log,
+        SettingsSection::Updates => config.update = defaults.update,
     }
 }
 
@@ -468,6 +494,34 @@ mod tests {
         assert_eq!(c.theme.name, "vscode");
         reset_all(&mut c);
         assert_eq!(c, Config::default());
+    }
+
+    #[test]
+    fn updates_section_listed_and_resets() {
+        assert_eq!(SettingsSection::ALL.len(), 15);
+        assert!(SettingsSection::ALL.contains(&SettingsSection::Updates));
+        assert_eq!(SettingsSection::Updates.title(), "Updates");
+        let mut c = Config::default();
+        c.update.enabled = false;
+        c.font.size = 24.0;
+        reset_section(&mut c, SettingsSection::Updates);
+        assert_eq!(c.update, Config::default().update);
+        assert_eq!(c.font.size, 24.0, "other sections untouched");
+    }
+
+    /// An update-only edit routes only to `update`, never `chrome`,
+    /// so the renderer (and its shaping caches) is left alone.
+    #[test]
+    fn update_only_diff_sets_update_and_nothing_else() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.update.enabled = !old.update.enabled;
+        let a = diff_actions(&old, &new);
+        assert!(a.update && a.any);
+        assert!(!a.theme && !a.font && !a.window_size && !a.terminal && !a.chrome && !a.log);
+        let mut other = old.clone();
+        other.tabbar.height = 48.0;
+        assert!(!diff_actions(&old, &other).update);
     }
 
     #[test]

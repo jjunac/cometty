@@ -213,3 +213,22 @@ stderr logging independently follows `RUST_LOG` (default `error`). To disable
 
 OSC clipboard contents are redacted, but other logs can include titles, paths,
 and URL previews. Review copied logs before sharing them.
+
+## Updates
+
+| Section / key | Default | Meaning |
+| --- | --- | --- |
+| `update.enabled` | `true` | Check GitHub for a new release 5 s after launch and then daily. From `Cometty.app`, a verified update is also downloaded in the background and installed only after you choose **Restart to update**; other launches only announce new releases |
+
+A file without an `[update]` table or `enabled` key keeps the default. Settings →
+**Updates** → **Check for updates automatically** toggles it, and `ConfigSaver`
+saves it like any other preference. An update-only edit sets only
+`ApplyActions::update`, which goes to the update controller. It never reaches the
+renderer's settings routing, so shaping caches are kept.
+
+Turning it off makes no further network requests: it clears the check schedule,
+cancels a running check or download, and hides the notice. It does not stop an
+install already running after **Restart to update**, or launch
+housekeeping, which cleans the staging directory without network access. Turning
+it back on checks about one second later. See [updates](update.md) for the modes,
+trust model, and staging layout.

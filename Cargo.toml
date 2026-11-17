@@ -2,6 +2,7 @@
 name = "cometty"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.89"
 
 [dependencies]
 anyhow = "1"
@@ -41,6 +42,13 @@ base64 = "0.22"
 # Word selection pattern (`[selection] word_regex`, match-words semantics).
 regex = "1"
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+# Auto-update (docs/update.md): blocking HTTPS client with rustls + ring +
+# webpki-roots; no gzip/brotli/cookies. Exact pins, recorded in Cargo.lock.
+ureq = { version = "=3.5.2", default-features = false, features = ["rustls"] }
+# Auto-update GitHub release metadata (unknown fields ignored). Exact pin.
+serde_json = "=1.0.154"
+# Auto-update SHA-256 of the release archive. Exact pin.
+sha2 = "=0.11.1"
 [dev-dependencies]
 # Native allocation counters for the opt-in offscreen staging regression only.
 # Normal builds keep wgpu's counter instrumentation disabled.

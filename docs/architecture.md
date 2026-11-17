@@ -1,8 +1,9 @@
 # Architecture
 
 cometty is a single Rust binary (edition 2024). The UI thread owns terminal
-state and rendering; background workers handle PTY I/O, child lifecycle, and
-configuration writes. Model helpers remain usable without a display or GPU.
+state and rendering; background workers handle PTY I/O, child lifecycle,
+configuration writes, and update checks. Model helpers remain usable without a
+display or GPU.
 
 ## Ownership and module boundaries
 
@@ -13,6 +14,7 @@ App
 ├── shared viewport snapshot (only the active view)
 ├── ConfigSaver → ordered background writer
 ├── SessionState → session lock + SessionSaver (ordered background writer)
+├── UpdateController → mode, state, check schedule, detached update-job channel
 └── tabs: Vec<Tab>
     ├── stable session ID (independent of its vector index)
     ├── Terminal → bounded parser + Grid → live/alternate cells + history
@@ -40,6 +42,7 @@ This distinction matters when diagnosing memory or invalidating shared caches.
 | [`renderer/`](../src/renderer) | wgpu submission, glyphon/cosmic-text, egui chrome; see [rendering](rendering.md) |
 | [`search.rs`](../src/search.rs), [`selection.rs`](../src/selection.rs), [`links.rs`](../src/links.rs) | Matching, coordinate mapping, selection extraction, URI validation |
 | [`config.rs`](../src/config.rs), [`theme.rs`](../src/theme.rs) | Typed settings/defaults and resolved colors |
+| [`update.rs`](../src/update.rs), [`update/`](../src/update), [`app/update.rs`](../src/app/update.rs), [`renderer/update_ui.rs`](../src/renderer/update_ui.rs) | Release checks, staging, the in-place install, and the update notice; see [updates](update.md) |
 | [`logbuf.rs`](../src/logbuf.rs), [`logging.rs`](../src/logging.rs), [`perf.rs`](../src/perf.rs) | Bounded logs and opt-in aggregate diagnostics |
 | [`tabbar.rs`](../src/tabbar.rs), [`scrollbar.rs`](../src/scrollbar.rs) | Testable chrome geometry and animation decisions |
 | [`procinfo.rs`](../src/procinfo.rs), [`menu.rs`](../src/menu.rs), [`icon.rs`](../src/icon.rs), [`platform.rs`](../src/platform.rs), [`platform/titlebar.rs`](../src/platform/titlebar.rs) | Best-effort OS integration, launch-context detection, and app-owned macOS titlebar gestures |
@@ -120,12 +123,13 @@ look different (`app::mouse::pointer_repaint`):
 - on every move over the find bar, and while a settings or log panel is open
   (their widgets, popups, and tooltips have their own hover states);
 - when the hovered element changes among a tab, its close `×` / park `↓`, the
-  `+` button, the visible scrollbar track, and nothing, which includes one frame
-  on leaving chrome to clear its hover.
+  `+` button, the visible scrollbar track, an update-notice target (its body or
+  one of its buttons), and nothing, which includes one frame on leaving chrome to
+  clear its hover.
 
-The hit tests are explicit: tab-strip rects recorded by the last egui pass (so
-horizontal strip scrolling is included), the scrollbar strip while the track is
-visible or dragged, and the painted find-bar rect. egui's own area rects cannot
+The hit tests are explicit: tab-strip and update-notice rects recorded by the
+last egui pass (so horizontal strip scrolling is included), the scrollbar strip
+while the track is visible or dragged, and the painted find-bar rect. egui's own area rects cannot
 tell the grid from chrome, because the scrollbar area spans the window while it
 is shown. Motion that requests no frame is coalesced in egui's pending input to
 the newest pointer event. Keyboard, wheel, button, focus, and other window events
@@ -146,7 +150,8 @@ Sources: [`config.rs`](../src/config.rs),
    read/save path; `--theme` owns the session theme over the file value.
 2. Settings widgets edit the live `Config`. `diff_actions` routes only relevant
    changes: theme/terminal tuning to tabs, font/chrome to the renderer, window
-   size to the window, and log settings to recording/storage. Shell/cwd/TERM
+   size to the window, log settings to recording/storage, and `[update]` to the
+   update controller only (`ApplyActions::update`). Shell/cwd/TERM
    changes apply to **new** tabs. Unrelated chrome/input edits must not clear
    shaping/advance caches; theme/font/metrics changes invalidate relevant state.
 3. GUI edits win over later external file edits; there is no file-watch merge.
@@ -230,6 +235,46 @@ On macOS, Cmd+Q terminates the process right after `exiting`, so `run_app` never
 returns. Session finalization, PTY shutdown, and the config flush therefore run
 in `exiting`; `main`'s tail repeats them idempotently. Fullscreen state and
 running programs are not restored.
+
+## Update workers
+
+Sources: [`app/update.rs`](../src/app/update.rs),
+[`update/worker.rs`](../src/update/worker.rs). The pipelines, state table,
+staging layout, and trust model are in [updates](update.md).
+
+`UpdateController` does no I/O on the UI thread; construction reads only paths
+and the environment. Check and install jobs run on detached named threads
+(`update-check`, `update-install`) started by `update::worker::spawn_job`;
+housekeeping is a plain detached `update-housekeeping` thread that reports only
+through the log. A drop guard armed inside a job thread sends
+`Finished { panicked }` after the work returns or unwinds, and the `JoinHandle` is
+dropped. Update jobs are not `Startup::spawn_worker` workers: the PTY supervisor
+does not own them, nothing joins them, and the process may exit while one runs.
+Every message carries a job ID; messages from an abandoned or superseded job are
+dropped, and a `Finished` without a result in a working state becomes a failure.
+
+- **Wake:** a job queues a `WorkerMsg` on the controller's channel, then sends
+  `UserEvent::UpdateWorker` through a closure holding the shared
+  `Arc<EventLoopProxy>` (never a proxy clone). `on_update_worker` drains the
+  channel with `try_recv`, refreshes the settings status, and requests at most
+  one redraw per batch, only when the visible notice changed.
+- **Schedule:** the controller exposes one deadline, folded into `about_to_wait`
+  with `app::scheduling::earlier` beside the config and session savers.
+  `service_update` spawns a check when it is due and never blocks. The deadline is
+  absent while disabled, while a check is in flight, and while an update is staged
+  or installing. Otherwise it is a single timer, normally a day out (5 s after
+  launch, 1 s after enabling), so an idle window gains no periodic wakeup.
+- **Housekeeping:** started at the end of `resumed`, after the initial tabs spawn,
+  in self-update mode only and regardless of `[update] enabled`.
+- **Settings:** an `[update]` edit calls `update_enabled_changed`. Disabling clears
+  the deadline and cancels and abandons a check, but not housekeeping or a running
+  install job.
+- **Install and relaunch:** the install job copies the staged bundle next to the
+  installed one and swaps them, then ends with `Installed { bundle }`. The UI
+  thread records the bundle and calls `event_loop.exit()`. `exiting()` saves the
+  session, shuts PTYs down, and flushes config as on any quit; its last step,
+  `relaunch_after_update`, releases the session lock and starts
+  `open -n <bundle>` without waiting.
 
 ## Logging without UI feedback loops
 

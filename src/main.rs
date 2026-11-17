@@ -21,9 +21,10 @@ mod session;
 mod tabbar;
 mod term;
 mod theme;
+mod update;
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -235,7 +236,10 @@ impl ApplicationHandler<UserEvent> for App {
         self.focused = self.window.as_ref().is_some_and(|w| w.has_focus());
         if !self.spawn_initial_tabs(cols, rows, restored) {
             event_loop.exit();
+            return;
         }
+        // After the tabs spawn, so launch cleanup never delays the shells.
+        self.start_update_housekeeping();
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
@@ -264,6 +268,8 @@ impl ApplicationHandler<UserEvent> for App {
                     w.request_redraw();
                 }
             }
+            // Update job results; repaints only when the notice changes.
+            UserEvent::UpdateWorker => self.on_update_worker(event_loop),
             // Native menu bar: Settings and Logs open their panel
             // (open-only, not a toggle, matching platform convention;
             // Esc / x still close). Both accelerators are consumed by the
@@ -476,6 +482,8 @@ impl ApplicationHandler<UserEvent> for App {
         let now = Instant::now();
         self.service_config_saves(now, !self.settings.open);
         self.service_session_saves(now);
+        // Spawns a check job when due; never blocks. Independent of visuals.
+        self.service_update(now, SystemTime::now());
         let suspended = self.visuals_suspended();
         let (sync_repaint, sync_at) = self.active_tab_mut().map_or((false, None), |tab| {
             let repaint = tab.sync.release_due(now);
@@ -549,6 +557,8 @@ impl ApplicationHandler<UserEvent> for App {
         }
         next = app::scheduling::earlier(next, self.config_saver.deadline());
         next = app::scheduling::earlier(next, self.session.deadline());
+        // At most one updater deadline; results arrive as events.
+        next = app::scheduling::earlier(next, self.update.deadline());
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
@@ -565,6 +575,9 @@ impl ApplicationHandler<UserEvent> for App {
         pty::finish_shutdown();
         self.finish_config_saves();
         perf::report_final();
+        // Last: an installed update relaunches only after the session and
+        // config are on disk and the session lock is released.
+        self.relaunch_after_update();
     }
 }
 

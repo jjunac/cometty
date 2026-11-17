@@ -8,10 +8,10 @@
 
 use crate::app::settings::{
     CURSOR_SHAPES, FONT_FAMILIES, KNOWN_THEMES, LINK_MODIFIERS, LINK_UNDERLINES, LOG_LEVELS,
-    OSC52_MODES, SESSION_RESTORE_MODES, SettingsPanel, SettingsSection, is_known_theme,
-    normalize_min_max, repair_finite_f32, repair_min_u32, repair_min_u64, repair_min_usize,
-    repair_positive_f32, repair_positive_f64, reset_all, reset_section, sanitize_cursor_shape,
-    sanitize_key_label,
+    OSC52_MODES, SESSION_RESTORE_MODES, SettingsPanel, SettingsSection, UpdateStatusView,
+    is_known_theme, normalize_min_max, repair_finite_f32, repair_min_u32, repair_min_u64,
+    repair_min_usize, repair_positive_f32, repair_positive_f64, reset_all, reset_section,
+    sanitize_cursor_shape, sanitize_key_label,
 };
 use crate::config::{Config, MAX_LOG_BUFFER_LINES, MIN_LOG_BUFFER_LINES};
 
@@ -122,6 +122,7 @@ pub(crate) fn show_settings(
                                     cli_override,
                                     config,
                                     settings.history_usage,
+                                    &settings.update_status,
                                     &mut ed,
                                 );
                             }
@@ -441,6 +442,7 @@ fn show_section(
     cli_override: bool,
     config: &mut Config,
     history_usage: Option<(usize, usize, u64)>,
+    update_status: &UpdateStatusView,
     ed: &mut Edit,
 ) {
     let d = Config::default();
@@ -1262,6 +1264,42 @@ fn show_section(
                 );
             });
         }
+        SettingsSection::Updates => show_updates_section(ui, config, update_status, ed),
+    }
+}
+
+/// Updates section: the single `[update] enabled` toggle plus read-only
+/// status from [`UpdateStatusView`]. The toggle goes through [`Edit`], so
+/// the post-frame path live-applies it and `ConfigSaver` persists it; the
+/// panel never touches updater state directly.
+fn show_updates_section(
+    ui: &mut egui::Ui,
+    config: &mut Config,
+    status: &UpdateStatusView,
+    ed: &mut Edit,
+) {
+    let d = Config::default();
+    ui.label(
+        "Checks GitHub for new Cometty releases at launch and once a day. \
+         When running from the app bundle, a verified update is downloaded \
+         in the background and installed only after you choose \
+         \"Restart to update\".",
+    );
+    ed.flag(
+        ui,
+        "Check for updates automatically",
+        &mut config.update.enabled,
+        d.update.enabled,
+    );
+    ui.separator();
+    if !status.version.is_empty() {
+        ui.label(format!("Current version: {}", status.version));
+    }
+    if !status.mode.is_empty() {
+        ui.weak(status.mode.as_str());
+    }
+    if let Some(outcome) = &status.last_outcome {
+        ui.label(format!("Last check: {outcome}"));
     }
 }
 
@@ -1279,7 +1317,7 @@ mod tests {
         }
     }
 
-    fn section_lays_out_headless(section: SettingsSection) {
+    fn panel(section: SettingsSection) -> SettingsPanel {
         let mut settings = SettingsPanel::new(AppStartup {
             config_path_override: None,
             cli_theme: None,
@@ -1287,15 +1325,108 @@ mod tests {
         });
         settings.open = true;
         settings.section = section;
-        let mut config = Config::default();
-        let ctx = egui::Context::default();
-        let input = || egui::RawInput {
+        settings
+    }
+
+    fn raw_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
                 egui::vec2(1024.0, 768.0),
             )),
+            events,
             ..Default::default()
+        }
+    }
+
+    /// One headless frame; returns painted shapes and whether `config` changed.
+    /// Texture deltas are cleared (epaint asserts they were handled on drop).
+    fn run_frame(
+        ctx: &egui::Context,
+        settings: &mut SettingsPanel,
+        config: &mut Config,
+        events: Vec<egui::Event>,
+    ) -> (Vec<egui::epaint::ClippedShape>, bool) {
+        let mut changed = false;
+        let mut output = ctx.run_ui(raw_input(events), |ui| {
+            changed = show_settings(ui.ctx(), settings, config);
+        });
+        output.textures_delta.clear();
+        (std::mem::take(&mut output.shapes), changed)
+    }
+
+    /// Screen position of the first painted text run equal to `text`.
+    fn text_pos(shapes: &[egui::epaint::ClippedShape], text: &str) -> Option<egui::Pos2> {
+        fn find(shape: &egui::Shape, text: &str) -> Option<egui::Pos2> {
+            match shape {
+                egui::Shape::Text(t) if t.galley.text() == text => {
+                    Some(t.pos + t.galley.rect.center().to_vec2())
+                }
+                egui::Shape::Vec(v) => v.iter().find_map(|s| find(s, text)),
+                _ => None,
+            }
+        }
+        shapes.iter().find_map(|c| find(&c.shape, text))
+    }
+
+    /// Status labels render from `UpdateStatusView` only (no controller).
+    #[test]
+    fn updates_section_shows_status_labels() {
+        let mut settings = panel(SettingsSection::Updates);
+        settings.update_status = UpdateStatusView {
+            version: "0.4.0".into(),
+            mode: "Running from Cargo: notices only.".into(),
+            last_outcome: Some("up to date".into()),
         };
+        let mut config = Config::default();
+        let ctx = egui::Context::default();
+        let _ = run_frame(&ctx, &mut settings, &mut config, Vec::new());
+        let (shapes, changed) = run_frame(&ctx, &mut settings, &mut config, Vec::new());
+        assert!(!changed, "painting status alone is not an edit");
+        for text in [
+            "Current version: 0.4.0",
+            "Running from Cargo: notices only.",
+            "Last check: up to date",
+        ] {
+            assert!(text_pos(&shapes, text).is_some(), "{text} painted");
+        }
+    }
+
+    /// Clicking the checkbox flips `[update] enabled` and reports `changed`,
+    /// which is what drives `apply_settings_changes` + `ConfigSaver`.
+    #[test]
+    fn updates_checkbox_toggles_enabled_and_reports_change() {
+        let mut settings = panel(SettingsSection::Updates);
+        let mut config = Config::default();
+        assert!(config.update.enabled);
+        let ctx = egui::Context::default();
+        let _ = run_frame(&ctx, &mut settings, &mut config, Vec::new());
+        let (shapes, _) = run_frame(&ctx, &mut settings, &mut config, Vec::new());
+        let pos =
+            text_pos(&shapes, "Check for updates automatically").expect("checkbox label painted");
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut changed = false;
+        for events in [
+            vec![egui::Event::PointerMoved(pos)],
+            vec![press(true)],
+            vec![press(false)],
+        ] {
+            changed |= run_frame(&ctx, &mut settings, &mut config, events).1;
+        }
+        assert!(changed, "toggle reports a change");
+        assert!(!config.update.enabled, "toggle cleared enabled");
+    }
+
+    fn section_lays_out_headless(section: SettingsSection) {
+        let mut settings = panel(section);
+        let mut config = Config::default();
+        let ctx = egui::Context::default();
+        let input = || raw_input(Vec::new());
         // First frame sizes the window, second paints it.
         let mut output = ctx.run_ui(input(), |ui| {
             let _ = show_settings(ui.ctx(), &mut settings, &mut config);

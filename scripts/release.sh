@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
-# Ask for the next package version, commit it, and create the matching release tag.
+# Release the current branch: ask for the next version, verify, commit, tag, and
+# push the commit and tag together.
 #
 # Usage:
 #   ./scripts/release.sh [--bump patch|minor|major] [--version X.Y.Z]
-#                        [--push] [--remote NAME] [--dry-run] [--no-verify]
+#                        [--remote NAME] [--dry-run] [--no-verify]
 #
 # Defaults:
 #   prompt           ask for the next version; Enter accepts the suggestion
 #   --bump patch     suggest this increment of the current Cargo.toml version
 #   --version X.Y.Z  release X.Y.Z without prompting (required when stdin is
 #                    not a terminal)
-#   --remote origin  remote used by --push
-#   no push          print the push commands instead
+#   --remote origin  remote the branch must match and the release is pushed to
 #   verify           run `make verify` before committing (Cargo.lock is still
 #                    refreshed; --no-verify only skips the test/lint gate)
+#   --dry-run        run every check and print the plan without changing,
+#                    committing, or pushing anything
 #
-# The tag push triggers .github/workflows/release.yml, which builds the macOS
-# bundle and opens a draft GitHub release.
+# A release refuses a detached HEAD, uncommitted changes (untracked files
+# included), and a branch that is behind or has diverged from the remote.
+# Local commits not on the remote yet are pushed with the release. The pushed
+# tag triggers .github/workflows/release.yml, which builds the macOS bundle and
+# opens a draft GitHub release. NO_COLOR=1 disables colors.
 set -euo pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
@@ -27,13 +32,34 @@ BUMP="patch"
 BUMP_SET=0
 VERSION=""
 VERSION_SET=0
-PUSH=0
 REMOTE="origin"
 DRY_RUN=0
 VERIFY=1
 
-die() { printf 'error: %s\n' "$*" >&2; exit 1; }
-info() { printf '==> %s\n' "$*"; }
+# Colors only when both output streams are terminals.
+if [[ -t 1 && -t 2 && -z "${NO_COLOR:-}" && "${TERM:-}" != dumb ]]; then
+    BOLD=$'\033[1m' DIM=$'\033[2m' RED=$'\033[31m' GREEN=$'\033[32m'
+    YELLOW=$'\033[33m' BLUE=$'\033[34m' RESET=$'\033[0m'
+else
+    BOLD="" DIM="" RED="" GREEN="" YELLOW="" BLUE="" RESET=""
+fi
+
+STEP=0
+STEPS=7
+# Messages inside a step are indented under its header.
+indent() { if (( STEP )); then printf '  '; fi; }
+error() { indent >&2; printf '%serror:%s %s\n' "$RED$BOLD" "$RESET" "$*" >&2; }
+die() { error "$@"; exit 1; }
+warn() { indent >&2; printf '%swarning:%s %s\n' "$YELLOW$BOLD" "$RESET" "$*" >&2; }
+ok() { indent; printf '%s✓%s %s\n' "$GREEN$BOLD" "$RESET" "$*"; }
+step() {
+    STEP=$((STEP + 1))
+    printf '\n%s[%d/%d]%s %s%s%s\n' "$BLUE$BOLD" "$STEP" "$STEPS" "$RESET" "$BOLD" "$*" "$RESET"
+}
+# A failed precondition stops a real release; a dry run reports it and goes on.
+refuse() {
+    if (( DRY_RUN )); then warn "a real release would stop here: $*"; else die "$*"; fi
+}
 
 usage() {
     awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$SELF"
@@ -45,7 +71,6 @@ while [[ $# -gt 0 ]]; do
         --bump=*) BUMP="${1#*=}"; BUMP_SET=1; shift ;;
         --version) VERSION="${2:?--version needs a value}"; VERSION_SET=1; shift 2 ;;
         --version=*) VERSION="${1#*=}"; VERSION_SET=1; shift ;;
-        --push) PUSH=1; shift ;;
         --remote) REMOTE="${2:?--remote needs a value}"; shift 2 ;;
         --remote=*) REMOTE="${1#*=}"; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
@@ -100,6 +125,9 @@ case "$BUMP" in
     major) SUGGESTED="$((current_major + 1)).0.0" ;;
 esac
 
+# Tag refs on the remote, one per line; filled by check_remote.
+REMOTE_TAGS=""
+
 # Print why $1 cannot be the next release; print nothing when it can.
 version_problem() {
     if [[ ! "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -108,22 +136,59 @@ version_problem() {
         printf 'new version %s must be greater than %s' "$1" "$CURRENT"
     elif git rev-parse -q --verify "refs/tags/v$1" >/dev/null; then
         printf 'tag already exists: v%s' "$1"
+    elif grep -qxF "refs/tags/v$1" <<<"$REMOTE_TAGS"; then
+        printf '%s already has tag v%s' "$REMOTE" "$1"
     fi
 }
 
-# Check the tree before asking, so a refused release never prompts first.
+# Fetch the remote branch and require HEAD to contain it, so the final push is
+# a fast-forward. Records the remote's tags for version_problem.
+check_remote() {
+    local refs remote_sha behind ahead
+    if ! git remote get-url "$REMOTE" >/dev/null 2>&1; then
+        refuse "no remote named $REMOTE"
+        return
+    fi
+    if ! refs="$(git ls-remote --refs "$REMOTE" "refs/heads/$BRANCH" 'refs/tags/*')"; then
+        refuse "could not reach $REMOTE"
+        return
+    fi
+    REMOTE_TAGS="$(awk '$2 ~ /^refs\/tags\// { print $2 }' <<<"$refs")"
+    remote_sha="$(awk -v ref="refs/heads/$BRANCH" '$2 == ref { print $1 }' <<<"$refs")"
+    if [[ -z "$remote_sha" ]]; then
+        warn "$REMOTE has no $BRANCH branch yet; the push will create it"
+        return
+    fi
+    if ! git fetch --quiet "$REMOTE" "refs/heads/$BRANCH"; then
+        refuse "could not fetch $BRANCH from $REMOTE"
+        return
+    fi
+    read -r behind ahead <<<"$(git rev-list --left-right --count "$remote_sha...HEAD")"
+    if (( behind && ahead )); then
+        refuse "$BRANCH has diverged from $REMOTE/$BRANCH ($ahead local, $behind remote commits); rebase or merge first"
+    elif (( behind )); then
+        refuse "$BRANCH is $behind commit(s) behind $REMOTE/$BRANCH; pull first"
+    elif (( ahead )); then
+        warn "$ahead local commit(s) not on $REMOTE yet will be pushed with the release"
+    else
+        ok "$BRANCH is up to date with $REMOTE/$BRANCH"
+    fi
+}
+
+step "Checking the working tree"
 BRANCH="$(git symbolic-ref --quiet --short HEAD || true)"
 [[ -n "$BRANCH" ]] || die "HEAD is detached; check out a branch before releasing"
-
-DIRTY="$(git status --porcelain --untracked-files=no)"
+DIRTY="$(git status --porcelain)"
 if [[ -n "$DIRTY" ]]; then
-    if (( DRY_RUN )); then
-        printf 'warning: a real release would refuse these tracked changes:\n%s\n' "$DIRTY" >&2
-    else
-        die "working tree has tracked changes; commit or stash them before releasing"
-    fi
+    refuse "uncommitted changes; commit, stash, or remove them first:"$'\n'"$(sed 's/^/      /' <<<"$DIRTY")"
+else
+    ok "on $BRANCH at $(git rev-parse --short HEAD), nothing uncommitted"
 fi
 
+step "Comparing $BRANCH with $REMOTE"
+check_remote
+
+step "Choosing the version"
 if [[ -n "$VERSION" ]]; then
     NEW="$VERSION"
     PROBLEM="$(version_problem "$NEW")"
@@ -132,40 +197,26 @@ else
     [[ -t 0 ]] || die "no terminal to ask for the version; pass --version X.Y.Z (make: RELEASE_VERSION=X.Y.Z)"
     # An empty answer takes the suggestion; an invalid one asks again.
     while :; do
-        read -r -e -p "Next version (current $CURRENT) [$SUGGESTED]: " ANSWER || {
+        read -r -e -p "  Next version (current $CURRENT) [$SUGGESTED]: " ANSWER || {
             printf '\n' >&2
             die "aborted: no version entered"
         }
         NEW="${ANSWER:-$SUGGESTED}"
         PROBLEM="$(version_problem "$NEW")"
         [[ -n "$PROBLEM" ]] || break
-        printf 'error: %s\n' "$PROBLEM" >&2
+        error "$PROBLEM"
     done
 fi
 TAG="v$NEW"
-
-if (( PUSH )); then
-    if git ls-remote --exit-code --tags "$REMOTE" "refs/tags/$TAG" >/dev/null 2>&1; then
-        die "remote $REMOTE already has tag $TAG"
-    fi
-fi
-
-if (( VERIFY )); then VERIFY_LABEL="make verify"; else VERIFY_LABEL="skipped"; fi
+ok "releasing $TAG (from $CURRENT)"
 
 if (( DRY_RUN )); then
-    printf 'Release plan (dry run):\n'
-    printf '  branch:  %s\n' "$BRANCH"
-    printf '  current: %s\n' "$CURRENT"
-    printf '  next:    %s\n' "$NEW"
-    printf '  tag:     %s\n' "$TAG"
-    printf '  verify:  %s\n' "$VERIFY_LABEL"
-    printf '  commit:  chore: release %s\n' "$TAG"
-    if (( PUSH )); then
-        printf '  push:    %s and %s to %s\n' "$BRANCH" "$TAG" "$REMOTE"
-    else
-        printf '  push:    no\n'
-    fi
-    printf 'No files were changed.\n'
+    if (( VERIFY )); then VERIFY_PLAN="run make verify"; else VERIFY_PLAN="skip make verify"; fi
+    printf '\n%sDry run:%s nothing was changed. A real release would:\n' "$YELLOW$BOLD" "$RESET"
+    printf '  - set Cargo.toml and Cargo.lock to %s\n' "$NEW"
+    printf '  - %s\n' "$VERIFY_PLAN"
+    printf '  - commit "chore: release %s" on %s and tag it %s\n' "$TAG" "$BRANCH" "$TAG"
+    printf '  - push %s and %s to %s\n' "$BRANCH" "$TAG" "$REMOTE"
     exit 0
 fi
 
@@ -174,47 +225,46 @@ COMMITTED=0
 cleanup() {
     local status=$?
     if (( status != 0 && MODIFIED == 1 && COMMITTED == 0 )); then
-        printf 'restoring Cargo.toml and Cargo.lock\n' >&2
+        warn "restoring Cargo.toml and Cargo.lock"
         git reset -q -- Cargo.toml Cargo.lock || true
         git checkout -- Cargo.toml Cargo.lock || true
     fi
 }
 trap cleanup EXIT
 
-info "bumping $CURRENT -> $NEW"
+step "Updating the version"
 MODIFIED=1
 NEW="$NEW" perl -0pi -e 's/(\[package\][^\[]*?\nversion = ")[^"]*(")/$1$ENV{NEW}$2/s' Cargo.toml
 ACTUAL="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
 [[ "$ACTUAL" == "$NEW" ]] || die "failed to update Cargo.toml to $NEW"
-
-info "refreshing Cargo.lock"
+ok "Cargo.toml: $CURRENT -> $NEW"
 "${CARGO:-cargo}" check --quiet
 LOCK_VERSION="$(awk '/^name = "cometty"$/ { getline; print }' Cargo.lock | head -n 1)"
 [[ "$LOCK_VERSION" == "version = \"$NEW\"" ]] || \
     die "Cargo.lock did not update to $NEW (found: ${LOCK_VERSION:-none})"
+ok "Cargo.lock refreshed"
 
+step "Verifying"
 if (( VERIFY )); then
-    info "running make verify"
     "${MAKE:-make}" verify
+    ok "make verify passed"
+else
+    warn "skipped (--no-verify)"
 fi
 
+step "Committing and tagging"
 git add -- Cargo.toml Cargo.lock
-git commit -m "chore: release $TAG"
+git commit -q -m "chore: release $TAG"
 COMMITTED=1
 git tag -a "$TAG" -m "cometty $TAG"
+ok "committed $(git rev-parse --short HEAD) \"chore: release $TAG\" and tagged $TAG"
 
-if (( PUSH )); then
-    info "pushing $BRANCH and $TAG to $REMOTE"
-    git push "$REMOTE" "HEAD:$BRANCH" || \
-        die "failed to push $BRANCH; local commit and $TAG remain"
-    git push "$REMOTE" "$TAG" || \
-        die "failed to push $TAG; local commit and tag remain"
+step "Pushing to $REMOTE"
+# Atomic: the remote gets both the branch update and the tag, or neither.
+if ! git push --atomic "$REMOTE" "HEAD:refs/heads/$BRANCH" "refs/tags/$TAG"; then
+    die "push failed; the release commit and $TAG are still local."$'\n'"    retry: git push --atomic $REMOTE HEAD:refs/heads/$BRANCH refs/tags/$TAG"$'\n'"    undo:  git tag -d $TAG && git reset --keep HEAD~1"
 fi
+ok "pushed $BRANCH and $TAG"
 
-REV="$(git rev-parse --short HEAD)"
-printf '\nReleased %s (%s).\n' "$TAG" "$REV"
-if (( PUSH )); then
-    printf 'Pushed %s and %s; the release workflow will build the draft release.\n' "$BRANCH" "$TAG"
-else
-    printf 'Publish with:\n  git push %s %s\n  git push %s %s\n' "$REMOTE" "$BRANCH" "$REMOTE" "$TAG"
-fi
+printf '\n%s✓ Released %s%s\n' "$GREEN$BOLD" "$TAG" "$RESET"
+printf '  %sThe release workflow will build the draft GitHub release.%s\n' "$DIM" "$RESET"

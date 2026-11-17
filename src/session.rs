@@ -189,11 +189,16 @@ pub fn default_path() -> Option<PathBuf> {
 }
 
 fn path_from(state_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    Some(state_base(state_home, home)?.join("cometty/session.toml"))
+}
+
+/// `${XDG_STATE_HOME:-$HOME/.local/state}` from the two variables' values.
+/// Shared with the updater's staging directory so the rules cannot drift.
+pub(crate) fn state_base(state_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
     // XDG: relative values are invalid and must be ignored.
-    let base = state_home
+    state_home
         .filter(|p| p.is_absolute())
-        .or_else(|| home.map(|h| h.join(".local/state")))?;
-    Some(base.join("cometty/session.toml"))
+        .or_else(|| home.map(|h| h.join(".local/state")))
 }
 
 /// Take the per-user session lock next to `path`. Only the holder may read

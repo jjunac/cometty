@@ -1,0 +1,73 @@
+{
+  "url": "https://api.github.com/repos/jjunac/cometty/releases/123456789",
+  "assets_url": "https://api.github.com/repos/jjunac/cometty/releases/123456789/assets",
+  "upload_url": "https://uploads.github.com/repos/jjunac/cometty/releases/123456789/assets{?name,label}",
+  "html_url": "https://github.com/jjunac/cometty/releases/tag/v1.3.0",
+  "id": 123456789,
+  "author": {
+    "login": "octocat",
+    "id": 1,
+    "node_id": "MDQ6VXNlcjE=",
+    "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+    "html_url": "https://github.com/octocat",
+    "type": "User",
+    "site_admin": false
+  },
+  "node_id": "RE_kwDOExample",
+  "tag_name": "v1.3.0",
+  "target_commitish": "main",
+  "name": "v1.3.0",
+  "draft": false,
+  "immutable": false,
+  "prerelease": false,
+  "created_at": "2025-01-01T00:00:00Z",
+  "published_at": "2025-01-01T00:10:00Z",
+  "assets": [
+    {
+      "url": "https://api.github.com/repos/jjunac/cometty/releases/assets/1001",
+      "id": 1001,
+      "node_id": "RA_kwDOExample1",
+      "name": "Cometty-1.3.0-macos-universal.zip",
+      "label": "",
+      "uploader": {
+        "login": "github-actions[bot]",
+        "id": 41898282,
+        "type": "Bot",
+        "site_admin": false
+      },
+      "content_type": "application/zip",
+      "state": "uploaded",
+      "size": 12345678,
+      "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "download_count": 42,
+      "created_at": "2025-01-01T00:05:00Z",
+      "updated_at": "2025-01-01T00:05:10Z",
+      "browser_download_url": "https://github.com/jjunac/cometty/releases/download/v1.3.0/Cometty-1.3.0-macos-universal.zip"
+    },
+    {
+      "url": "https://api.github.com/repos/jjunac/cometty/releases/assets/1002",
+      "id": 1002,
+      "node_id": "RA_kwDOExample2",
+      "name": "Cometty-1.3.0-macos-universal.zip.sha256",
+      "label": null,
+      "uploader": {
+        "login": "github-actions[bot]",
+        "id": 41898282,
+        "type": "Bot",
+        "site_admin": false
+      },
+      "content_type": "text/plain",
+      "state": "uploaded",
+      "size": 100,
+      "digest": null,
+      "download_count": 40,
+      "created_at": "2025-01-01T00:05:00Z",
+      "updated_at": "2025-01-01T00:05:01Z",
+      "browser_download_url": "https://github.com/jjunac/cometty/releases/download/v1.3.0/Cometty-1.3.0-macos-universal.zip.sha256"
+    }
+  ],
+  "tarball_url": "https://api.github.com/repos/jjunac/cometty/tarball/v1.3.0",
+  "zipball_url": "https://api.github.com/repos/jjunac/cometty/zipball/v1.3.0",
+  "body": "## Changes\n\n- Example release notes.",
+  "reactions": { "url": "https://api.github.com/repos/jjunac/cometty/releases/123456789/reactions", "total_count": 0 }
+}

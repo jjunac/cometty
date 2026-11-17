@@ -154,6 +154,50 @@ to always start fresh.
 See the [configuration reference](docs/configuration.md) for all options,
 custom shortcuts, tab labels, and logging preferences.
 
+## Updates
+
+Cometty checks for new releases about 5 seconds after launch and then every
+24 hours. Only published releases on the
+[releases page](https://github.com/jjunac/cometty/releases) are offered. To turn
+this off, clear **Settings → Updates → Check for updates automatically** (on by
+default), or set `[update] enabled = false` in your preferences file. The check
+asks `api.github.com` for the latest release. It sends only a User-Agent that
+includes your Cometty version.
+
+When you run the macOS app from `/Applications`, Cometty downloads and checks
+the update in the background. When it's done, a small notice in the
+bottom-right corner says **Cometty X is ready.**
+
+- **Restart to update** quits Cometty, saving your session as a normal quit
+  does, replaces the app, and opens it again.
+- **Later** hides the notice until the next launch.
+- If other Cometty windows from the same app are running, the notice asks you to
+  quit them first.
+- If the update can't be installed (for example, macOS blocks Cometty from
+  modifying apps), the notice says why and keeps **Restart to update** so you
+  can try again.
+- macOS may ask again for permissions you granted Cometty, such as Full Disk
+  Access, after an update.
+
+Some installs can't update in place:
+
+- the app runs from a read-only location
+- macOS runs it from a temporary copy because it was opened without being moved
+  out of Downloads
+- you launched it with `cargo install` or `cargo run`, or on Linux
+
+In those cases the notice only says **Cometty X is available.**, with a
+**View release** button to open the release page. When moving the app would
+help, the notice suggests moving Cometty to a writable Applications folder. The
+same notice appears, with the reason, when the automatic download fails.
+
+**What is verified.** Cometty downloads updates over HTTPS from
+GitHub and checks them against the SHA-256 checksum published with the release.
+That catches a corrupted download, but not a tampered release. Builds are not
+notarized, and macOS Gatekeeper does not re-check updates that Cometty
+downloads itself. For stronger guarantees, turn off automatic checks and update
+manually from the releases page.
+
 ## Clipboard, links, and closing tabs
 
 - Applications can set your clipboard by default, but cannot read it. Set

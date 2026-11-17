@@ -2,6 +2,7 @@
 
 use super::search_ui::{self, SearchUiOutput};
 use super::tabbar_ui::TabbarView;
+use super::update_ui::{self, NoticeRects, UpdateAction};
 use super::{Renderer, ScrollCtx};
 
 pub(crate) struct OverlayOutput {
@@ -15,6 +16,8 @@ pub(crate) struct OverlayOutput {
     pub(crate) peek_tab: Option<u64>,
     pub(crate) unpark_tab: Option<u64>,
     pub(crate) search: SearchUiOutput,
+    /// Update-notice button clicked this frame, applied by the app.
+    pub(crate) update_action: Option<UpdateAction>,
     pub(crate) paint_jobs: Vec<egui::ClippedPrimitive>,
     pub(crate) screen_descriptor: egui_wgpu::ScreenDescriptor,
     /// Consumed by the frame boundary: sets before acquisition, frees only
@@ -26,14 +29,17 @@ pub(crate) struct OverlayOutput {
 }
 
 /// Skip the egui pass when no chrome is visible: hidden tab bar, closed
-/// find/settings/log panels, and a hidden (or alt-screen) scrollbar.
-/// Pure for headless testing; the caller still drains egui input and
-/// advances the scrollbar fade so animations wake the loop.
+/// find/settings/log panels, no input or update notice, and a hidden (or
+/// alt-screen) scrollbar. Pure for headless testing; the caller still
+/// drains egui input and advances the scrollbar fade so animations wake
+/// the loop.
+#[allow(clippy::too_many_arguments)] // Flat flags keep the rule table-testable.
 pub(crate) fn should_skip_overlay(
     tab_h: f32,
     search_open: bool,
     settings_open: bool,
     logs_open: bool,
+    notice_visible: bool,
     is_alt: bool,
     scrollbar_opacity: f32,
     scrollbar_dragging: bool,
@@ -42,6 +48,7 @@ pub(crate) fn should_skip_overlay(
         && !search_open
         && !settings_open
         && !logs_open
+        && !notice_visible
         && (is_alt || (scrollbar_opacity <= 0.01 && !scrollbar_dragging))
 }
 
@@ -67,6 +74,7 @@ impl Renderer {
             log_buffer,
             search,
             input_notice,
+            update_notice,
         } = scroll;
         let scale = self.scale_factor.max(1.0);
         let screen_w_pts = self.width as f32 / scale;
@@ -89,13 +97,14 @@ impl Renderer {
             search.open,
             settings.open,
             logs.open,
+            input_notice.is_some() || update_notice.is_some(),
             is_alt,
             opacity,
             scrollbar.is_dragging(),
-        ) && input_notice.is_none()
-        {
+        ) {
             let _ = self.egui_state.take_egui_input(window);
             self.search_bar_rect = None;
+            self.update_notice_rects = NoticeRects::default();
             self.tabbar_ui.clear();
             tab_drag.retain_source(false);
             tab_drag.finish_frame();
@@ -125,6 +134,7 @@ impl Renderer {
                 peek_tab: None,
                 unpark_tab: None,
                 search: super::search_ui::SearchUiOutput::default(),
+                update_action: None,
                 paint_jobs: Vec::new(),
                 screen_descriptor,
                 textures_delta: egui::TexturesDelta::default(),
@@ -262,6 +272,17 @@ impl Renderer {
         // they overlap.
         let search_actions = search_ui::show_search(&ctx, search, tab_h);
         self.search_bar_rect = search_actions.rect;
+        // Update notice: passive chrome in the bottom-right corner, clear of
+        // the scrollbar track. Its buttons use the non-focusable click
+        // sense, so terminal-owned Tab and IME keep their route. Rects are
+        // kept for pointer routing; the action is applied after the frame.
+        let (update_action, notice_rects) = match update_notice {
+            Some(notice) => {
+                update_ui::show_update_notice(&ctx, notice, theme, screen_w_pts, &scrollbar_cfg)
+            }
+            None => (None, NoticeRects::default()),
+        };
+        self.update_notice_rects = notice_rects;
         // Scrollbar fade/drag advances inside the pass, so its repaint
         // request (while still animating) is part of the frame's
         // `repaint_delay` below instead of being dropped after `end_pass`.
@@ -312,6 +333,7 @@ impl Renderer {
             peek_tab: tab_actions.peek_tab,
             unpark_tab: tab_actions.unpark_tab,
             search: search_actions,
+            update_action,
             paint_jobs,
             screen_descriptor,
             textures_delta: std::mem::take(&mut full_output.textures_delta),
@@ -326,32 +348,39 @@ mod tests {
 
     #[test]
     fn overlay_skips_only_when_no_chrome_visible() {
-        // Idle single-tab, panels closed, scrollbar hidden: skip.
+        // Idle single-tab, panels closed, no notice, scrollbar hidden: skip.
         assert!(should_skip_overlay(
-            0.0, false, false, false, false, 0.0, false
+            0.0, false, false, false, false, false, 0.0, false
         ));
         // Alt screen hides the scrollbar: skip even with opacity set.
         assert!(should_skip_overlay(
-            0.0, false, false, false, true, 1.0, false
+            0.0, false, false, false, false, true, 1.0, false
         ));
         // Any visible chrome keeps the pass.
         assert!(!should_skip_overlay(
-            38.0, false, false, false, false, 0.0, false
+            38.0, false, false, false, false, false, 0.0, false
         ));
         assert!(!should_skip_overlay(
-            0.0, true, false, false, false, 0.0, false
+            0.0, true, false, false, false, false, 0.0, false
         ));
         assert!(!should_skip_overlay(
-            0.0, false, true, false, false, 0.0, false
+            0.0, false, true, false, false, false, 0.0, false
         ));
         assert!(!should_skip_overlay(
-            0.0, false, false, true, false, 0.0, false
+            0.0, false, false, true, false, false, 0.0, false
         ));
         assert!(!should_skip_overlay(
-            0.0, false, false, false, false, 1.0, false
+            0.0, false, false, false, false, false, 1.0, false
         ));
         assert!(!should_skip_overlay(
-            0.0, false, false, false, false, 0.0, true
+            0.0, false, false, false, false, false, 0.0, true
+        ));
+        // An input or update notice keeps the pass, even on the alt screen.
+        assert!(!should_skip_overlay(
+            0.0, false, false, false, true, false, 0.0, false
+        ));
+        assert!(!should_skip_overlay(
+            0.0, false, false, false, true, true, 1.0, false
         ));
     }
 }

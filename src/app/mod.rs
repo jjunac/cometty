@@ -19,6 +19,7 @@ pub mod selection_view;
 pub mod session;
 pub mod settings;
 pub mod tab;
+pub mod update;
 
 pub use geometry::compute_grid_size;
 pub use geometry::is_fullscreen_like;
@@ -45,6 +46,9 @@ pub enum UserEvent {
     /// panel is open, see [`crate::logging::set_wake_enabled`]).
     LogAvailable,
     ConfigSaveAvailable,
+    /// An update job queued a message on the controller's channel (sent
+    /// through the shared proxy `Arc`, see [`App::update_wake`]).
+    UpdateWorker,
 }
 
 pub struct App {
@@ -128,6 +132,9 @@ pub struct App {
     pub(crate) snapshot_version: u64,
     pub(crate) snapshot_tab: Option<u64>,
     pub(crate) snapshot_keys: Vec<(u64, u64, u64)>,
+    /// Update checking, staging state, and the job channel; see
+    /// [`update::UpdateController`].
+    pub(crate) update: update::UpdateController,
 }
 
 impl App {
@@ -139,6 +146,16 @@ impl App {
         log_buffer: Arc<Mutex<LogBuffer>>,
     ) -> Self {
         let window_title = config.window.title.clone();
+        // Pure path/env reads only: no job is spawned and no network is
+        // touched until the event loop runs (housekeeping at the end of
+        // `resumed`, checks from `about_to_wait`).
+        let update = update::UpdateController::from_env(
+            config.update.enabled,
+            Instant::now(),
+            std::time::SystemTime::now(),
+        );
+        let mut settings = SettingsPanel::new(startup);
+        settings.update_status = update.status_view();
         Self {
             window: None,
             renderer: None,
@@ -177,7 +194,7 @@ impl App {
             link_press: false,
             clipboard: None,
             window_title,
-            settings: SettingsPanel::new(startup),
+            settings,
             config_saver: persistence::ConfigSaver::default(),
             session: session::SessionState::default(),
             spawned_any: false,
@@ -188,6 +205,7 @@ impl App {
             snapshot_version: u64::MAX,
             snapshot_tab: None,
             snapshot_keys: Vec::new(),
+            update,
         }
     }
 
@@ -285,6 +303,10 @@ impl App {
         }
         if old.session != self.config.session {
             self.session_changed();
+        }
+        // Model-only: the renderer and its shaping caches are untouched.
+        if actions.update {
+            self.update_enabled_changed(Instant::now());
         }
         // Theme (skipped live while a CLI --theme owns the session) and
         // terminal tuning both flow through the per-tab session config.

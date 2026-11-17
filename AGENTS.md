@@ -41,6 +41,7 @@ tests or headless timings with native-memory, GUI-latency, or energy verificatio
 | Input / search / links / titles | `src/app/{keyboard,mouse,search,links,tab}.rs`, pure `src/{input,search,selection,links,procinfo}.rs` | [Interaction](docs/interaction.md) |
 | Storage limits / diagnostics | History, input, parser, search and renderer ownership | [Memory](docs/memory.md), [profiling](docs/performance.md) |
 | Idle CPU / wakeups / energy | `src/perf.rs` counters, `scripts/compare/idle-probe.py` (`make bench-idle`) | [Idle CPU and energy](docs/idle.md) |
+| Auto-update / install | `src/update/`, `src/app/update.rs`, `src/renderer/update_ui.rs` | [Updates](docs/update.md) |
 
 ## Critical invariants
 
@@ -72,6 +73,12 @@ tests or headless timings with native-memory, GUI-latency, or energy verificatio
   Start workers with `Startup::spawn_worker`; close requests and worker exits must
   publish under the supervisor's queue lock before notifying, because it waits
   without a timer unless a job is closing or has an unjoined/unreaped finished worker.
+  Update jobs instead run as unsupervised detached threads (no `spawn_worker`).
+- **Updater:** update workers are never joined; `ConfigSaver` stays the only config
+  writer. The install job swaps only when no other instance of the bundle runs; a
+  failure returns to the Ready notice with its reason. The relaunch is the last
+  step of `exiting()`, after the session save and lock release. Delete only
+  derived sibling paths. Tests never touch the network.
 - **GPU:** all frame writes/submissions use `renderer::frame`'s returned-outcome
   boundary. Mark upload calls before partial-failure dependencies; flush pending
   uploads on a live-device skip/error and free textures after submission. Keep
@@ -86,8 +93,9 @@ tests or headless timings with native-memory, GUI-latency, or energy verificatio
   reactive. Pointer motion (`CursorMoved`/`Entered`/`Left`) repaints only per
   `app::mouse::pointer_repaint`: while egui uses the pointer, on any move over the
   find bar or an open panel, when the hovered tab/×/↓/+/visible scrollbar changes,
-  and once on leaving chrome. Coalesce unpainted motion in egui's pending input;
-  selection drags, link cursors and mouse reports keep their own paths.
+  when the hovered update-notice target changes, and once on leaving chrome.
+  Coalesce unpainted motion in egui's pending input; selection drags, link cursors
+  and mouse reports keep their own paths.
 - **Search/links:** search opens/re-focuses after the settings guard; navigation
   precedes egui consumption and closing surrenders focus. Cache by content/row
   identity, never scroll on background refresh. Modifier-only hints must repaint;

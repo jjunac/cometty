@@ -38,11 +38,10 @@ BUNDLE_NOTARY ?=
 
 RELEASE_BUMP ?= patch
 RELEASE_VERSION ?=
-RELEASE_PUSH ?=
 RELEASE_DRY_RUN ?=
 RELEASE_SKIP_VERIFY ?=
 RELEASE_REMOTE ?= origin
-RELEASE_FLAGS = $(if $(strip $(RELEASE_VERSION)),--version '$(RELEASE_VERSION)',--bump '$(RELEASE_BUMP)') --remote '$(RELEASE_REMOTE)' $(if $(strip $(RELEASE_PUSH)),--push) $(if $(strip $(RELEASE_DRY_RUN)),--dry-run) $(if $(strip $(RELEASE_SKIP_VERIFY)),--no-verify)
+RELEASE_FLAGS = $(if $(strip $(RELEASE_VERSION)),--version '$(RELEASE_VERSION)',--bump '$(RELEASE_BUMP)') --remote '$(RELEASE_REMOTE)' $(if $(strip $(RELEASE_DRY_RUN)),--dry-run) $(if $(strip $(RELEASE_SKIP_VERIFY)),--no-verify)
 
 # Every target is a command rather than an artifact name.
 .PHONY: help build release run run-release test test-release check clippy fmt \
@@ -55,7 +54,7 @@ help: ## Show this target index
 	@printf '\nExamples:\n'
 	@printf '  make test FILTER=grid::history::\n'
 	@printf '  make release RELEASE_DRY_RUN=1\n'
-	@printf '  make release RELEASE_VERSION=0.2.0 RELEASE_PUSH=1\n'
+	@printf '  make release RELEASE_VERSION=0.3.0\n'
 	@printf '  make bench BENCH_OUT=target/perf/run1\n'
 	@printf '  make bench-compare COMPARE_TERMINALS=cometty,ghostty COMPARE_SUITES=throughput,memory COMPARE_RUNS=1\n'
 	@printf '  make bench-idle IDLE_SCENARIOS=blink,steady IDLE_ARGS="--seconds 60"\n'
@@ -116,7 +115,7 @@ probe-uploads: ## Opt-in GPU probe: failed-upload cleanup and recovery
 profile: ## macOS Instruments trace; PROFILE_TEMPLATE=, PROFILE_TIME=, PROFILE_OUT=, PROFILE_ARGS=
 	CARGO_PROFILE_RELEASE_DEBUG=1 COMETTY_PERF=1 bash scripts/profile-macos.sh --template '$(PROFILE_TEMPLATE)' --time-limit $(PROFILE_TIME) --output $(PROFILE_OUT) -- $(PROFILE_ARGS)
 
-release: ## Ask for the version (default: next patch), verify, commit, tag (RELEASE_VERSION=, RELEASE_BUMP=, RELEASE_PUSH=1)
+release: ## Check tree and remote, ask for the version (default: next patch), verify, commit, tag, push (RELEASE_VERSION=, RELEASE_BUMP=, RELEASE_DRY_RUN=1)
 	bash scripts/release.sh $(RELEASE_FLAGS)
 
 bundle: ## Build macOS .app + zip; BUNDLE_ARCH=, BUNDLE_IDENTITY=, BUNDLE_NOTARY=

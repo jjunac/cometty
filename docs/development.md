@@ -30,25 +30,75 @@ For automated headless verification prefer the commands below.
 
 ## Releasing
 
-`make release` turns the current tree into a release:
+`make release` turns the current branch into a published release, in numbered
+steps:
 
+- checks that HEAD is a branch with no uncommitted changes, untracked files
+  included,
+- fetches the branch from `RELEASE_REMOTE` (default `origin`) and refuses it if
+  the local branch is behind or has diverged; local commits that are only ahead
+  are pushed with the release,
 - asks for the next version, suggesting a patch bump of `Cargo.toml` that Enter
   accepts (`RELEASE_BUMP=minor|major` changes the suggestion;
   `RELEASE_VERSION=X.Y.Z` skips the prompt and is required without a terminal),
 - writes it to `Cargo.toml` and refreshes `Cargo.lock`,
-- runs `make verify`,
-- commits `chore: release vX.Y.Z`,
-- creates the annotated `vX.Y.Z` tag.
+- runs `make verify` (`RELEASE_SKIP_VERIFY=1` skips it),
+- commits `chore: release vX.Y.Z` and creates the annotated `vX.Y.Z` tag,
+- pushes the branch and tag in one atomic push.
 
-It refuses tracked worktree changes, a detached HEAD, an existing tag, or a
-version that is not X.Y.Z above the current one; at the prompt, a refused
-version asks again.
-`RELEASE_DRY_RUN=1` prints the plan without touching the tree;
-`RELEASE_SKIP_VERIFY=1` skips the gate. Nothing is pushed unless
-`RELEASE_PUSH=1` (remote `RELEASE_REMOTE`, default `origin`); otherwise the
-target prints the two `git push` commands. Pushing the tag triggers
-[`release.yml`](../.github/workflows/release.yml), which tests, builds the
-macOS bundle, and opens a draft release.
+The prompt asks again for a version that is not X.Y.Z above the current one or
+whose tag already exists locally or on the remote. A failed push leaves the
+commit and tag local and prints the retry and undo commands.
+`RELEASE_DRY_RUN=1` runs the checks and prints the plan without changing,
+committing, or pushing anything; refused checks become warnings. Pushing the
+tag triggers [`release.yml`](../.github/workflows/release.yml), which tests,
+builds the macOS bundle, and opens a draft release. Output is colored on a
+terminal unless `NO_COLOR` is set.
+
+### Reaching the updater
+
+The in-app [updater](update.md) reads only GitHub's latest published release,
+and skips a release that is a draft or a prerelease. Because `release.yml` opens
+a draft, no user is offered the version until the maintainer publishes that
+draft; prereleases are never offered. The updater also relies on these names:
+
+- the tag is exactly `vX.Y.Z` (no suffix, no leading zeros),
+- the archive asset is `Cometty-<X.Y.Z>-macos-universal.zip`,
+- the checksum asset is that name plus `.sha256`, as written by
+  `scripts/bundle-macos.sh`.
+
+Renaming either asset or changing the tag scheme hides the release from every
+installed copy.
+
+### Manual update checklist
+
+Automated tests do not cover these. Record each outcome here as a measured
+result, not a guarantee.
+
+GUI pass (`cargo run` and a bundled build, on a machine with a display):
+
+- [ ] The notice sits at the bottom right, clear of the scrollbar.
+- [ ] Its buttons never take keyboard focus or IME from the terminal, and
+  typing continues in every tab while it is shown.
+- [ ] "Later" hides the notice until relaunch.
+- [ ] The Updates checkbox persists across a relaunch without visible reflow or
+  re-shaping.
+- [ ] A failed download shows the Available notice with its reason, a failed
+  feed check shows no notice, and both appear in the log panel under
+  `cometty::update`.
+- [ ] `make bench-idle` idle wakeups and the binary-size delta are recorded.
+
+Real update (needs a published test release, which changes the shared GitHub
+release; macOS only):
+
+- [ ] A copy in `/Applications` downloads, verifies, and stages the update.
+- [ ] "Restart to update" swaps, quits, relaunches the new version, and restores
+  the session tabs; the previous bundle is removed after the relaunch.
+- [ ] Whether macOS privacy (TCC) permissions are requested again.
+- [ ] App Management `EPERM` on macOS 13+ returns to the Ready notice with the
+  error and nothing changed.
+- [ ] A translocated or read-only copy shows the move hint in notify-only mode.
+- [ ] A second Dock-launched instance blocks the install.
 
 ## Packaging a macOS release
 
@@ -98,6 +148,11 @@ thread/descriptor assertions execute in an isolated subprocess. Other model,
 egui layout, and frame-boundary tests run headlessly; they are not evidence of
 windowed/GPU correctness.
 
+Update tests never touch the network: release feeds, checksums, and archives
+come from fixtures and in-memory fakes. On macOS only, extraction and swap
+integration tests run the real `/usr/bin/ditto` and `renamex_np` on temporary
+directories; elsewhere those paths are checked to report unsupported.
+
 Six probes are opt-in: release headless benchmarks, exact-corpus parser and
 layout diagnostics, scheduling under load, retained-glyph pixel equivalence,
 and failed-upload native-resource recovery.
@@ -114,6 +169,7 @@ Do not run all `--ignored` tests indiscriminately without a working GPU.
 | Text / frames | `renderer::`: named-font resolution, cached/uncached complex shaping fingerprints, run/advance capacity bounds, prepared-key invalidation, pins, upload/submit/free order on every returned outcome |
 | Search / selection / links | `search::`, `selection::`, `links::`, `app::search::`, `app::tab::`: projected columns, eviction/recycling, security gates, no background reveal |
 | Tab reordering | `tabbar::`, `renderer::tabbar_ui::`, `app::tab::`, `app::mouse::`, `app::scheduling::`, `app::session::`: gesture/preview/drop, stable identity, capture/cancellation, overflow/idle, preserved caches/transport/drain cursor, saved order |
+| Updates | `update::`, `app::update::`, `renderer::update_ui::`: version/asset rules, checksum-before-archive order, staged-digest reuse, staging/lock, swap fallback, instance counting, stale job ids, focus-free notice |
 | Panels / settings / logs | `app::settings::`, `app::persistence::`, `logbuf::`, `logging::`, `renderer::log_ui::`: generation ordering, bounded indexing, independent filters, focus and fixed-height rows |
 
 For memory/parser or optimization changes, also run the relevant tests with

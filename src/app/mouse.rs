@@ -37,14 +37,16 @@ pub(crate) enum ChromeHover {
     Popover,
     /// An open settings or log panel, including its popups and tooltips.
     Panel,
+    /// The update notice: its body or one of its buttons (hover-tinted).
+    UpdateNotice(crate::renderer::update_ui::NoticeTarget),
 }
 
 /// Pointer motion (`CursorMoved`/`CursorLeft`) repaints only when chrome under
 /// it can look different: during native strip capture or while egui uses the
 /// pointer (a scrollbar or panel drag), on every move over the find bar or an
-/// open panel, and when the
-/// hovered strip element or scrollbar changes, including one frame on leaving
-/// chrome to clear its hover. Motion over the grid alone paints nothing.
+/// open panel, and when the hovered strip element, scrollbar or update-notice
+/// target changes, including one frame on leaving chrome to clear its hover.
+/// Motion over the grid alone paints nothing.
 pub(crate) fn pointer_repaint(
     previous: ChromeHover,
     current: ChromeHover,
@@ -375,6 +377,9 @@ impl App {
         if self.bg_popover_open && renderer.over_tab_popover(x, y) {
             return ChromeHover::Popover;
         }
+        if let Some(target) = renderer.update_notice_target(x, y) {
+            return ChromeHover::UpdateNotice(target);
+        }
         if renderer.over_tab_bar(y, self.tabs.len()) {
             return match renderer.tab_strip_target(x, y) {
                 crate::tabbar::StripTarget::Empty => ChromeHover::None,
@@ -442,11 +447,32 @@ impl App {
         }
     }
 
+    /// Update-notice element under the last known cursor position, as
+    /// painted by the last egui pass.
+    fn update_notice_under_cursor(&self) -> Option<crate::renderer::update_ui::NoticeTarget> {
+        let (x, y) = self.cursor_pos?;
+        self.renderer.as_ref()?.update_notice_target(x, y)
+    }
+
     pub(crate) fn on_mouse_input(
         &mut self,
         button: MouseButton,
         state: ElementState,
         egui_consumed: bool,
+    ) {
+        let notice = self.update_notice_under_cursor();
+        self.route_mouse_input(button, state, egui_consumed, notice);
+    }
+
+    /// [`Self::on_mouse_input`] with the update-notice hit-test resolved,
+    /// so routing is testable without a renderer. egui has already seen the
+    /// event (its buttons click there); here a press on the notice is chrome.
+    fn route_mouse_input(
+        &mut self,
+        button: MouseButton,
+        state: ElementState,
+        egui_consumed: bool,
+        notice: Option<crate::renderer::update_ui::NoticeTarget>,
     ) {
         self.last_mouse_report = None;
         // A press anywhere but the popover (or its tray toggle) dismisses
@@ -503,6 +529,12 @@ impl App {
         if is_grid_button {
             match state {
                 ElementState::Pressed => {
+                    // The update notice floats over the grid: its press is
+                    // chrome, so it never selects, reports, opens a link
+                    // underneath, or takes focus from egui.
+                    if notice.is_some() {
+                        return;
+                    }
                     if self
                         .cursor_pos
                         .is_some_and(|(x, y)| self.press_on_chrome(x, y))
@@ -565,12 +597,19 @@ impl App {
                     }
                 }
                 ElementState::Released => {
+                    let held = mouse_bit(button).is_some_and(|bit| self.mouse_pressed & bit != 0);
                     if let Some(bit) = mouse_bit(button) {
                         self.mouse_pressed &= !bit;
                     }
                     // The press opened a link: swallow its release.
                     if button == MouseButton::Left && self.link_press {
                         self.link_press = false;
+                        return;
+                    }
+                    // A release over the notice without a terminal press
+                    // (a notice click) is not reported either. A grid drag
+                    // ending there still finishes normally.
+                    if notice.is_some() && !held {
                         return;
                     }
                     if let Some((_, sgr)) = self.mouse_report_state() {
@@ -1091,6 +1130,81 @@ mod tests {
         // even over the grid.
         assert!(pointer_repaint(None, None, true));
         assert!(pointer_repaint(Scrollbar, Scrollbar, true));
+    }
+
+    #[test]
+    fn update_notice_hover_repaints_only_when_its_target_changes() {
+        use crate::renderer::update_ui::NoticeTarget::{self, *};
+        let notice = ChromeHover::UpdateNotice;
+        let all: [NoticeTarget; 4] = [Body, Restart, Later, Open];
+        for target in all {
+            // Steady over one target: no frame.
+            assert!(!pointer_repaint(notice(target), notice(target), false));
+            // Entering from the grid or another chrome element: one frame.
+            assert!(pointer_repaint(ChromeHover::None, notice(target), false));
+            assert!(pointer_repaint(
+                ChromeHover::Scrollbar,
+                notice(target),
+                false
+            ));
+            // Leaving to the grid: one frame to clear the hover, then none.
+            assert!(pointer_repaint(notice(target), ChromeHover::None, false));
+            assert!(!pointer_repaint(
+                ChromeHover::None,
+                ChromeHover::None,
+                false
+            ));
+            for other in all.into_iter().filter(|&t| t != target) {
+                assert!(
+                    pointer_repaint(notice(target), notice(other), false),
+                    "{target:?} -> {other:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn presses_on_the_update_notice_are_chrome() {
+        use crate::renderer::update_ui::NoticeTarget;
+        use winit::event::{ElementState, MouseButton};
+        let (mut app, inputs) = mouse_app();
+        for target in [
+            NoticeTarget::Body,
+            NoticeTarget::Restart,
+            NoticeTarget::Later,
+            NoticeTarget::Open,
+        ] {
+            for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+                app.route_mouse_input(button, ElementState::Pressed, true, Some(target));
+                assert_eq!(
+                    app.mouse_pressed, 0,
+                    "{target:?} {button:?} is no grid press"
+                );
+                assert!(!app.link_press);
+                app.route_mouse_input(button, ElementState::Released, true, Some(target));
+                assert_eq!(app.mouse_pressed, 0);
+            }
+        }
+        assert!(
+            app.tabs
+                .iter()
+                .all(|t| !t.selecting && t.selection.is_none())
+        );
+        assert!(inputs.iter().all(|input| input.try_recv().is_err()));
+
+        // Control: the same press off the notice is a terminal press, and a
+        // drag that ends over the notice still finishes its selection.
+        app.route_mouse_input(MouseButton::Left, ElementState::Pressed, false, None);
+        assert_eq!(app.mouse_pressed, 1);
+        app.tabs[0].selecting = true;
+        app.route_mouse_input(
+            MouseButton::Left,
+            ElementState::Released,
+            false,
+            Some(NoticeTarget::Later),
+        );
+        assert_eq!(app.mouse_pressed, 0);
+        assert!(!app.tabs[0].selecting, "release finalizes the drag");
     }
 
     #[test]

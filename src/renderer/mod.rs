@@ -9,6 +9,7 @@ mod search_ui;
 mod settings_ui;
 mod tabbar_ui;
 pub(crate) mod text;
+pub(crate) mod update_ui;
 
 use background::{BG_SHADER, BgVertex};
 
@@ -181,6 +182,8 @@ pub struct ScrollCtx<'a> {
     /// Per-tab find bar (query/matches state; drawn by `search_ui`).
     pub search: &'a mut crate::app::search::SearchPanel,
     pub input_notice: Option<&'a str>,
+    /// App-wide update notice (drawn by `update_ui`); `None` hides it.
+    pub update_notice: Option<&'a crate::update::state::UpdateNotice>,
 }
 
 /// Highlight inputs for [`Renderer::render`]: text selection + find
@@ -225,6 +228,8 @@ pub struct RenderOutput {
     pub unpark_tab: Option<u64>,
     /// Find-bar buttons clicked this frame (next/prev/close).
     pub search: search_ui::SearchUiOutput,
+    /// Update-notice button clicked this frame (Restart/Later/View release).
+    pub update_action: Option<update_ui::UpdateAction>,
     /// Earliest delay egui wants the next frame after (`Duration::MAX` =
     /// idle); see [`OverlayOutput::egui_repaint_delay`].
     pub egui_repaint_delay: std::time::Duration,
@@ -275,6 +280,9 @@ pub struct Renderer {
     fullscreen: bool,
     /// Painted find-bar rect (logical points), for press hit-testing.
     search_bar_rect: Option<egui::Rect>,
+    /// Painted update-notice rects (logical points) from the last pass;
+    /// empty while the notice is hidden or the pass was skipped.
+    update_notice_rects: update_ui::NoticeRects,
     tabbar_ui: tabbar_ui::TabbarUi,
     last_grid_version: u64,
     /// Cached "terminal forced window IME on" state (see
@@ -499,6 +507,7 @@ impl Renderer {
             // fullscreen resize goes through `resize`.
             fullscreen: false,
             search_bar_rect: None,
+            update_notice_rects: update_ui::NoticeRects::default(),
             tabbar_ui: tabbar_ui::TabbarUi::default(),
             last_grid_version: u64::MAX,
             ime_terminal_enabled: false,
@@ -772,6 +781,18 @@ impl Renderer {
         rect.contains(egui::pos2(x_phys / scale, y_phys / scale))
     }
 
+    /// Update-notice element under physical `(x, y)`, as painted by the
+    /// last egui pass; `None` off the notice or while it is hidden.
+    pub(crate) fn update_notice_target(
+        &self,
+        x_phys: f32,
+        y_phys: f32,
+    ) -> Option<update_ui::NoticeTarget> {
+        let scale = self.scale_factor.max(1.0);
+        self.update_notice_rects
+            .target_at(egui::pos2(x_phys / scale, y_phys / scale))
+    }
+
     /// Tab-strip element under physical `(x, y)`, as painted by the last
     /// egui pass (horizontal strip scrolling included).
     pub fn tab_strip_target(&self, x_phys: f32, y_phys: f32) -> crate::tabbar::StripTarget {
@@ -878,6 +899,7 @@ impl Renderer {
             peek_tab,
             unpark_tab,
             search,
+            update_action,
             paint_jobs,
             screen_descriptor,
             textures_delta,
@@ -899,6 +921,7 @@ impl Renderer {
             peek_tab,
             unpark_tab,
             search,
+            update_action,
             egui_repaint_delay,
         };
 

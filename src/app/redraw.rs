@@ -162,6 +162,8 @@ impl App {
         let active_is_background = self.tabs.get(active).is_some_and(|tab| tab.background);
         let active_foreground = (!active_is_background).then_some(active);
         let peeking = active_is_background.then(|| self.tabs[active].id);
+        // App-wide, not per-tab: the same notice shows over every tab.
+        let update_notice = self.update.notice();
         self.settings.history_usage = self.tabs.get(active).map(|tab| {
             let grid = tab.terminal.grid();
             (
@@ -232,6 +234,7 @@ impl App {
                     log_buffer: &self.log_buffer,
                     search: &mut tab.search,
                     input_notice: tab.input_notice.as_deref(),
+                    update_notice: update_notice.as_ref(),
                 },
             );
             self.output_presentation
@@ -359,6 +362,10 @@ impl App {
         }
         if let Some(i) = output.close_tab.and_then(|id| self.tab_index(id)) {
             self.close_tab(i);
+        }
+        // Update notice buttons: install, dismiss, or open the release page.
+        if let Some(action) = output.update_action {
+            self.on_update_action(action);
         }
         if self.tabs.is_empty() {
             return;
