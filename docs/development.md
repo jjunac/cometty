@@ -137,9 +137,9 @@ and locked dependency inventories. Those preserve
 the commands and limitations documented here and in [performance](performance.md).
 
 [CI](../.github/workflows/ci.yml) runs `cargo test`,
-`cargo clippy -- -D warnings`, and `cargo fmt --check` on Linux and macOS.
-All-target Clippy also checks test-only code locally. Windows/backend branches
-exist, but this CI matrix does not establish Windows build/runtime coverage.
+`cargo clippy -- -D warnings`, and `cargo fmt --check` on macOS.
+All-target Clippy also checks test-only code locally. Linux/Windows/backend
+branches exist, but CI does not establish non-macOS build/runtime coverage.
 `--offline` is optional only when dependencies are already cached.
 
 Ordinary tests need no display, GPU, or external service. Unix lifecycle tests

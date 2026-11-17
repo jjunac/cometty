@@ -30,10 +30,6 @@ env_filter = "2"
 unicode-width = "0.2"
 unicode-segmentation = "1"
 bytemuck = { version = "1", features = ["derive"] }
-# Native OS menu bar (app menu with Settings entry). Default features off:
-# gtk/libxdo would need system libs on Linux, and we only attach the global
-# menu on macOS — other platforms keep the Ctrl+, shortcut.
-muda = { version = "0.19", default-features = false }
 # Config file (TOML) + serde derives; used on every platform (these were
 # nested under the macOS-only section, which broke non-macOS builds).
 serde = { version = "1", features = ["derive"] }
@@ -59,6 +55,11 @@ wgpu = { version = "30", features = ["counters"] }
 # `proc_pidpath`/`proc_pidinfo` on macOS; `/proc` on Linux).
 libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
+# Native OS menu bar (app menu with Settings + Logs entries). Default features
+# off: only macOS attaches the global menu (`init_for_nsapp`); other platforms
+# keep the Ctrl+, / Ctrl+Shift+L shortcuts, and muda without its gtk feature
+# does not compile on Linux.
+muda = { version = "0.19", default-features = false }
 # Runtime Dock icon (`NSApplication::setApplicationIconImage`): winit's
 # `with_window_icon` is ignored on macOS, where icons come from the app
 # bundle. This sets the Dock tile for unbundled runs (`cargo run`).

@@ -6,6 +6,7 @@ mod input;
 mod links;
 mod logbuf;
 mod logging;
+#[cfg(target_os = "macos")]
 mod menu;
 mod perf;
 #[cfg(test)]
@@ -136,6 +137,7 @@ impl ApplicationHandler<UserEvent> for App {
         // installs its default once. Main thread here, as required by muda.
         // Non-fatal: without the menu the Ctrl+, / Cmd+, shortcut still
         // opens settings.
+        #[cfg(target_os = "macos")]
         if self.menu.is_none() {
             match menu::NativeMenu::new() {
                 Ok(native) => {
@@ -275,6 +277,7 @@ impl ApplicationHandler<UserEvent> for App {
             // Esc / x still close). Both accelerators are consumed by the
             // OS menu on macOS, so they don't double-fire with the
             // keyboard toggles.
+            #[cfg(target_os = "macos")]
             UserEvent::MenuEvent(event) => {
                 let Some(menu) = self.menu.as_ref() else {
                     return;
@@ -638,10 +641,13 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_default();
     // Forward native-menu activations into the event loop so the menu works
     // while the loop sleeps waiting for PTY output.
-    let menu_proxy = event_loop.create_proxy();
-    muda::MenuEvent::set_event_handler(Some(move |event| {
-        let _ = menu_proxy.send_event(UserEvent::MenuEvent(event));
-    }));
+    #[cfg(target_os = "macos")]
+    {
+        let menu_proxy = event_loop.create_proxy();
+        muda::MenuEvent::set_event_handler(Some(move |event| {
+            let _ = menu_proxy.send_event(UserEvent::MenuEvent(event));
+        }));
+    }
     let proxy = event_loop.create_proxy();
     let mut app = App::new(
         Some(proxy),

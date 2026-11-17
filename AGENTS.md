@@ -19,7 +19,7 @@ git diff --check
 `make verify` runs that routine; `make help` lists build, benchmark, probe,
 profiling, packaging, and dependency targets.
 
-CI runs tests, Clippy (`-D warnings`), and rustfmt on Linux/macOS. Ordinary tests
+CI runs tests, Clippy (`-D warnings`), and rustfmt on macOS. Ordinary tests
 are headless-safe; Unix PTY lifecycle tests spawn and clean up local children.
 Six ignored probes need explicit opt-in; two require a working GPU. See
 [development](docs/development.md) and [performance](docs/performance.md).

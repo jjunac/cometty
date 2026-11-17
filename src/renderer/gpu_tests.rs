@@ -183,7 +183,11 @@ fn retained_glyphs_match_fresh_preparation_after_atlas_churn() {
             .unwrap();
         let initial = pixels(&device, &queue, &renderer, &atlas, &viewport);
         assert!(
-            initial.chunks_exact(4).any(|p| p[..3] != [0, 0, 0]),
+            initial
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|p| p[..3] != [0, 0, 0]),
             "must actually draw text"
         );
         for _ in 0..3 {

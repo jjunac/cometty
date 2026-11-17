@@ -490,9 +490,15 @@ mod tests {
         std::hint::black_box(spin);
         let after = process_usage().expect("getrusage works on unix");
         assert!(after.cpu >= before.cpu);
+        assert!(after.idle_wakeups >= before.idle_wakeups);
         assert!(after.interrupt_wakeups >= before.interrupt_wakeups);
         assert!(after.voluntary_switches >= before.voluntary_switches);
+        // Virtualized macOS guests (e.g. GitHub Actions runners) do not expose
+        // hardware PMCs, so `ri_instructions` stays 0; when PMCs are available,
+        // the spin loop must retire instructions.
         #[cfg(target_os = "macos")]
-        assert!(after.instructions > before.instructions);
+        if before.instructions > 0 || after.instructions > 0 {
+            assert!(after.instructions > before.instructions);
+        }
     }
 }

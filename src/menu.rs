@@ -1,4 +1,4 @@
-//! Native OS menu bar: app menu with Settings + Logs entries.
+//! Native macOS menu bar: app menu with Settings + Logs entries.
 //!
 //! The panels themselves are egui (see [`crate::renderer::settings_ui`] and
 //! [`crate::renderer::log_ui`]); this module only owns the platform menu
@@ -25,16 +25,9 @@ impl NativeMenu {
     pub fn new() -> muda::Result<Self> {
         let menu = Menu::new();
         let app_submenu = Submenu::new("Cometty", true);
-        #[cfg(target_os = "macos")]
         let settings_accelerator = Accelerator::new(Some(Modifiers::SUPER), Code::Comma);
-        #[cfg(not(target_os = "macos"))]
-        let settings_accelerator = Accelerator::new(Some(Modifiers::CONTROL), Code::Comma);
-        #[cfg(target_os = "macos")]
         let logs_accelerator =
             Accelerator::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyL);
-        #[cfg(not(target_os = "macos"))]
-        let logs_accelerator =
-            Accelerator::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyL);
         let settings_item = MenuItem::with_id(
             "cometty-settings",
             "Settings…",
@@ -69,12 +62,11 @@ impl NativeMenu {
         })
     }
 
-    /// Attach to the platform menu bar. Main thread only; no-op off macOS.
+    /// Attach to the macOS menu bar. Main thread only.
     /// Must run after winit's event-loop startup (e.g. from `resumed`):
     /// winit installs its own default menu first, which would clobber an
     /// earlier install.
     pub fn install(&self) {
-        #[cfg(target_os = "macos")]
         self.menu.init_for_nsapp();
     }
 

@@ -82,7 +82,7 @@ mod tests {
         assert_eq!((w, h), (128, 128));
         assert_eq!(rgba.len(), w as usize * h as usize * 4);
         // Not fully transparent: the logo paints a dark rounded square.
-        assert!(rgba.chunks_exact(4).any(|px| px[3] > 0));
+        assert!(rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0));
     }
 
     #[test]

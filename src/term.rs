@@ -806,17 +806,17 @@ impl vte::Perform for Terminal {
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         if !intermediates.is_empty() {
-            if intermediates == [b'?'] && (action == 'h' || action == 'l') {
+            if intermediates == *b"?" && (action == 'h' || action == 'l') {
                 let set = action == 'h';
                 self.pending_wrap = false;
                 for mode in Self::params_iter(params) {
                     self.set_private_mode(mode, set);
                 }
-            } else if intermediates == [b' '] && action == 'q' {
+            } else if intermediates == *b" " && action == 'q' {
                 // DECSCUSR: `CSI Ps SP q` cursor shape + blink.
                 self.pending_wrap = false;
                 self.set_cursor_style(Self::param_at(params, 0, 0));
-            } else if intermediates == [b'?'] && action == 'n' {
+            } else if intermediates == *b"?" && action == 'n' {
                 // DECXCPR: `CSI ? 6 n` extended cursor position report.
                 self.pending_wrap = false;
                 if Self::params_iter(params).next().unwrap_or(0) == 6 {
@@ -824,21 +824,21 @@ impl vte::Perform for Terminal {
                     let reply = format!("\x1b[?{row};{col}R");
                     self.push_response(reply.as_bytes());
                 }
-            } else if intermediates == [b'$'] && action == 'p' {
+            } else if intermediates == *b"$" && action == 'p' {
                 // DECRQM (ANSI): `CSI Ps $ p`.
                 self.pending_wrap = false;
                 let mode = Self::params_iter(params).next().unwrap_or(0);
                 let val = self.grid.query_ansi_mode(mode);
                 let reply = format!("\x1b[{mode};{val}$y");
                 self.push_response(reply.as_bytes());
-            } else if intermediates == [b'?', b'$'] && action == 'p' {
+            } else if intermediates == *b"?$" && action == 'p' {
                 // DECRQM (private): `CSI ? Ps $ p` stub.
                 self.pending_wrap = false;
                 let mode = Self::params_iter(params).next().unwrap_or(0);
                 let val = self.grid.query_private_mode(mode);
                 let reply = format!("\x1b[?{mode};{val}$y");
                 self.push_response(reply.as_bytes());
-            } else if intermediates == [b'>'] && action == 'c' {
+            } else if intermediates == *b">" && action == 'c' {
                 // Secondary DA: report a minimal xterm-like identity.
                 self.pending_wrap = false;
                 self.push_response(b"\x1b[>0;95;0c");

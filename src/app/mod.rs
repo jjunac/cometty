@@ -41,6 +41,7 @@ use crate::theme::Theme;
 #[derive(Debug)]
 pub enum UserEvent {
     PtyAvailable,
+    #[cfg(target_os = "macos")]
     MenuEvent(muda::MenuEvent),
     /// A record landed in the in-app log ring (only sent while the log
     /// panel is open, see [`crate::logging::set_wake_enabled`]).
@@ -125,6 +126,7 @@ pub struct App {
     pub(crate) logs: LogsPanel,
     /// Ring buffer for the log panel; the global logger also holds a clone.
     pub(crate) log_buffer: Arc<Mutex<LogBuffer>>,
+    #[cfg(target_os = "macos")]
     pub(crate) menu: Option<crate::menu::NativeMenu>,
     /// Version-gated grid snapshot: idle blink frames reuse the last clone
     /// instead of re-cloning `rows x cols` Cells every frame.
@@ -200,6 +202,7 @@ impl App {
             spawned_any: false,
             logs: LogsPanel::default(),
             log_buffer,
+            #[cfg(target_os = "macos")]
             menu: None,
             snapshot_rows: Vec::new(),
             snapshot_version: u64::MAX,
