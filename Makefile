@@ -55,7 +55,7 @@ help: ## Show this target index
 	@printf '\nExamples:\n'
 	@printf '  make test FILTER=grid::history::\n'
 	@printf '  make release RELEASE_DRY_RUN=1\n'
-	@printf '  make release RELEASE_BUMP=minor RELEASE_PUSH=1\n'
+	@printf '  make release RELEASE_VERSION=0.2.0 RELEASE_PUSH=1\n'
 	@printf '  make bench BENCH_OUT=target/perf/run1\n'
 	@printf '  make bench-compare COMPARE_TERMINALS=cometty,ghostty COMPARE_SUITES=throughput,memory COMPARE_RUNS=1\n'
 	@printf '  make bench-idle IDLE_SCENARIOS=blink,steady IDLE_ARGS="--seconds 60"\n'
@@ -116,7 +116,7 @@ probe-uploads: ## Opt-in GPU probe: failed-upload cleanup and recovery
 profile: ## macOS Instruments trace; PROFILE_TEMPLATE=, PROFILE_TIME=, PROFILE_OUT=, PROFILE_ARGS=
 	CARGO_PROFILE_RELEASE_DEBUG=1 COMETTY_PERF=1 bash scripts/profile-macos.sh --template '$(PROFILE_TEMPLATE)' --time-limit $(PROFILE_TIME) --output $(PROFILE_OUT) -- $(PROFILE_ARGS)
 
-release: ## Bump version, verify, commit, tag (RELEASE_BUMP=, RELEASE_VERSION=, RELEASE_PUSH=1)
+release: ## Ask for the version (default: next patch), verify, commit, tag (RELEASE_VERSION=, RELEASE_BUMP=, RELEASE_PUSH=1)
 	bash scripts/release.sh $(RELEASE_FLAGS)
 
 bundle: ## Build macOS .app + zip; BUNDLE_ARCH=, BUNDLE_IDENTITY=, BUNDLE_NOTARY=

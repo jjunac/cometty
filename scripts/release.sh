@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Bump the package version, commit it, and create the matching release tag.
+# Ask for the next package version, commit it, and create the matching release tag.
 #
 # Usage:
 #   ./scripts/release.sh [--bump patch|minor|major] [--version X.Y.Z]
 #                        [--push] [--remote NAME] [--dry-run] [--no-verify]
 #
 # Defaults:
-#   --bump patch     increment the current Cargo.toml version
-#   --version X.Y.Z  set the next version instead of incrementing it
+#   prompt           ask for the next version; Enter accepts the suggestion
+#   --bump patch     suggest this increment of the current Cargo.toml version
+#   --version X.Y.Z  release X.Y.Z without prompting (required when stdin is
+#                    not a terminal)
 #   --remote origin  remote used by --push
 #   no push          print the push commands instead
 #   verify           run `make verify` before committing (Cargo.lock is still
@@ -88,23 +90,28 @@ version_gt() {
     if (( left_patch > right_patch )); then return 0; else return 1; fi
 }
 
-if [[ -n "$VERSION" ]]; then
-    [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version is not X.Y.Z: $VERSION"
-    NEW="$VERSION"
-    version_gt "$NEW" "$CURRENT" || die "new version $NEW must be greater than $CURRENT"
-else
-    IFS=. read -r current_major current_minor current_patch <<<"$CURRENT"
-    current_major=$((10#$current_major))
-    current_minor=$((10#$current_minor))
-    current_patch=$((10#$current_patch))
-    case "$BUMP" in
-        patch) NEW="$current_major.$current_minor.$((current_patch + 1))" ;;
-        minor) NEW="$current_major.$((current_minor + 1)).0" ;;
-        major) NEW="$((current_major + 1)).0.0" ;;
-    esac
-fi
-TAG="v$NEW"
+IFS=. read -r current_major current_minor current_patch <<<"$CURRENT"
+current_major=$((10#$current_major))
+current_minor=$((10#$current_minor))
+current_patch=$((10#$current_patch))
+case "$BUMP" in
+    patch) SUGGESTED="$current_major.$current_minor.$((current_patch + 1))" ;;
+    minor) SUGGESTED="$current_major.$((current_minor + 1)).0" ;;
+    major) SUGGESTED="$((current_major + 1)).0.0" ;;
+esac
 
+# Print why $1 cannot be the next release; print nothing when it can.
+version_problem() {
+    if [[ ! "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        printf 'version is not X.Y.Z: %s' "$1"
+    elif ! version_gt "$1" "$CURRENT"; then
+        printf 'new version %s must be greater than %s' "$1" "$CURRENT"
+    elif git rev-parse -q --verify "refs/tags/v$1" >/dev/null; then
+        printf 'tag already exists: v%s' "$1"
+    fi
+}
+
+# Check the tree before asking, so a refused release never prompts first.
 BRANCH="$(git symbolic-ref --quiet --short HEAD || true)"
 [[ -n "$BRANCH" ]] || die "HEAD is detached; check out a branch before releasing"
 
@@ -117,9 +124,26 @@ if [[ -n "$DIRTY" ]]; then
     fi
 fi
 
-if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-    die "tag already exists: $TAG"
+if [[ -n "$VERSION" ]]; then
+    NEW="$VERSION"
+    PROBLEM="$(version_problem "$NEW")"
+    [[ -z "$PROBLEM" ]] || die "$PROBLEM"
+else
+    [[ -t 0 ]] || die "no terminal to ask for the version; pass --version X.Y.Z (make: RELEASE_VERSION=X.Y.Z)"
+    # An empty answer takes the suggestion; an invalid one asks again.
+    while :; do
+        read -r -e -p "Next version (current $CURRENT) [$SUGGESTED]: " ANSWER || {
+            printf '\n' >&2
+            die "aborted: no version entered"
+        }
+        NEW="${ANSWER:-$SUGGESTED}"
+        PROBLEM="$(version_problem "$NEW")"
+        [[ -n "$PROBLEM" ]] || break
+        printf 'error: %s\n' "$PROBLEM" >&2
+    done
 fi
+TAG="v$NEW"
+
 if (( PUSH )); then
     if git ls-remote --exit-code --tags "$REMOTE" "refs/tags/$TAG" >/dev/null 2>&1; then
         die "remote $REMOTE already has tag $TAG"

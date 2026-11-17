@@ -32,14 +32,17 @@ For automated headless verification prefer the commands below.
 
 `make release` turns the current tree into a release:
 
-- bumps the `Cargo.toml` version (`RELEASE_BUMP=patch|minor|major`, default
-  patch, or set `RELEASE_VERSION=X.Y.Z`),
-- refreshes `Cargo.lock`,
+- asks for the next version, suggesting a patch bump of `Cargo.toml` that Enter
+  accepts (`RELEASE_BUMP=minor|major` changes the suggestion;
+  `RELEASE_VERSION=X.Y.Z` skips the prompt and is required without a terminal),
+- writes it to `Cargo.toml` and refreshes `Cargo.lock`,
 - runs `make verify`,
 - commits `chore: release vX.Y.Z`,
 - creates the annotated `vX.Y.Z` tag.
 
-It refuses tracked worktree changes, a detached HEAD, or an existing tag.
+It refuses tracked worktree changes, a detached HEAD, an existing tag, or a
+version that is not X.Y.Z above the current one; at the prompt, a refused
+version asks again.
 `RELEASE_DRY_RUN=1` prints the plan without touching the tree;
 `RELEASE_SKIP_VERIFY=1` skips the gate. Nothing is pushed unless
 `RELEASE_PUSH=1` (remote `RELEASE_REMOTE`, default `origin`); otherwise the
