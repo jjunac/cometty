@@ -250,6 +250,8 @@ pub const LINK_UNDERLINES: [&str; 3] = ["always", "hover", "never"];
 pub const SESSION_RESTORE_MODES: [&str; 3] = ["scrollback", "tabs", "off"];
 /// Values offered for `[clipboard] osc52` (least to most permissive).
 pub const OSC52_MODES: [&str; 3] = ["off", "write", "read-write"];
+/// Values offered for `[tabbar] attention` (most to least visible).
+pub const ATTENTION_MODES: [&str; 3] = ["pulse", "static", "off"];
 /// Values offered for `[log] level` (least to most verbose). Parsing is
 /// `log`'s own, so these names are just the picker's list.
 pub const LOG_LEVELS: [&str; 6] = ["off", "error", "warn", "info", "debug", "trace"];

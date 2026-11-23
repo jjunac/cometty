@@ -16,24 +16,74 @@ character/line edits, scroll margins, origin/insert/auto-wrap modes, alternate
 screens, application cursor/keypad modes, cursor shape/blink, mouse/focus
 reporting, synchronized output, SGR attributes/indexed/truecolor, and device/status
 queries. `DECRQM` reports supported modes and unknowns; it is not a complete
-xterm implementation. The bell is ignored; unhandled controls do not become
-terminal text. Keep exact supported sequences and reply behavior in parser tests.
+xterm implementation. The bell (BEL in `execute`, never an OSC's BEL
+terminator) makes no sound; it raises the attention flag drained by
+`take_attention`. Unhandled controls do not become terminal text. Keep exact
+supported sequences and reply behavior in parser tests.
 
 OSC metadata is borrowed and routed once, rather than rejoining a payload for
 every handler:
 
 | OSC | Effect |
 | --- | --- |
-| 0 / 1 / 2 | Cleaned, character-limited title |
+| 0 / 1 / 2 | Cleaned, character-limited title; bumps `title_version` |
 | 7 | Bounded percent-decoded `file://host/path` cwd label; never opens a local file |
 | 8 | Start/end an interned hyperlink; cells carry an ID |
+| 9 | iTerm2 notification raises attention; ConEmu numbered subcommands (`9;4` progress, `9;9` cwd, …) are ignored |
 | 52 | Decode a bounded clipboard request; the app applies access policy |
+| 777 | `notify` raises attention; other subcommands are ignored |
+| 7501 | Program Status record, or the fixed reply to `7501;?` (below) |
 | Other | Bounded debug summary marked unhandled; no application effect |
 
 Summaries escape controls and preview only a bounded prefix. OSC 52 contents are
 redacted. Title/cwd limits, URI sizes, and clipboard encoded/decoded lengths are
 checked while streaming or **before** large copies; limiting only the final
 stored value is insufficient.
+
+## Program status (OSC 7501)
+
+[`progstatus.rs`](../src/progstatus.rs) implements revision 0.4 of the
+[Program Status Protocol](https://control-codes.page/proposals/osc-7501/).
+`parse` validates a whole report before `ProgramStatus::apply` touches a
+record: payloads over 4087 bytes (4096 with framing) are dropped by length
+before any copy; keys are lowercase ≤16 bytes and values use the protocol's
+alphabet, otherwise that pair is skipped; unknown keys are ignored and the last
+duplicate wins. A missing or unknown `state`, an `id` outside 8 segments of
+1–32 `[A-Za-z0-9_.+-]` bytes (128 total), or a `title`/`msg` that breaks its
+encoded/decoded cap (256/192, 2732/2048), is not base64 (padding optional),
+is not UTF-8, or decodes to any control character discards the report.
+
+- **Records** are terminal-owned (alternate-screen switches keep them), at most
+  256 with least-recently-updated eviction. Only the id and state are kept:
+  `kind`, `progress`, `app`, `title` and `msg` are validated but not retained,
+  since no surface shows them. `clear` without an id removes everything; RIS
+  and `replay` clear all records too.
+- **Inferred results:** `clear` with an id removes that id and its `/`
+  subtree, except that an addressed child record that was `working` becomes
+  `done` and counts as an attention transition. opencode (and OpenTUI apps
+  modelled on it) clears a session's record when it stops instead of
+  reporting `done`, so this is the only way to see a finished session.
+  Clearing a `blocked` record (an answered prompt) just removes it, and
+  clearing the inferred `done` again removes it. Closing or cancelling a
+  working session is indistinguishable and also shows as finished.
+- **Rejections** are logged at debug with a reason naming the rule and key
+  (`OSC 7501 report ignored: \`msg\` not base64`), never report text.
+- **Query:** `7501;?` queues `ESC ] 7501 ; ? ST` (default states and kinds)
+  through the ordinary response queue; nothing from a report is ever echoed.
+- **Attention:** a record *entering* `blocked`, `done` or `error` raises the
+  same flag as BEL; repeating a state does not.
+- **Lifetime:** when `Tab::refresh_title` sees the foreground job end,
+  `end_job` drops `working`, `blocked` and `idle` records; `done`/`error`
+  stay until the tab is seen (`acknowledge_status`). OSC 133 prompt marks are
+  not interpreted, so a new prompt alone does not expire records.
+- **Summary:** `ProgramStatus::summary` counts child records when any exist
+  (the root is then the program's own summary of them) and otherwise the root,
+  except a lone `idle` root: that is "nothing pending" (opencode at rest), not
+  a task, and would otherwise badge every opencode tab permanently.
+
+Parser tests include OpenTUI's own byte-exact encoder fixtures and opencode's
+per-session record shapes; a drain test replays opencode's working → blocked →
+working → clear lifecycle.
 
 ## Decision: bound OSC before accumulation
 

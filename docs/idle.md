@@ -133,6 +133,19 @@ change: blink frames rebuild no cells (`bg_rebuild` = 0) and upload the cursor's
 6 vertices, saving ~0.4 M instructions each (−17%). Tick frames change content
 every frame and stay within run-to-run noise (±3%).
 
+### Attention glow (implemented, not measured)
+
+The unseen-tab glow ([interaction](interaction.md#program-status-badges-and-attention))
+is a bounded frame source. A pulse requests at most one 16 ms frame through
+egui's repaint delay for `GLOW_PULSE` (1.5 s), then returns `Duration::MAX`; a
+settled or `static` glow is painted only by frames something else requested.
+The delay goes through `egui_repaint_at`, so suspended visuals run no pulse
+frames. A tab that keeps ringing the bell re-pulses at most once per
+`GLOW_REPULSE` (10 s). Attention and badge changes ride the existing post-drain
+chrome check; nothing is polled. Headless widget tests check that no repaint is
+scheduled once settled. `make bench-idle` has not been run with a glowing tab,
+so the per-pulse cost is not measured.
+
 ## Investigation baseline (before fixes)
 
 Everything from here to the [plan](#plan) describes the code at `c0b0f78` and

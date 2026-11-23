@@ -83,10 +83,12 @@ restore = "tabs"
 | `tabbar.min_tab_width` | `100.0` | Minimum tab width before horizontal scrolling |
 | `tabbar.max_label_chars` | `32` | Label length including an ellipsis |
 | `tabbar.title_format` | `"$command \| $cwd"` | Tab-label template |
+| `tabbar.live_title` | `true` | A running program's own title replaces the template |
+| `tabbar.attention` | `"pulse"` | Unseen-tab highlight: `pulse`, `static`, or `off` (unknown values fall back to `pulse`) |
 | `tabbar.corner_radius_tab`, `tabbar.corner_radius_bar` | `8`, `10` | Tab/container corner radii |
 | `tabbar.inset_x` | `38.0` | Empty chrome before the tabs (after macOS traffic lights) and after `+`, for window dragging |
 | `tabbar.inset_y` | `5.0` | Vertical strip inset |
-| `tabbar.close_reserve`, `tabbar.shortcut_reserve` | `24.0`, `34.0` | Space for close and shortcut labels |
+| `tabbar.close_reserve`, `tabbar.shortcut_reserve` | `20.0`, `34.0` | Space for close and shortcut labels |
 | `tabbar.gap` | `4.0` | Tab spacing |
 | `tabbar.plus_diameter`, `tabbar.plus_gap` | `28.0`, `8.0` | New-tab button size and spacing |
 

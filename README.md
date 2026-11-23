@@ -9,7 +9,13 @@ and Unicode support.
 
 ## Features
 
-- Multiple tabs with command and working-directory labels.
+- Multiple tabs with command and working-directory labels. A running program
+  that sets its own title (for example opencode) names its tab while it runs.
+- Program status badges: programs that report their state (such as opencode)
+  show per-tab counts next to the tab title for sessions waiting on you,
+  working, finished, failed, or idle. A session counts as finished until you
+  look at its tab (closing a busy session counts too). A tab you aren't looking at glows when its program needs you, it
+  rings the bell, or it sends a notification.
 - Search across your screen and scrollback, with highlighted matches and
   wrap-around navigation.
 - Three built-in themes: **tokyo-night**, **vscode**, and **tomorrow-night**.
@@ -130,6 +136,8 @@ scrollback_lines = 10000
 
 [tabbar]
 title_format = "$command | $cwd"
+live_title = true      # a running program's own title replaces the format
+attention = "pulse"    # unseen-tab glow: "pulse", "static", or "off"
 ```
 
 Settings changes save automatically. File edits take effect on the next launch;
@@ -220,7 +228,10 @@ manually from the releases page.
 
 ## Current limitations
 
-- No audible/visual bell, keyboard font zoom, or running-job close confirmation.
+- The bell makes no sound and doesn't flash; it only makes an unseen tab glow.
+  No keyboard font zoom or running-job close confirmation.
+- Program status messages aren't shown, only counts. Desktop notifications and
+  progress bars (`OSC 9;4`) aren't supported.
 - Search does not span displayed row boundaries; wrapped plain-text links are
   detected separately on each row.
 - Font choice currently uses generic families rather than individual font names.

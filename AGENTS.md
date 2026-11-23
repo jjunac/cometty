@@ -34,7 +34,7 @@ tests or headless timings with native-memory, GUI-latency, or energy verificatio
 | Area | Entry points | Design reference |
 | --- | --- | --- |
 | Event loop / settings / logging / session | `src/main.rs`, `src/app/{mod,scheduling,persistence,session}.rs`, `src/{logbuf,logging,session}.rs` | [Architecture](docs/architecture.md) |
-| Parser / grid / history | `src/term.rs`, `src/term/parser.rs`, `src/grid/` | [Terminal model](docs/terminal.md) |
+| Parser / grid / history | `src/term.rs`, `src/term/parser.rs`, `src/grid/`, `src/progstatus.rs` (OSC 7501) | [Terminal model](docs/terminal.md) |
 | Transport / shutdown | `src/pty.rs`, `src/pty/`, `src/app/pty_io.rs` | [PTY lifecycle](docs/pty.md) |
 | Text / GPU / chrome | `src/renderer/`, `src/theme.rs`, `src/scrollbar.rs`, `src/tabbar.rs` | [Rendering](docs/rendering.md) |
 | Release / macOS bundle | `scripts/{release,bundle-macos}.sh`, `packaging/macos/`, `.github/workflows/release.yml` | [Development](docs/development.md#releasing) |
@@ -53,6 +53,10 @@ tests or headless timings with native-memory, GUI-latency, or energy verificatio
   no prefix. Any ESC ends OSC and starts the next escape; `0x9c` is data there.
   Release exceptional >64 KiB buffers only at safe boundaries. Keep handler
   preflights, final-UTF-8 clipboard cap, redaction, and split/allocation regressions.
+  OSC 7501 checks length before copying and validates a whole report before any
+  record changes; its `?` reply never echoes report data; RIS/replay clear records.
+- **Attention:** only unseen tabs (`index != active || !focused`) glow; every
+  view path goes through `App::tab_seen`. A settled glow schedules no frames.
 - **History:** never eagerly rewrite sealed payloads on resize or decode all history
   for a scan. `RowView` is the shared projection; shrink is destructive, padding
   keeps growth-time colors. Compaction preserves IDs; recycling changes them.

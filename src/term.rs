@@ -41,7 +41,16 @@ pub struct Terminal {
     // report (a running job's own directory) from one left behind by a
     // finished job.
     cwd_version: u64,
+    // Monotonic count of OSC 0/1/2 reports (and resets), so the tab label
+    // can tell a title the running job set from one left behind.
+    title_version: u64,
     max_title_chars: usize,
+    // OSC 7501 Program Status records. Terminal-owned (not per screen);
+    // RIS and replay clear them, the app drops job-scoped ones on exit.
+    status: crate::progstatus::ProgramStatus,
+    // Set by BEL, OSC 9 / 777 notifications and OSC 7501 attention
+    // transitions; drained by `take_attention` after each feed.
+    pending_attention: bool,
     // Last graphic character emitted via `print`, for `REP` (`CSI n b`).
     // Control sequences never clear it; only a new graphic updates it.
     last_graphic: Option<char>,
@@ -57,7 +66,7 @@ pub struct Terminal {
 /// everything else is logged and ignored.
 const TITLE_OSC: [&[u8]; 3] = [b"0", b"1", b"2"];
 /// Every OSC number cometty acts on; the rest are marked unhandled in logs.
-const HANDLED_OSC: [&[u8]; 6] = [b"0", b"1", b"2", b"7", b"8", b"52"];
+const HANDLED_OSC: [&[u8]; 9] = [b"0", b"1", b"2", b"7", b"8", b"9", b"52", b"777", b"7501"];
 /// Payload characters shown in an OSC debug line before truncating: OSC 52
 /// base64 blobs and OSC 8 URLs can be kilobytes long.
 const OSC_SUMMARY_CHARS: usize = 120;
@@ -348,6 +357,7 @@ fn osc_name(num: &[u8]) -> Option<&'static str> {
         b"104" => "reset colors",
         b"133" => "prompt marks",
         b"1337" => "iTerm2",
+        b"7501" => "program status",
         _ => return None,
     })
 }
@@ -418,7 +428,10 @@ impl Terminal {
             title: String::new(),
             cwd: None,
             cwd_version: 0,
+            title_version: 0,
             max_title_chars: config.terminal.max_title_chars.max(1),
+            status: crate::progstatus::ProgramStatus::default(),
+            pending_attention: false,
             last_graphic: None,
             pending_response: Vec::new(),
             pending_clipboard: Vec::new(),
@@ -440,6 +453,34 @@ impl Terminal {
     /// Monotonic count of `OSC 7` reports; see [`Self::cwd`].
     pub fn cwd_version(&self) -> u64 {
         self.cwd_version
+    }
+
+    /// Monotonic count of `OSC 0/1/2` reports and RIS resets; see
+    /// `app::tab::title_is_live`.
+    pub fn title_version(&self) -> u64 {
+        self.title_version
+    }
+
+    /// `OSC 7501` records reported by programs in this terminal.
+    pub fn status(&self) -> &crate::progstatus::ProgramStatus {
+        &self.status
+    }
+
+    /// The foreground job exited: drop its job-scoped status records.
+    /// Returns whether any record went away.
+    pub fn end_job(&mut self) -> bool {
+        self.status.end_job()
+    }
+
+    /// The user has seen this terminal: `done`/`error` results are read.
+    pub fn acknowledge_status(&mut self) -> bool {
+        self.status.acknowledge()
+    }
+
+    /// Take the "something wants attention" flag raised since the last call
+    /// (BEL, OSC 9 / 777 notification, OSC 7501 attention transition).
+    pub fn take_attention(&mut self) -> bool {
+        std::mem::take(&mut self.pending_attention)
     }
 
     #[allow(dead_code)]
@@ -528,6 +569,7 @@ impl Terminal {
                     self.feed(&chunk[..n]);
                     self.pending_response.clear();
                     self.pending_clipboard.clear();
+                    self.pending_attention = false;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(e) => break Err(e),
@@ -536,6 +578,9 @@ impl Terminal {
         self.feed(b"\x1b\\\x1b[0m\x1b]8;;\x1b\\");
         self.pending_response = Vec::new();
         self.pending_clipboard = Vec::new();
+        // Restored history is not a live program: no status, no alerts.
+        self.pending_attention = false;
+        self.status.clear();
         result
     }
 
@@ -799,7 +844,9 @@ impl vte::Perform for Terminal {
             b'\r' => self.grid.carriage_return(),
             0x08 => self.grid.backspace(),
             b'\t' => self.grid.tab(),
-            0x07 => {} // bell: ignore for v1
+            // Bell: no sound; an unseen tab glows (see `take_attention`).
+            // A BEL that terminates an OSC never reaches `execute`.
+            0x07 => self.pending_attention = true,
             _ => {}
         }
     }
@@ -1024,7 +1071,9 @@ impl vte::Perform for Terminal {
                     self.grid.clear_all();
                     self.grid.set_cursor(0, 0);
                     self.title.clear();
+                    self.title_version += 1;
                     self.cwd = None;
+                    self.status.clear();
                     self.last_graphic = None;
                 }
                 _ => {}
@@ -1057,7 +1106,8 @@ impl vte::Perform for Terminal {
         };
         match osc.number {
             num if TITLE_OSC.contains(&num) => {
-                self.title = title_payload(payload, self.max_title_chars)
+                self.title = title_payload(payload, self.max_title_chars);
+                self.title_version += 1;
             }
             b"7" => {
                 if let Some(cwd) = cwd_payload(payload, self.max_title_chars) {
@@ -1076,7 +1126,47 @@ impl vte::Perform for Terminal {
                     self.pending_clipboard.push(op);
                 }
             }
+            b"9" if is_notification_9(payload) => self.pending_attention = true,
+            b"777" if payload.split_once().map_or(payload.first, |(op, _)| op) == b"notify" => {
+                self.pending_attention = true
+            }
+            b"7501" => self.program_status(payload),
             _ => {}
+        }
+    }
+}
+
+/// iTerm2's `OSC 9 ; message` notification, as opposed to ConEmu's
+/// numbered `OSC 9 ; N ; …` subcommands (`9;4` progress, `9;9` cwd, …),
+/// which share the number.
+fn is_notification_9(payload: OscPayload<'_>) -> bool {
+    let first = payload
+        .split_once()
+        .map_or(payload.first, |(first, _)| first);
+    let subcommand = !first.is_empty() && first.iter().all(u8::is_ascii_digit);
+    payload.len() > 0 && !subcommand
+}
+
+impl Terminal {
+    /// `OSC 7501`: validate one Program Status report and apply it, or
+    /// answer the support query. Oversized reports are dropped before any
+    /// byte is copied.
+    fn program_status(&mut self, payload: OscPayload<'_>) {
+        use crate::progstatus::{self, Message};
+        if payload.len() > progstatus::MAX_PAYLOAD_BYTES {
+            log::debug!("OSC 7501 report ignored: {} bytes", payload.len());
+            return;
+        }
+        let bytes: Vec<u8> = payload.bytes().collect();
+        match progstatus::parse(&bytes) {
+            Ok(Message::Query) => self.push_response(progstatus::QUERY_REPLY),
+            Ok(Message::Report(report)) => {
+                if self.status.apply(report) {
+                    self.pending_attention = true;
+                }
+            }
+            // The reason names a rule and key, never report text.
+            Err(reject) => log::debug!("OSC 7501 report ignored: {reject}"),
         }
     }
 }
@@ -1396,6 +1486,102 @@ mod tests {
 
     fn test_terminal(cols: usize, rows: usize) -> Terminal {
         Terminal::new(cols, rows, Theme::default())
+    }
+
+    #[test]
+    fn program_status_reports_are_stored_and_split_safe() {
+        use crate::progstatus::State;
+        let mut t = test_terminal(10, 3);
+        let report = b"\x1b]7501;state=blocked:kind=permission:id=ses_1\x1b\\";
+        // Byte-at-a-time splits must parse exactly like one chunk.
+        for byte in report {
+            t.feed(std::slice::from_ref(byte));
+        }
+        assert_eq!(t.status().state("ses_1"), Some(State::Blocked));
+        assert!(t.take_attention(), "entering blocked wants attention");
+        assert!(!t.take_attention(), "taken once");
+        feed_str(&mut t, "\x1b]7501;state=blocked:id=ses_1\x07");
+        assert!(!t.take_attention(), "same state is not a transition");
+        // Invalid reports leave the record untouched.
+        feed_str(&mut t, "\x1b]7501;state=done:id=ses_1:msg=a\x1b\\");
+        assert_eq!(t.status().state("ses_1"), Some(State::Blocked));
+        assert!(t.take_response().is_empty());
+    }
+
+    #[test]
+    fn program_status_query_reply_echoes_no_report_data() {
+        let mut t = test_terminal(10, 3);
+        feed_str(
+            &mut t,
+            "\x1b]7501;state=idle:app=secret\x1b\\\x1b]7501;?\x1b\\",
+        );
+        assert_eq!(t.take_response(), crate::progstatus::QUERY_REPLY);
+    }
+
+    #[test]
+    fn oversized_program_status_is_dropped_without_copying() {
+        let mut payload = b"state=idle:x=".to_vec();
+        payload.resize(1 << 20, b'a');
+        let params: [&[u8]; 2] = [b"7501", &payload];
+        let mut t = test_terminal(10, 3);
+        let (calls, _, bytes) = crate::perf_bench::allocation_counts(|| {
+            vte::Perform::osc_dispatch(&mut t, &params, false);
+        });
+        assert_eq!(t.status().len(), 0);
+        assert!(calls < 20 && bytes < 4096, "must not copy a megabyte");
+    }
+
+    #[test]
+    fn job_end_ris_and_replay_clear_status_records() {
+        use crate::progstatus::State;
+        let mut t = test_terminal(10, 3);
+        feed_str(
+            &mut t,
+            "\x1b]7501;state=working:id=a\x1b\\\x1b]7501;state=done:id=b\x1b\\",
+        );
+        assert!(t.end_job());
+        assert_eq!(t.status().state("a"), None);
+        assert_eq!(t.status().state("b"), Some(State::Done));
+        assert!(t.acknowledge_status());
+        feed_str(&mut t, "\x1b]7501;state=idle\x1b\\\x1bc");
+        assert_eq!(t.status().len(), 0, "RIS removes every record");
+
+        let mut restored = test_terminal(10, 3);
+        let dump = b"\x1b]7501;state=error\x1b\\\x07\x1b]7501;?\x1b\\".to_vec();
+        restored.replay(dump.as_slice()).unwrap();
+        assert_eq!(restored.status().len(), 0);
+        assert!(!restored.take_attention());
+        assert!(restored.take_response().is_empty());
+    }
+
+    #[test]
+    fn bell_and_notifications_raise_attention_but_progress_does_not() {
+        let mut t = test_terminal(10, 3);
+        feed_str(&mut t, "a\x07b");
+        assert!(t.take_attention(), "BEL");
+        feed_str(&mut t, "\x1b]2;title\x07");
+        assert!(!t.take_attention(), "a BEL-terminated OSC is not a bell");
+        feed_str(&mut t, "\x1b]9;4;1;50\x1b\\\x1b]9;9;/tmp\x1b\\");
+        assert!(!t.take_attention(), "ConEmu progress / cwd");
+        feed_str(&mut t, "\x1b]9;Build finished\x1b\\");
+        assert!(t.take_attention(), "iTerm2 OSC 9");
+        feed_str(&mut t, "\x1b]777;preexec\x1b\\");
+        assert!(!t.take_attention());
+        feed_str(&mut t, "\x1b]777;notify;Title;Body\x1b\\");
+        assert!(t.take_attention(), "OSC 777 notify");
+    }
+
+    #[test]
+    fn title_version_counts_reports_and_resets() {
+        let mut t = test_terminal(10, 3);
+        assert_eq!(t.title_version(), 0);
+        feed_str(&mut t, "\x1b]2;OC | fix\x1b\\");
+        assert_eq!(t.title_version(), 1);
+        feed_str(&mut t, "\x1b]0;same\x07\x1b]2;same\x07");
+        assert_eq!(t.title_version(), 3);
+        feed_str(&mut t, "\x1bc");
+        assert_eq!(t.title_version(), 4);
+        assert_eq!(t.title(), "");
     }
 
     /// Reference dispatcher retains the old append-aware grid write after

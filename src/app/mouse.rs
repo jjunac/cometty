@@ -425,6 +425,8 @@ impl App {
         let now = Instant::now();
         if focused {
             self.last_input = now;
+            // The displayed tab is seen again; the redraw below shows it.
+            self.tab_seen(self.active);
         }
         super::scheduling::blink_restart(now, &mut self.last_blink, &mut self.cursor_visible);
         if !focused {

@@ -15,6 +15,7 @@ from a single host.
 | Live screen / saved main | Hard 1,048,576 logical cells **per buffer**, shared geometry clamp; at most one saved main screen | Vector high-water capacities, unbounded cluster tails |
 | Raw OSC, per terminal | 2 MiB wire limit before accumulation; >64 KiB completion/cancellation releases raw storage | Handler requests, logs, clipboard API/native copies |
 | OSC 52 | 1 MiB decoded data and final UTF-8 text | Original clipboard read, encoded reply/transient copies |
+| OSC 7501, per terminal | 256 records of id (≤128 bytes) + state; a report is copied only after its ≤4087-byte length check | Transient validation decode of `msg`/`title` (≤2 KiB) |
 | OSC 8 table | 1,024 URIs, 4,096 bytes per URI, 256 KiB unique URI bytes | Index/vector own two URI copies plus container overhead; IDs are not reclaimed on row eviction |
 | Output, per PTY | 128 × 8 KiB chunks plus one blocked reader send | Current UI chunk, kernel buffering, parsed state accumulated across chunks |
 | Input, per PTY | 16 MiB + 64 KiB reserve; capacity/message charge includes in-flight writes; message count also bounded | Queue container overhead and source clipboard copies |

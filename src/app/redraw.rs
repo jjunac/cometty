@@ -276,9 +276,6 @@ impl App {
             if let Some(t) = tab.last_output.take() {
                 let elapsed = t.elapsed();
                 crate::perf::tab_duration(tab.id, crate::perf::TabMetric::OutputPresent, elapsed);
-                if elapsed <= Duration::from_secs(2) {
-                    log::debug!("output-to-present tab={} {elapsed:?}", tab.id);
-                }
             }
         }
 

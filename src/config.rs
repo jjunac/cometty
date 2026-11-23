@@ -119,7 +119,7 @@ fn d_inset_y() -> f32 {
     5.0
 }
 fn d_close_reserve() -> f32 {
-    24.0
+    20.0
 }
 fn d_shortcut_reserve() -> f32 {
     34.0
@@ -138,6 +138,12 @@ fn d_max_label_chars() -> usize {
 }
 fn d_title_format() -> String {
     "$command | $cwd".to_string()
+}
+fn d_live_title() -> bool {
+    true
+}
+fn d_attention() -> String {
+    "pulse".to_string()
 }
 fn d_double_click_ms() -> u64 {
     400
@@ -405,6 +411,17 @@ pub struct TabbarConfig {
     /// is empty the label falls back to `Tab N`.
     #[serde(default = "d_title_format")]
     pub title_format: String,
+    /// While a job owns the terminal and has set its own OSC 0/2 title,
+    /// show that title instead of `title_format`. At the prompt (or once
+    /// the job exits) the template applies again.
+    #[serde(default = "d_live_title")]
+    pub live_title: bool,
+    /// Highlight for tabs that rang the bell, sent a notification, or whose
+    /// program started waiting on the user / finished while unseen:
+    /// `"pulse"` (a short animation, then a steady glow), `"static"`, or
+    /// `"off"`.
+    #[serde(default = "d_attention")]
+    pub attention: String,
 }
 
 impl Default for TabbarConfig {
@@ -423,6 +440,8 @@ impl Default for TabbarConfig {
             plus_gap: d_plus_gap(),
             max_label_chars: d_max_label_chars(),
             title_format: d_title_format(),
+            live_title: d_live_title(),
+            attention: d_attention(),
         }
     }
 }
@@ -851,6 +870,10 @@ impl Config {
             Err(_) => d_log_level(),
         };
         self.tabbar.title_format = self.tabbar.title_format.trim().to_string();
+        self.tabbar.attention = match self.tabbar.attention.trim().to_ascii_lowercase().as_str() {
+            known @ ("pulse" | "static" | "off") => known.to_string(),
+            _ => d_attention(),
+        };
         // Enum-ish strings: unknown values fall back to the compiled
         // defaults so the picker and the runtime agree.
         self.links.open_modifier = match self
@@ -988,6 +1011,16 @@ mod tests {
         assert_eq!(Config::default().tabbar.title_format, "$command | $cwd");
         let c: Config = toml::from_str("[tabbar]\ntitle_format=\"\"\n").unwrap();
         assert_eq!(c.sanitized().tabbar.title_format, "");
+        let d = Config::default();
+        assert!(d.tabbar.live_title);
+        assert_eq!(d.tabbar.attention, "pulse");
+        let c: Config =
+            toml::from_str("[tabbar]\nlive_title=false\nattention=\" Static \"\n").unwrap();
+        let c = c.sanitized();
+        assert!(!c.tabbar.live_title);
+        assert_eq!(c.tabbar.attention, "static");
+        let c: Config = toml::from_str("[tabbar]\nattention=\"blink\"\n").unwrap();
+        assert_eq!(c.sanitized().tabbar.attention, "pulse");
     }
 
     #[test]

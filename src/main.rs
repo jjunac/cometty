@@ -13,6 +13,7 @@ mod perf;
 mod perf_bench;
 mod platform;
 mod procinfo;
+mod progstatus;
 mod pty;
 mod renderer;
 mod scrollbar;

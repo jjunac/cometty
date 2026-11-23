@@ -17,15 +17,24 @@
 //! When parked tabs exist, a count pill after `+` reserves its width from
 //! the container and opens the background-tab popover.
 
+use std::time::{Duration, Instant};
+
 use crate::config::TabbarConfig;
+use crate::progstatus::StatusSummary;
 
 /// A painted tab's identity is independent of its position (and label).
+#[derive(Default)]
 pub struct TabLabel {
     pub id: u64,
     pub title: String,
+    /// `OSC 7501` record counts for the status badge.
+    pub status: StatusSummary,
+    /// Start of the attention glow while the tab is unseen.
+    pub glow: Option<Instant>,
 }
 
 /// One row of the background-tab tray popover.
+#[derive(Default)]
 pub struct BackgroundTabLabel {
     pub id: u64,
     pub title: String,
@@ -33,6 +42,130 @@ pub struct BackgroundTabLabel {
     pub running: bool,
     /// The job finished while the tab was backgrounded and unseen.
     pub attention: bool,
+    /// `OSC 7501` record counts for the status badge.
+    pub status: StatusSummary,
+    /// Start of the attention glow while the tab is unseen.
+    pub glow: Option<Instant>,
+}
+
+/// One status-badge item: a coloured dot and a record count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BadgeKind {
+    Blocked,
+    Working,
+    Error,
+    Done,
+    Idle,
+}
+
+/// Non-empty badge items in display (and keep-on-narrow-tabs) order:
+/// waiting on the user first, idle last.
+pub fn badges(status: &StatusSummary) -> impl Iterator<Item = (BadgeKind, usize)> {
+    [
+        (BadgeKind::Blocked, status.blocked),
+        (BadgeKind::Working, status.working),
+        (BadgeKind::Error, status.error),
+        (BadgeKind::Done, status.done),
+        (BadgeKind::Idle, status.idle),
+    ]
+    .into_iter()
+    .filter(|(_, count)| *count > 0)
+}
+
+/// Width (and height) of a painted state icon.
+pub const BADGE_ICON: f32 = 10.0;
+/// Between an icon and its count.
+pub const BADGE_ICON_GAP: f32 = 3.0;
+/// Between items, and between the title and the first item.
+pub const BADGE_ITEM_GAP: f32 = 6.0;
+/// Title width kept before any badge item is shown.
+pub const BADGE_MIN_TITLE: f32 = 32.0;
+
+/// Place a fitted title (`title_w` wide) and its badge (`badge_w`, as
+/// returned by [`fit_badges`], including the gap before it) as one group
+/// centred in the title region, so the badge sits right after the text.
+/// Returns the title's left edge and the first badge item's left edge.
+/// Without a badge the title is centred exactly as before.
+pub fn title_badge_layout(
+    region_left: f32,
+    region_w: f32,
+    title_w: f32,
+    badge_w: f32,
+) -> (f32, f32) {
+    let group = (title_w + badge_w).min(region_w.max(0.0));
+    let title_x = region_left + ((region_w - group) * 0.5).max(0.0);
+    (title_x, title_x + title_w + BADGE_ITEM_GAP)
+}
+
+/// How many leading badge items (with count texts `text_widths` wide) fit
+/// beside a title area of `title_w`, and the width they take including the
+/// gap before them. Items drop from the end; the title keeps at least
+/// [`BADGE_MIN_TITLE`] so it never loses even its ellipsis to a badge.
+pub fn fit_badges(text_widths: &[f32], title_w: f32) -> (usize, f32) {
+    let budget = title_w - BADGE_MIN_TITLE;
+    let mut used = 0.0;
+    let mut kept = 0;
+    for w in text_widths {
+        let next = used + BADGE_ITEM_GAP + BADGE_ICON + BADGE_ICON_GAP + w;
+        if next > budget {
+            break;
+        }
+        used = next;
+        kept += 1;
+    }
+    (kept, used)
+}
+
+/// `[tabbar] attention`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttentionMode {
+    Pulse,
+    Static,
+    Off,
+}
+
+impl AttentionMode {
+    pub fn from_config(value: &str) -> Self {
+        match value {
+            "static" => Self::Static,
+            "off" => Self::Off,
+            _ => Self::Pulse,
+        }
+    }
+}
+
+/// Length of the attention pulse before it settles into a steady glow.
+pub const GLOW_PULSE: Duration = Duration::from_millis(1500);
+/// A tab already glowing pulses again only after this long, so a program
+/// ringing the bell every few seconds cannot keep frames running.
+pub const GLOW_REPULSE: Duration = Duration::from_secs(10);
+/// Settled glow intensity; the pulse breathes between this and 1.
+pub const GLOW_STEADY: f32 = 0.6;
+const GLOW_BREATHS: f32 = 2.0;
+const GLOW_FRAME: Duration = Duration::from_millis(16);
+
+/// Glow intensity (0–1) for a pulse started at `started`, and when the
+/// next frame is needed: `MAX` once settled (or for a static glow), so a
+/// glowing tab costs no frames after the pulse. Driven by wall-clock time,
+/// so late or skipped frames catch up rather than stretch the animation.
+pub fn glow(started: Instant, now: Instant, mode: AttentionMode) -> (f32, Duration) {
+    match mode {
+        AttentionMode::Off => (0.0, Duration::MAX),
+        AttentionMode::Static => (GLOW_STEADY, Duration::MAX),
+        AttentionMode::Pulse => {
+            let elapsed = now.saturating_duration_since(started);
+            if elapsed >= GLOW_PULSE {
+                return (GLOW_STEADY, Duration::MAX);
+            }
+            let t = elapsed.as_secs_f32() / GLOW_PULSE.as_secs_f32();
+            // Starts and ends at the steady level, so settling never jumps.
+            let breath = 0.5 - 0.5 * (std::f32::consts::TAU * GLOW_BREATHS * t).cos();
+            (
+                GLOW_STEADY + (1.0 - GLOW_STEADY) * breath,
+                GLOW_FRAME.min(GLOW_PULSE - elapsed),
+            )
+        }
+    }
 }
 
 /// Move an existing tab to this final, zero-based position.
@@ -268,7 +401,7 @@ pub const TAB_PILL_INSET_X: f32 = 1.0;
 /// Visual inset of the active/hover pill inside its tab cell.
 pub const TAB_PILL_INSET_Y: f32 = 2.0;
 /// Park-button hit width, immediately after the optional left close box.
-pub const TAB_PARK_RESERVE: f32 = 24.0;
+pub const TAB_PARK_RESERVE: f32 = 14.0;
 
 /// Leading inset before the tab container: the normal margin plus the
 /// traffic-light reserve on macOS.
@@ -415,9 +548,15 @@ pub fn tab_width(available: f32, count: usize, config: &TabbarConfig) -> f32 {
     (available / count as f32).max(config.min_tab_width)
 }
 
-/// Close hit box `[x, y, w, h]` for a tab starting at `tab_x` (left side).
+/// Margin between a tab's left edge and its close glyph's box. The close hit
+/// box includes it, so the × sits `TAB_CLOSE_LEAD` further in without
+/// changing the spacing to the park button.
+pub const TAB_CLOSE_LEAD: f32 = 4.0;
+
+/// Close hit box `[x, y, w, h]` for a tab starting at `tab_x` (left side),
+/// including the leading margin.
 pub fn close_hit(tab_x: f32, bar_h: f32, config: &TabbarConfig) -> [f32; 4] {
-    [tab_x, 0.0, config.close_reserve, bar_h]
+    [tab_x, 0.0, TAB_CLOSE_LEAD + config.close_reserve, bar_h]
 }
 
 /// Park hit box `[x, y, w, h]` at `left`, after the optional close box.
@@ -430,7 +569,8 @@ pub fn park_hit(left: f32, available: f32, bar_h: f32) -> [f32; 4] {
 /// Max title width for a tab of width `tab_w`, reserving the left close
 /// and park boxes plus the optional right shortcut hint. Never negative.
 pub fn title_max_width(tab_w: f32, has_shortcut: bool, config: &TabbarConfig) -> f32 {
-    let reserved = config.close_reserve
+    let reserved = TAB_CLOSE_LEAD
+        + config.close_reserve
         + TAB_PARK_RESERVE
         + config.gap * 2.0
         + if has_shortcut {
@@ -703,10 +843,10 @@ mod tests {
             let close = close_hit(tab_x, 38.0, &cfg);
             assert_eq!(
                 park_hit(close[0] + close[2], 180.0 - close[2], 38.0),
-                [tab_x + 24.0, 0.0, 24.0, 38.0],
+                [tab_x + 24.0, 0.0, 14.0, 38.0],
             );
         }
-        assert_eq!(park_hit(0.0, 180.0, 38.0), [0.0, 0.0, 24.0, 38.0]);
+        assert_eq!(park_hit(0.0, 180.0, 38.0), [0.0, 0.0, 14.0, 38.0]);
         assert_eq!(park_hit(180.0, 10.0, 38.0), [180.0, 0.0, 10.0, 38.0]);
         assert_eq!(park_hit(180.0, 0.0, 38.0), [180.0, 0.0, 0.0, 38.0]);
     }
@@ -743,20 +883,20 @@ mod tests {
     #[test]
     fn title_max_width_reserves_both_left_controls_and_the_right_shortcut() {
         let mut cfg = cfg();
-        // 180 - 24 - 24 - 2*4 - 34 = 90 with shortcut.
-        assert_eq!(title_max_width(180.0, true, &cfg), 90.0);
-        // 180 - 24 - 2*4 - 24 = 124 without shortcut.
-        assert_eq!(title_max_width(180.0, false, &cfg), 124.0);
+        // 180 - 4 - 20 - 14 - 2*4 - 34 = 100 with shortcut.
+        assert_eq!(title_max_width(180.0, true, &cfg), 100.0);
+        // 180 - 4 - 20 - 14 - 2*4 = 134 without shortcut.
+        assert_eq!(title_max_width(180.0, false, &cfg), 134.0);
         assert_eq!(title_max_width(10.0, true, &cfg), 0.0);
         cfg.shortcut_reserve = 10.0;
-        assert_eq!(title_max_width(180.0, true, &cfg), 114.0);
+        assert_eq!(title_max_width(180.0, true, &cfg), 124.0);
     }
 
     #[test]
     fn single_tab_title_max_width_reserves_the_park_control_and_side_gaps() {
         let cfg = cfg();
         // No close box or shortcut reserve: 180 - 24 - 2*4 = 148.
-        assert_eq!(single_tab_title_max_width(180.0, &cfg), 148.0);
+        assert_eq!(single_tab_title_max_width(180.0, &cfg), 158.0);
         assert_eq!(single_tab_title_max_width(0.0, &cfg), 0.0);
     }
 
@@ -992,5 +1132,87 @@ mod tests {
                 "{target:?}"
             );
         }
+    }
+
+    #[test]
+    fn badges_list_non_empty_states_waiting_first() {
+        let status = StatusSummary {
+            idle: 1,
+            working: 2,
+            blocked: 3,
+            done: 0,
+            error: 1,
+        };
+        let items: Vec<_> = badges(&status).collect();
+        assert_eq!(
+            items,
+            vec![
+                (BadgeKind::Blocked, 3),
+                (BadgeKind::Working, 2),
+                (BadgeKind::Error, 1),
+                (BadgeKind::Idle, 1),
+            ]
+        );
+        assert_eq!(badges(&StatusSummary::default()).count(), 0);
+    }
+
+    #[test]
+    fn fit_badges_drops_trailing_items_and_keeps_the_title_minimum() {
+        // One item: gap 6 + icon 10 + gap 3 + text 7 = 26.
+        assert_eq!(fit_badges(&[7.0], 100.0), (1, 26.0));
+        assert_eq!(fit_badges(&[7.0, 7.0, 7.0], 120.0), (3, 78.0));
+        // 32 kept for the title: 68 of 100 fits two items.
+        assert_eq!(fit_badges(&[7.0, 7.0, 7.0], 100.0), (2, 52.0));
+        assert_eq!(fit_badges(&[7.0], 50.0), (0, 0.0));
+        assert_eq!(fit_badges(&[7.0], -5.0), (0, 0.0));
+        assert_eq!(fit_badges(&[], 100.0), (0, 0.0));
+    }
+
+    #[test]
+    fn title_and_badge_are_centred_together() {
+        // No badge: the title is centred in its region.
+        assert_eq!(title_badge_layout(10.0, 100.0, 40.0, 0.0), (40.0, 86.0));
+        // Short title + 26pt badge: the group (66) is centred, the badge
+        // follows the text after one item gap.
+        let (title_x, badge_x) = title_badge_layout(10.0, 100.0, 40.0, 26.0);
+        assert_eq!(title_x, 27.0);
+        assert_eq!(badge_x, 27.0 + 40.0 + BADGE_ITEM_GAP);
+        // Fitted title fills the rest: the group starts at the region edge.
+        assert_eq!(title_badge_layout(10.0, 100.0, 74.0, 26.0).0, 10.0);
+        assert_eq!(title_badge_layout(10.0, 0.0, 0.0, 0.0).0, 10.0);
+    }
+
+    #[test]
+    fn glow_pulses_then_settles_without_further_frames() {
+        let t0 = Instant::now();
+        let (start, next) = glow(t0, t0, AttentionMode::Pulse);
+        assert!(
+            (start - GLOW_STEADY).abs() < 1e-6,
+            "starts at the steady level"
+        );
+        assert_eq!(next, Duration::from_millis(16));
+        // Peak of the first breath.
+        let (peak, _) = glow(t0, t0 + GLOW_PULSE / 4, AttentionMode::Pulse);
+        assert!((peak - 1.0).abs() < 1e-3, "{peak}");
+        // Near the end the next frame lands exactly on the settle point.
+        let late = t0 + GLOW_PULSE - Duration::from_millis(5);
+        assert_eq!(
+            glow(t0, late, AttentionMode::Pulse).1,
+            Duration::from_millis(5)
+        );
+        for at in [GLOW_PULSE, GLOW_PULSE * 10] {
+            assert_eq!(
+                glow(t0, t0 + at, AttentionMode::Pulse),
+                (GLOW_STEADY, Duration::MAX)
+            );
+        }
+        assert_eq!(
+            glow(t0, t0, AttentionMode::Static),
+            (GLOW_STEADY, Duration::MAX)
+        );
+        assert_eq!(glow(t0, t0, AttentionMode::Off), (0.0, Duration::MAX));
+        assert_eq!(AttentionMode::from_config("static"), AttentionMode::Static);
+        assert_eq!(AttentionMode::from_config("off"), AttentionMode::Off);
+        assert_eq!(AttentionMode::from_config("pulse"), AttentionMode::Pulse);
     }
 }

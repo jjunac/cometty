@@ -7,11 +7,11 @@
 //! app live-applies the diff and auto-saves afterwards.
 
 use crate::app::settings::{
-    CURSOR_SHAPES, FONT_FAMILIES, KNOWN_THEMES, LINK_MODIFIERS, LINK_UNDERLINES, LOG_LEVELS,
-    OSC52_MODES, SESSION_RESTORE_MODES, SettingsPanel, SettingsSection, UpdateStatusView,
-    is_known_theme, normalize_min_max, repair_finite_f32, repair_min_u32, repair_min_u64,
-    repair_min_usize, repair_positive_f32, repair_positive_f64, reset_all, reset_section,
-    sanitize_cursor_shape, sanitize_key_label,
+    ATTENTION_MODES, CURSOR_SHAPES, FONT_FAMILIES, KNOWN_THEMES, LINK_MODIFIERS, LINK_UNDERLINES,
+    LOG_LEVELS, OSC52_MODES, SESSION_RESTORE_MODES, SettingsPanel, SettingsSection,
+    UpdateStatusView, is_known_theme, normalize_min_max, repair_finite_f32, repair_min_u32,
+    repair_min_u64, repair_min_usize, repair_positive_f32, repair_positive_f64, reset_all,
+    reset_section, sanitize_cursor_shape, sanitize_key_label,
 };
 use crate::config::{Config, MAX_LOG_BUFFER_LINES, MIN_LOG_BUFFER_LINES};
 
@@ -966,6 +966,45 @@ fn show_section(
             ui.weak(
                 "Variables: $title (shell OSC), $command (foreground process), \
                  $cwd (working dir), $tab (index). All empty -> Tab N.",
+            );
+            ed.flag(
+                ui,
+                "Show a running program's own title",
+                &mut config.tabbar.live_title,
+                d.tabbar.live_title,
+            );
+            ui.horizontal(|ui| {
+                let slot = begin_reset_slot(ui);
+                ui.label("Attention");
+                egui::ComboBox::from_id_salt("tabbar-attention")
+                    .selected_text(config.tabbar.attention.as_str())
+                    .show_ui(ui, |ui| {
+                        for mode in ATTENTION_MODES {
+                            if ui
+                                .selectable_value(
+                                    &mut config.tabbar.attention,
+                                    mode.to_string(),
+                                    mode,
+                                )
+                                .changed()
+                            {
+                                ed.mark();
+                            }
+                        }
+                    });
+                if end_reset_slot(
+                    ui,
+                    slot,
+                    "attention",
+                    config.tabbar.attention != d.tabbar.attention,
+                ) {
+                    config.tabbar.attention = d.tabbar.attention.clone();
+                    ed.mark();
+                }
+            });
+            ui.weak(
+                "Unseen tabs glow when they ring the bell, send a notification, \
+                 or their program starts waiting on you or finishes.",
             );
         }
         SettingsSection::Input => {

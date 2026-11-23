@@ -65,6 +65,10 @@ impl App {
         let start = Instant::now();
         let mut drained_bytes: usize = 0;
         let mut titles_before = vec![None; self.tabs.len()];
+        // OSC 7501 record version at each touched tab's first chunk, and
+        // whether its output asked for attention (bell, notification, …).
+        let mut status_before = vec![0; self.tabs.len()];
+        let mut attention = vec![false; self.tabs.len()];
         let mut empty_visits = 0;
         // One chunk per visit is the per-tab quantum. The persistent order
         // also survives an expensive callback that overshoots the deadline.
@@ -87,6 +91,7 @@ impl App {
                 Some(PtyEvent::Data(bytes)) => {
                     if titles_before[i].is_none() {
                         titles_before[i] = Some(self.title_for_tab(i, &self.tabs[i]));
+                        status_before[i] = self.tabs[i].terminal.status().version();
                     }
                     empty_visits = 0;
                     let tab = &mut self.tabs[i];
@@ -133,6 +138,8 @@ impl App {
                     }
                     clipboard_ops
                         .extend(tab.terminal.take_clipboard().into_iter().map(|op| (i, op)));
+                    // Coalesced per drain: a BEL storm is one signal.
+                    attention[i] |= tab.terminal.take_attention();
                     if before != tab.terminal.grid().version {
                         tab.visual_dirty = true;
                         // Keep the oldest unpresented output stamp, not
@@ -175,6 +182,16 @@ impl App {
                     tab.select_anchor = None;
                 }
                 chrome_changed |= *before != self.title_for_tab(i, &self.tabs[i]);
+                // Badge counts (after `refresh_title` dropped a finished
+                // job's records) and attention, while indices still match.
+                let status_changed = self.tabs[i].terminal.status().version() != status_before[i];
+                chrome_changed |= status_changed;
+                if attention[i] {
+                    chrome_changed |= self.tab_wants_attention(i, Instant::now());
+                } else if status_changed && super::tab::tab_is_seen(i, self.active, self.focused) {
+                    // A result re-reported while the user watches is read.
+                    self.tab_seen(i);
+                }
             }
         }
         let active_output = titles_before.get(self.active).is_some_and(Option::is_some);
@@ -356,6 +373,100 @@ mod tests {
             }
         }
         panic!("stranded PTY continuation");
+    }
+
+    #[test]
+    fn drained_output_routes_attention_badges_and_status_replies() {
+        let mut app = app();
+        let (background, background_input) = add_tab(&mut app);
+        let (foreground, _) = add_tab(&mut app);
+        app.active = 1;
+        app.focused = true;
+        // An unseen tab's bell storm and blocked report: one glow, records
+        // kept for the badge, and the support query answered.
+        background(PtyEvent::Data(
+            b"\x07\x07\x1b]7501;?\x1b\\\x1b]7501;state=blocked:id=s1\x1b\\".to_vec(),
+        ));
+        finish_draining(&mut app);
+        let started = app.tabs[0].attention.expect("unseen tab glows");
+        assert_eq!(app.tabs[0].terminal.status().summary().blocked, 1);
+        assert_eq!(
+            background_input.try_recv().unwrap(),
+            crate::progstatus::QUERY_REPLY
+        );
+        background(PtyEvent::Data(b"\x07".to_vec()));
+        finish_draining(&mut app);
+        assert_eq!(
+            app.tabs[0].attention,
+            Some(started),
+            "no re-pulse in a burst"
+        );
+        assert_eq!(app.tab_labels()[0].glow, Some(started));
+        assert_eq!(app.tab_labels()[0].status.blocked, 1);
+        // The watched tab's results are read as they arrive.
+        foreground(PtyEvent::Data(b"\x1b]7501;state=done\x1b\\\x07".to_vec()));
+        finish_draining(&mut app);
+        assert!(app.tabs[1].attention.is_none());
+        assert_eq!(app.tabs[1].terminal.status().len(), 0);
+    }
+
+    /// The record sequence opencode's `program-status.ts` emits for one
+    /// session: working, a permission prompt, answered, then finished.
+    #[test]
+    fn opencode_session_lifecycle_counts_blocked_then_infers_finished() {
+        let mut app = app();
+        let (opencode, _) = add_tab(&mut app);
+        let (_watched, _) = add_tab(&mut app);
+        app.active = 1;
+        app.focused = true;
+        let summary = |app: &App| app.tab_labels()[0].status;
+        let feed = |app: &mut App, bytes: &str| {
+            opencode(PtyEvent::Data(bytes.as_bytes().to_vec()));
+            finish_draining(app);
+        };
+        // "Fix parser" / "Permission needs input", unpadded like OpenTUI.
+        let title = "Rml4IHBhcnNlcg";
+        feed(
+            &mut app,
+            &format!(
+                "\x1b]7501;?\x1b\\\x1b]7501;state=working:id=ses_1:app=opencode:title={title}\x1b\\\
+                 \x1b]7501;state=working:id=ses_1:app=opencode:title={title}\x1b\\"
+            ),
+        );
+        assert_eq!(summary(&app).working, 1);
+        assert!(app.tabs[0].attention.is_none(), "working is not attention");
+        feed(
+            &mut app,
+            &format!(
+                "\x1b]7501;state=blocked:id=ses_1:kind=permission:app=opencode:title={title}:\
+                 msg=UGVybWlzc2lvbiBuZWVkcyBpbnB1dA\x1b\\\
+                 \x1b]7501;state=blocked:id=ses_1:kind=permission:app=opencode:title={title}:\
+                 msg=UGVybWlzc2lvbiBuZWVkcyBpbnB1dA\x1b\\"
+            ),
+        );
+        assert_eq!(summary(&app).blocked, 1, "{:?}", summary(&app));
+        assert_eq!(summary(&app).working, 0);
+        assert!(app.tabs[0].attention.is_some());
+        // Answered: back to working, then the session stops.
+        feed(
+            &mut app,
+            &format!("\x1b]7501;state=working:id=ses_1:app=opencode:title={title}\x1b\\"),
+        );
+        app.tabs[0].attention = None;
+        feed(
+            &mut app,
+            "\x1b]7501;state=clear:id=ses_1\x1b\\\x1b]7501;state=idle:app=opencode\x1b\\",
+        );
+        assert_eq!(
+            summary(&app),
+            crate::progstatus::StatusSummary {
+                done: 1,
+                ..Default::default()
+            }
+        );
+        assert!(app.tabs[0].attention.is_some(), "a finished session glows");
+        app.switch_tab(0);
+        assert_eq!(summary(&app), crate::progstatus::StatusSummary::default());
     }
 
     #[test]

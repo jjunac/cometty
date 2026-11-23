@@ -203,6 +203,13 @@ headless tests:
   close/shutdown flush. Logs: display versus record filters and explicit Copy.
 - PTY: earlier/background floods with active input, shell exit/tab removal,
   nonreading paste admission, and repeated close without lingering children/workers.
+- Program status/attention: opencode's `OC | <session>` label while it runs and
+  the template again after quitting; a permission prompt in a background strip
+  tab, a parked tab (tray), and the active tab with the window unfocused (pulse,
+  then steady glow; cleared on activate/peek/unpark/refocus); badge counts with
+  two sessions; `printf '\a'` from a background tab; `static`/`off` modes; a
+  prompt-titling shell (oh-my-zsh) and `ssh` titles; the log panel showing
+  `7501 (program status)` handled; and no frames once the glow settles.
 
 Use [performance profiling](performance.md#display-backed-profiling) for frame,
 latency, power, or native-memory claims. Historical headless measurements did not

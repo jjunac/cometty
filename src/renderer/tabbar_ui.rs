@@ -2,11 +2,13 @@
 //! this module owns only egui layout, hit rects, scroll position and text widths.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::TabbarConfig;
+use crate::progstatus::StatusSummary;
 use crate::tabbar::{
-    self, BackgroundTabLabel, DragLayout, StripTarget, TabDrag, TabLabel, TabMove,
+    self, AttentionMode, BackgroundTabLabel, BadgeKind, DragLayout, StripTarget, TabDrag, TabLabel,
+    TabMove,
 };
 use crate::theme::Theme;
 
@@ -38,6 +40,8 @@ pub(crate) struct TabbarView<'a> {
     /// The parked tab currently shown in place.
     pub peeking: Option<u64>,
     pub popover_open: bool,
+    /// Frame time for the attention glow.
+    pub now: Instant,
 }
 
 #[derive(Default)]
@@ -61,6 +65,13 @@ struct TabCell<'a> {
     dragging: bool,
 }
 
+struct BackgroundRow<'a> {
+    tab: &'a BackgroundTabLabel,
+    peeking: bool,
+    /// Attention glow intensity (0 = none).
+    glow: f32,
+}
+
 struct TabStyle<'a> {
     config: &'a TabbarConfig,
     theme: Theme,
@@ -69,10 +80,165 @@ struct TabStyle<'a> {
     suppress_clicks: bool,
     count: usize,
     active: Option<usize>,
+    now: Instant,
+    attention: AttentionMode,
 }
 
 fn coords(rect: egui::Rect) -> [f32; 4] {
     [rect.min.x, rect.min.y, rect.max.x, rect.max.y]
+}
+
+fn badge_color(kind: BadgeKind, theme: Theme) -> egui::Color32 {
+    match kind {
+        BadgeKind::Blocked => theme.palette[3],
+        BadgeKind::Working => theme.palette[2],
+        BadgeKind::Error => theme.palette[1],
+        BadgeKind::Done => theme.palette[4],
+        BadgeKind::Idle => theme.tab_border,
+    }
+    .as_egui_color()
+}
+
+/// Accent for a glowing tab: red when a program reported an error, else blue.
+fn glow_color(status: &StatusSummary, theme: Theme) -> egui::Color32 {
+    if status.error > 0 {
+        theme.palette[1]
+    } else {
+        theme.palette[4]
+    }
+    .as_egui_color()
+}
+
+/// Status badge items for one tab: `(kind, count text, text width)`.
+/// Allocates nothing for a tab without `OSC 7501` records.
+fn badge_items(
+    status: &StatusSummary,
+    measure: &mut dyn FnMut(&str) -> f32,
+) -> Vec<(BadgeKind, String, f32)> {
+    tabbar::badges(status)
+        .map(|(kind, count)| {
+            let text = count.to_string();
+            let width = measure(&text);
+            (kind, text, width)
+        })
+        .collect()
+}
+
+/// One arc of the "running" icon with an arrowhead at its end; angles in
+/// radians, clockwise on screen (egui's y points down).
+fn paint_arrow_arc(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    radius: f32,
+    (from, to): (f32, f32),
+    stroke: egui::Stroke,
+) {
+    const STEPS: usize = 10;
+    let at = |angle: f32| center + radius * egui::vec2(angle.cos(), angle.sin());
+    let points: Vec<egui::Pos2> = (0..=STEPS)
+        .map(|i| at(from + (to - from) * i as f32 / STEPS as f32))
+        .collect();
+    painter.add(egui::Shape::line(points, stroke));
+    // Arrowhead along the tangent at the arc's end.
+    let end = at(to);
+    let tangent = egui::vec2(-to.sin(), to.cos());
+    let radial = egui::vec2(to.cos(), to.sin());
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            end + tangent * 2.4,
+            end - tangent * 0.6 + radial * 2.0,
+            end - tangent * 0.6 - radial * 2.0,
+        ],
+        stroke.color,
+        egui::Stroke::NONE,
+    ));
+}
+
+/// The state icon for one badge item, `tabbar::BADGE_ICON` points square,
+/// painted from strokes: bundled egui fonts lack reliable symbol glyphs.
+/// Static, so a working badge never schedules frames.
+fn paint_badge_icon(painter: &egui::Painter, kind: BadgeKind, center: egui::Pos2, theme: Theme) {
+    let color = badge_color(kind, theme);
+    let stroke = egui::Stroke::new(1.5, color);
+    let r = tabbar::BADGE_ICON * 0.5;
+    use std::f32::consts::PI;
+    match kind {
+        // Circling arrows: two arcs chasing each other.
+        BadgeKind::Working => {
+            for start in [-0.45 * PI, 0.55 * PI] {
+                paint_arrow_arc(painter, center, r - 1.2, (start, start + 0.72 * PI), stroke);
+            }
+        }
+        // `!` in a ring: waiting on the user.
+        BadgeKind::Blocked => {
+            painter.circle_stroke(center, r - 0.6, egui::Stroke::new(1.2, color));
+            painter.line_segment(
+                [
+                    center + egui::vec2(0.0, -2.4),
+                    center + egui::vec2(0.0, 0.6),
+                ],
+                egui::Stroke::new(1.4, color),
+            );
+            painter.circle_filled(center + egui::vec2(0.0, 2.3), 0.8, color);
+        }
+        BadgeKind::Done => {
+            painter.add(egui::Shape::line(
+                vec![
+                    center + egui::vec2(-3.6, 0.2),
+                    center + egui::vec2(-1.1, 2.7),
+                    center + egui::vec2(3.6, -2.8),
+                ],
+                egui::Stroke::new(1.7, color),
+            ));
+        }
+        BadgeKind::Error => {
+            let d = 3.0;
+            let stroke = egui::Stroke::new(1.7, color);
+            painter.line_segment(
+                [center + egui::vec2(-d, -d), center + egui::vec2(d, d)],
+                stroke,
+            );
+            painter.line_segment(
+                [center + egui::vec2(-d, d), center + egui::vec2(d, -d)],
+                stroke,
+            );
+        }
+        BadgeKind::Idle => {
+            painter.circle_stroke(center, r - 1.5, egui::Stroke::new(1.2, color));
+        }
+    }
+}
+
+/// Paint the first `kept` badge items left to right from `x`, each a state
+/// icon followed by its count, vertically centred on `y`.
+#[allow(clippy::too_many_arguments)]
+fn paint_badges(
+    painter: &egui::Painter,
+    items: &[(BadgeKind, String, f32)],
+    kept: usize,
+    mut x: f32,
+    y: f32,
+    font: &egui::FontId,
+    theme: Theme,
+    text: egui::Color32,
+) {
+    for (kind, count, width) in items.iter().take(kept) {
+        paint_badge_icon(
+            painter,
+            *kind,
+            egui::pos2(x + tabbar::BADGE_ICON * 0.5, y),
+            theme,
+        );
+        x += tabbar::BADGE_ICON + tabbar::BADGE_ICON_GAP;
+        painter.text(
+            egui::pos2(x, y),
+            egui::Align2::LEFT_CENTER,
+            count,
+            font.clone(),
+            text,
+        );
+        x += width + tabbar::BADGE_ITEM_GAP;
+    }
 }
 
 /// Bundled egui fonts do not reliably supply the up/down-arrow glyphs.
@@ -135,6 +301,20 @@ impl TabbarUi {
         }
         let tray = tabbar::tray_rect(view.width, view.background.len(), config);
         let suppress_clicks = drag.suppress_clicks();
+        let attention = AttentionMode::from_config(&config.attention);
+        // A pulsing glow (strip or tray) needs frames until it settles;
+        // a settled or static glow needs none.
+        let glow_next = view
+            .tabs
+            .iter()
+            .filter_map(|tab| tab.glow)
+            .chain(view.background.iter().filter_map(|tab| tab.glow))
+            .map(|started| tabbar::glow(started, view.now, attention).1)
+            .min()
+            .unwrap_or(Duration::MAX);
+        if glow_next != Duration::MAX {
+            ctx.request_repaint_after(glow_next);
+        }
         egui::Area::new(egui::Id::new("tabbar"))
             .fixed_pos(egui::Pos2::ZERO)
             .movable(false)
@@ -223,6 +403,8 @@ impl TabbarUi {
                                         suppress_clicks,
                                         count: view.tabs.len(),
                                         active: view.active,
+                                        now: view.now,
+                                        attention,
                                     };
                                     for (i, tab) in view.tabs.iter().enumerate() {
                                         if preview.is_some() && source == Some(i) {
@@ -381,8 +563,40 @@ impl TabbarUi {
             egui::Stroke::new(1.0, theme.tab_border.as_egui_color()),
             egui::StrokeKind::Inside,
         );
-        let attention = view.background.iter().any(|tab| tab.attention);
-        let running = view.background.iter().any(|tab| tab.running);
+        // A parked tab that wants attention lights the tray, which is all
+        // the strip shows of it.
+        let glow = view
+            .background
+            .iter()
+            .filter_map(|tab| {
+                let started = tab.glow?;
+                let mode = AttentionMode::from_config(&config.attention);
+                Some((tabbar::glow(started, view.now, mode).0, &tab.status))
+            })
+            .max_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((intensity, status)) = glow.filter(|(intensity, _)| *intensity > 0.0) {
+            let accent = glow_color(status, theme);
+            painter.rect_stroke(
+                rect,
+                radius,
+                egui::Stroke::new(1.5, accent.gamma_multiply(intensity)),
+                egui::StrokeKind::Inside,
+            );
+            painter.rect_stroke(
+                rect,
+                radius,
+                egui::Stroke::new(3.0, accent.gamma_multiply(intensity * 0.3)),
+                egui::StrokeKind::Outside,
+            );
+        }
+        let attention = view
+            .background
+            .iter()
+            .any(|tab| tab.attention || tab.status.blocked > 0);
+        let running = view
+            .background
+            .iter()
+            .any(|tab| tab.running || tab.status.working > 0);
         let dot = if attention {
             theme.palette[3]
         } else if running {
@@ -442,11 +656,18 @@ impl TabbarUi {
                                 self.title_widths.clear();
                                 self.title_font = Some(font.clone());
                             }
+                            let mode = AttentionMode::from_config(&config.attention);
                             for tab in view.background {
+                                let glow = tab
+                                    .glow
+                                    .map_or(0.0, |started| tabbar::glow(started, view.now, mode).0);
                                 self.paint_background_row(
                                     ui,
-                                    tab,
-                                    view.peeking == Some(tab.id),
+                                    BackgroundRow {
+                                        tab,
+                                        peeking: view.peeking == Some(tab.id),
+                                        glow,
+                                    },
                                     theme,
                                     &font,
                                     out,
@@ -461,12 +682,12 @@ impl TabbarUi {
     fn paint_background_row(
         &mut self,
         ui: &mut egui::Ui,
-        tab: &BackgroundTabLabel,
-        peeking: bool,
+        row: BackgroundRow<'_>,
         theme: Theme,
         font: &egui::FontId,
         out: &mut TabbarOutput,
     ) {
+        let BackgroundRow { tab, peeking, glow } = row;
         let row_h = 26.0;
         let width = ui.available_width();
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, row_h), egui::Sense::hover());
@@ -498,9 +719,16 @@ impl TabbarUi {
         } else if hovered {
             painter.rect_filled(rect, radius, fill.gamma_multiply(0.4));
         }
-        let dot = if tab.attention {
+        if glow > 0.0 {
+            painter.rect_filled(
+                egui::Rect::from_min_size(rect.min, egui::vec2(3.0, row_h)),
+                egui::CornerRadius::same(2),
+                glow_color(&tab.status, theme).gamma_multiply(glow),
+            );
+        }
+        let dot = if tab.attention || tab.status.blocked > 0 {
             theme.palette[3]
-        } else if tab.running {
+        } else if tab.running || tab.status.working > 0 {
             theme.palette[2]
         } else {
             theme.tab_border
@@ -510,7 +738,7 @@ impl TabbarUi {
             3.0,
             dot.as_egui_color(),
         );
-        let max_title = (rect.width() - 58.0).max(0.0);
+        let mut max_title = (rect.width() - 58.0).max(0.0);
         let mut measure = |text: &str| {
             if let Some(width) = self.title_widths.get(text) {
                 return *width;
@@ -522,18 +750,38 @@ impl TabbarUi {
             self.title_widths.insert(text.to_owned(), width);
             width
         };
+        let badges = badge_items(&tab.status, &mut measure);
+        let widths: Vec<f32> = badges.iter().map(|(_, _, w)| *w).collect();
+        let (kept, badge_w) = tabbar::fit_badges(&widths, max_title);
+        // The title budget already reaches the unpark box; keep clear of it.
+        if kept > 0 {
+            max_title = (max_title - badge_w - 4.0).max(0.0);
+        }
         let title = tabbar::fit_title(&tab.title, max_title, &mut measure);
+        let title_w = measure(&title);
         let fg = theme.foreground.as_egui_color();
+        let text_color = if peeking || hovered {
+            fg
+        } else {
+            fg.gamma_multiply(0.75)
+        };
         painter.text(
             egui::pos2(rect.left() + 20.0, rect.center().y),
             egui::Align2::LEFT_CENTER,
             title,
             font.clone(),
-            if peeking || hovered {
-                fg
-            } else {
-                fg.gamma_multiply(0.75)
-            },
+            text_color,
+        );
+        // Right after the title text.
+        paint_badges(
+            painter,
+            &badges,
+            kept,
+            rect.left() + 20.0 + title_w + tabbar::BADGE_ITEM_GAP,
+            rect.center().y,
+            font,
+            theme,
+            text_color,
         );
         let dim = fg.gamma_multiply(0.55);
         let arrow_color = if unpark_response.hovered() { fg } else { dim };
@@ -653,6 +901,26 @@ impl TabbarUi {
                 egui::Stroke::new(1.0, border.gamma_multiply(0.5)),
             );
         }
+        // Attention glow: an accent outline with a soft halo, breathing
+        // during the pulse and steady afterwards (no frames once settled).
+        if let Some(started) = tab.glow {
+            let (intensity, _) = tabbar::glow(started, style.now, style.attention);
+            if intensity > 0.0 {
+                let accent = glow_color(&tab.status, style.theme);
+                painter.rect_stroke(
+                    pill,
+                    radius,
+                    egui::Stroke::new(1.5, accent.gamma_multiply(intensity)),
+                    egui::StrokeKind::Inside,
+                );
+                painter.rect_stroke(
+                    pill,
+                    radius,
+                    egui::Stroke::new(3.0, accent.gamma_multiply(intensity * 0.3)),
+                    egui::StrokeKind::Outside,
+                );
+            }
+        }
         let mut shortcut = (!single).then(|| tabbar::shortcut_label(index)).flatten();
         let mut max_title = if single {
             tabbar::single_tab_title_max_width(rect.width(), config)
@@ -676,13 +944,37 @@ impl TabbarUi {
             shortcut = None;
             max_title = tabbar::title_max_width(rect.width(), false, config);
         }
-        let title = tabbar::fit_title(&tab.title, max_title, &mut measure);
+        // Status badge right of the title; items drop on narrow tabs before
+        // the title would lose its ellipsis.
+        let badges = badge_items(&tab.status, &mut measure);
+        let widths: Vec<f32> = badges.iter().map(|(_, _, w)| *w).collect();
+        let (kept, badge_w) = tabbar::fit_badges(&widths, max_title);
+        let title = tabbar::fit_title(&tab.title, max_title - badge_w, &mut measure);
+        // Title and badge are centred together, the badge right after the
+        // text; without a badge this is the usual centred title.
+        let (title_x, badge_x) = tabbar::title_badge_layout(
+            body.left() + config.gap,
+            max_title,
+            measure(&title),
+            badge_w,
+        );
+        let text_color = if active || hovered { fg } else { dim };
         painter.text(
-            egui::pos2(body.left() + config.gap + max_title * 0.5, rect.center().y),
-            egui::Align2::CENTER_CENTER,
+            egui::pos2(title_x, rect.center().y),
+            egui::Align2::LEFT_CENTER,
             title,
             style.font.clone(),
-            if active || hovered { fg } else { dim },
+            text_color,
+        );
+        paint_badges(
+            &painter,
+            &badges,
+            kept,
+            badge_x,
+            rect.center().y,
+            &style.font,
+            style.theme,
+            text_color,
         );
         if let Some(shortcut) = shortcut {
             painter.text(
@@ -694,11 +986,13 @@ impl TabbarUi {
             );
         }
         if !single && !style.suppress_clicks && hovered {
+            // The hit box starts with a leading margin; centre in the rest.
+            let glyph = close.center() + egui::vec2(tabbar::TAB_CLOSE_LEAD / 2.0, 0.0);
             if close_hovered {
-                painter.circle_filled(close.center(), 8.0, border.gamma_multiply(0.6));
+                painter.circle_filled(glyph, 8.0, border.gamma_multiply(0.6));
             }
             painter.text(
-                close.center(),
+                glyph,
                 egui::Align2::CENTER_CENTER,
                 "×",
                 style.font.clone(),
@@ -748,6 +1042,7 @@ mod tests {
         popover_open: bool,
         width: f32,
         time: f64,
+        now: Instant,
         delay: Duration,
         shapes: Vec<egui::epaint::ClippedShape>,
     }
@@ -763,6 +1058,7 @@ mod tests {
                     .map(|i| TabLabel {
                         id: 100 + i as u64 * 10,
                         title: "same label".into(),
+                        ..Default::default()
                     })
                     .collect(),
                 background: Vec::new(),
@@ -771,6 +1067,7 @@ mod tests {
                 popover_open: false,
                 width,
                 time: 0.0,
+                now: Instant::now(),
                 delay: Duration::MAX,
                 shapes: Vec::new(),
             };
@@ -831,6 +1128,7 @@ mod tests {
                     background: &self.background,
                     peeking: self.peeking,
                     popover_open: self.popover_open,
+                    now: self.now,
                 },
                 &mut self.drag,
                 &self.config,
@@ -858,7 +1156,7 @@ mod tests {
         fn park_rect(&self, id: u64) -> egui::Rect {
             let r = self.rect(id);
             let close = if self.tabs.len() > 1 {
-                self.config.close_reserve.clamp(0.0, r[2] - r[0])
+                (tabbar::TAB_CLOSE_LEAD + self.config.close_reserve).clamp(0.0, r[2] - r[0])
             } else {
                 0.0
             };
@@ -1005,6 +1303,7 @@ mod tests {
                         title: "background task".into(),
                         running: true,
                         attention: false,
+                        ..Default::default()
                     });
                     h.active = None;
                     h.peeking = Some(900);
@@ -1040,6 +1339,10 @@ mod tests {
         ] {
             for scale in [1.0, 1.25, 2.0] {
                 let mut h = Harness::new(count, width);
+                // Narrow tabs: too small for the ellipsis beside the shortcut.
+                if count == 8 {
+                    h.config.min_tab_width = 90.0;
+                }
                 h.ctx.set_pixels_per_point(scale);
                 h.tabs[index].title = "A".repeat(80);
                 h.time += 1.0;
@@ -1133,6 +1436,172 @@ mod tests {
         }
     }
 
+    fn painted_texts(h: &Harness) -> Vec<String> {
+        h.shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.job.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn attention_pulse_repaints_until_settled_then_stops() {
+        let mut h = Harness::new(2, 800.0);
+        let start = h.now;
+        h.tabs[1].glow = Some(start);
+        h.frame(Vec::new());
+        assert!(h.delay <= Duration::from_millis(16), "pulsing");
+        h.now = start + tabbar::GLOW_PULSE;
+        h.idle();
+        // Parked tabs pulse through the tray, then settle the same way.
+        h.background = vec![BackgroundTabLabel {
+            id: 900,
+            title: "agent".into(),
+            glow: Some(h.now),
+            ..Default::default()
+        }];
+        h.frame(Vec::new());
+        assert!(h.delay <= Duration::from_millis(16));
+        h.now += tabbar::GLOW_PULSE;
+        h.idle();
+        // Settled popover rows paint their glow bar without frames, once
+        // the popover's own opening settles.
+        h.popover_open = true;
+        h.frame(Vec::new());
+        h.time += 1.0;
+        h.frame(Vec::new());
+        h.time += 1.0;
+        h.idle();
+        h.popover_open = false;
+        // A static glow never schedules frames.
+        h.config.attention = "static".into();
+        h.tabs[0].glow = Some(h.now);
+        h.idle();
+    }
+
+    /// Painted rect of the first text shape equal to `wanted`.
+    fn text_rect(h: &Harness, wanted: &str) -> egui::Rect {
+        h.shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.job.text == wanted => {
+                    Some(text.galley.rect.translate(text.pos.to_vec2()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{wanted:?} not painted: {:?}", painted_texts(h)))
+    }
+
+    #[test]
+    fn status_badge_follows_the_title_text_in_strip_and_popover() {
+        let status = StatusSummary {
+            working: 2,
+            ..Default::default()
+        };
+        let mut h = Harness::new(2, 800.0);
+        h.tabs[0].title = "opencode".into();
+        h.tabs[0].status = status;
+        h.background = vec![BackgroundTabLabel {
+            id: 900,
+            title: "agent".into(),
+            status: StatusSummary {
+                blocked: 3,
+                ..Default::default()
+            },
+            ..Default::default()
+        }];
+        h.popover_open = true;
+        h.frame(Vec::new());
+        h.frame(Vec::new());
+        let expected = tabbar::BADGE_ITEM_GAP + tabbar::BADGE_ICON + tabbar::BADGE_ICON_GAP;
+        for (title, count) in [("opencode", "2"), ("agent", "3")] {
+            let gap = text_rect(&h, count).left() - text_rect(&h, title).right();
+            assert!((gap - expected).abs() < 1.0, "{title}: gap {gap}");
+        }
+        // The strip group stays centred in the tab: equal slack both sides.
+        let tab = h.rect(100);
+        let left = text_rect(&h, "opencode").left() - tab[0];
+        let right = tab[2] - text_rect(&h, "2").right();
+        assert!(left > 30.0 && right > 30.0, "{left} / {right}");
+    }
+
+    #[test]
+    fn every_badge_kind_paints_an_icon_without_glyph_text() {
+        let mut h = Harness::new(2, 1200.0);
+        h.tabs[0].title = "t".into();
+        h.tabs[0].status = StatusSummary {
+            blocked: 1,
+            working: 2,
+            idle: 3,
+            done: 4,
+            error: 5,
+        };
+        h.frame(Vec::new());
+        let texts = painted_texts(&h);
+        for count in ["1", "2", "3", "4", "5"] {
+            assert!(texts.iter().any(|t| t == count), "{texts:?}");
+        }
+        assert!(
+            !texts
+                .iter()
+                .any(|t| ["↻", "✓", "✕", "!"].contains(&t.as_str())),
+            "icons are vector shapes: {texts:?}"
+        );
+        // Each icon adds non-text shapes between its predecessor's count
+        // and its own count.
+        let non_text = |from: f32, to: f32| {
+            h.shapes
+                .iter()
+                .filter(|c| {
+                    !matches!(c.shape, egui::Shape::Text(_))
+                        && c.shape.visual_bounding_rect().center().x > from
+                        && c.shape.visual_bounding_rect().center().x < to
+                })
+                .count()
+        };
+        let mut previous = text_rect(&h, "t").right();
+        // Display order: blocked, working, error, done, idle.
+        for count in ["1", "2", "5", "4", "3"] {
+            let rect = text_rect(&h, count);
+            assert!(non_text(previous, rect.left()) > 0, "icon before {count}");
+            previous = rect.right();
+        }
+    }
+
+    #[test]
+    fn status_badges_paint_counts_and_yield_to_the_title_on_narrow_tabs() {
+        let status = StatusSummary {
+            blocked: 1,
+            working: 23,
+            ..Default::default()
+        };
+        let mut h = Harness::new(2, 800.0);
+        h.tabs[0].title = "opencode".into();
+        h.tabs[0].status = status;
+        h.frame(Vec::new());
+        let texts = painted_texts(&h);
+        assert!(texts.iter().any(|t| t == "23"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "opencode"), "{texts:?}");
+        // Narrowing the strip drops badge items before the title loses
+        // its space: whenever a count is painted, so is a title.
+        let mut dropped_badge_kept_title = false;
+        for width in (200..=800).step_by(10) {
+            let mut h = Harness::new(2, width as f32);
+            h.config.min_tab_width = 1.0;
+            h.tabs[0].title = "opencode".into();
+            h.tabs[0].status = status;
+            h.frame(Vec::new());
+            let texts = painted_texts(&h);
+            let badge = texts.iter().any(|t| t == "1" || t == "23");
+            let title = texts.iter().any(|t| t.starts_with("op"));
+            assert!(!badge || title, "width {width}: {texts:?}");
+            dropped_badge_kept_title |= title && !texts.iter().any(|t| t == "23");
+        }
+        assert!(dropped_badge_kept_title);
+    }
+
     #[test]
     fn park_tooltip_settles_without_keyboard_focus_or_permanent_repaints() {
         let mut h = Harness::new(2, 800.0);
@@ -1162,6 +1631,7 @@ mod tests {
                         title: "parked task".into(),
                         running: true,
                         attention: false,
+                        ..Default::default()
                     })
                     .collect();
                 h.active = None;
@@ -1445,6 +1915,7 @@ mod tests {
             title: "cargo watch".into(),
             running: true,
             attention: false,
+            ..Default::default()
         }];
         h.frame(Vec::new());
         let tray = tabbar::tray_rect(h.width, h.background.len(), &h.config).unwrap();

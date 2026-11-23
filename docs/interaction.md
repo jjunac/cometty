@@ -220,7 +220,8 @@ labels index-aligned; only the strip's label projection filters the suffix out
 - **State dot:** `Tab::refresh_title` derives running/idle from
   `tcgetpgrp` versus the shell pid (no timer). A running→idle transition on a
   parked tab that is not displayed sets `bg_attention`, cleared on peek or
-  unpark. The badge prefers the attention color over the running color.
+  unpark. A `blocked` OSC 7501 record also counts as attention and a `working`
+  one as running. The badge prefers the attention color over the running color.
 - **Geometry:** `background_tray_width`/`tray_rect` reserve one `plus_gap` plus
   a pill to the right of `+`; the tab container loses exactly that width.
   Painted tray rects are `StripTarget::BackgroundTray`, so they beat the macOS
@@ -243,6 +244,53 @@ drag admission, peek-to-foreground click/input routing, and replacement-unavaila
 no-ops. They do not verify native titlebar interaction or a successful window-backed
 replacement spawn; see [manual verification](development.md#manual-verification).
 
+## Program status badges and attention
+
+Tabs project their terminal's [OSC 7501 records](terminal.md#program-status-osc-7501)
+into `TabLabel::status` / `BackgroundTabLabel::status` (a `StatusSummary`).
+The widget paints one icon-and-count item per non-empty state, ordered
+blocked (`!` in a ring, palette 3), working (circling arrows, 2), error (`✕`,
+1), done (`✓`, 4), idle (hollow ring, border color). Icons are stroked egui
+shapes, not font glyphs (the bundled fonts lack reliable symbols), and static:
+a working badge schedules no frames. `tabbar::fit_badges` drops trailing items
+so the title keeps at least `BADGE_MIN_TITLE` points.
+`tabbar::title_badge_layout` centres the fitted title and its badge as one
+group in the strip's title region, so the badge sits right after the text
+(with no badge the title is centred as before); popover rows put it right
+after the left-aligned title. Record changes are chrome changes in the drain
+(`status().version()`).
+
+Attention signals (BEL, OSC 9/777 notifications, OSC 7501 transitions into
+blocked/done/error) are coalesced per drain per tab, then routed by
+`App::tab_wants_attention`:
+
+- `tab_is_seen` is `index == active && focused`. A seen tab never glows; its
+  `done`/`error` results are acknowledged on the spot, as are records
+  re-reported while it is watched.
+- An unseen tab (another strip tab, a parked tab, or any tab while the window
+  is unfocused) gets `Tab::attention = Some(now)`, the pulse start. A tab that
+  is already glowing restarts its pulse only after `GLOW_REPULSE` (10 s), so a
+  periodic bell cannot keep frames running. `[tabbar] attention = "off"` never
+  sets it.
+- `App::tab_seen` clears the glow and acknowledges `done`/`error`. It runs on
+  `switch_tab` (activation and peek), `unpark_tab`, `on_focused(true)` for the
+  displayed tab, and after removals reconcile a new focused active tab.
+
+Painting: `tabbar::glow(started, now, mode)` returns the intensity and the next
+frame delay. `pulse` breathes twice over `GLOW_PULSE` (1.5 s) from and back to
+`GLOW_STEADY`, requesting at most 16 ms frames through
+`ctx.request_repaint_after`, then returns `Duration::MAX`; `static` is steady
+from the start. A strip tab gets an accent outline plus a soft halo on its
+pill, a parked tab lights the tray badge outline and a 3-point bar on its
+popover row. Red marks a tab with an `error` record, blue otherwise. While
+visuals are suspended no frame runs; the pulse follows wall-clock time, so an
+uncovered window shows the settled glow. On platforms that hide the strip for
+a single tab, a lone tab has nowhere to glow.
+
+Headless tests cover the seen/unseen matrix, clearing paths, burst coalescing,
+the drain route, badge fitting, and that a settled or static glow requests no
+repaint. They do not measure GPU or idle cost; see [idle](idle.md).
+
 ## Tab-label source policy
 
 [`app/tab.rs`](../src/app/tab.rs) formats `$title`, `$command`, `$cwd`, and `$tab`
@@ -257,6 +305,13 @@ An empty render or no filled referenced variable falls back to `Tab N`.
   a live OSC 7 from that job/integrated remote shell wins, else shell cwd.
 - `osc7_is_live` compares report generation with the last prompt baseline;
   a finished job's leftover path must not resurface during the next job.
+- **Live title** (`[tabbar] live_title`, default on): while a job owns the
+  TTY (`Tab::running`) and set a non-empty OSC 0/2 title since the shell last
+  owned it (`title_is_live` against `Foreground::title_baseline`), the
+  trimmed title, truncated to `max_label_chars`, replaces the whole template.
+  At the prompt the template always applies, so shells that title every prompt
+  keep it; a title a finished job left behind never resurfaces. Unknown
+  foreground groups are never jobs, so a title cannot stick there either.
 - Refresh kernel facts only after output, once per touched tab/burst. Cache
   command lookup until pgid changes, keep facts on failed queries, and keep all
   process syscalls off paint. Do not query immediately at spawn: before exec,

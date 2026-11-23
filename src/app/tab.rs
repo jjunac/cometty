@@ -31,6 +31,9 @@ pub(crate) struct Foreground {
     /// `Terminal::cwd_version` when the shell last owned the terminal;
     /// OSC 7 reports older than this are leftovers from a finished job.
     cwd_baseline: u64,
+    /// `Terminal::title_version` when the shell last owned the terminal;
+    /// a newer title was set by the running job (see [`title_is_live`]).
+    title_baseline: u64,
 }
 
 /// Result of [`Tab::refresh_title`]: which cached facts moved.
@@ -98,6 +101,10 @@ pub struct Tab {
     /// Directory the shell was spawned in when it overrode `[shell] cwd`
     /// (a restored tab): the snapshot fallback until the first kernel query.
     pub(crate) spawn_cwd: Option<String>,
+    /// Something in this tab wanted attention while it was unseen (bell,
+    /// notification, OSC 7501 blocked/done/error): the start of its glow
+    /// pulse. Cleared when the user sees the tab; see `App::tab_seen`.
+    pub(crate) attention: Option<Instant>,
 }
 
 impl Tab {
@@ -161,6 +168,7 @@ impl Tab {
             input_notice: None,
             pending_reply: None,
             spawn_cwd: None,
+            attention: None,
         }
     }
 
@@ -215,6 +223,11 @@ impl Tab {
             if !running && self.background && !displayed {
                 self.bg_attention = true;
             }
+            // OSC 7501: a finished job's working/blocked/idle records are
+            // stale; its done/error results stay until the tab is seen.
+            if !running {
+                self.terminal.end_job();
+            }
         }
         let mut cwd_changed = false;
         if let Some(cwd) = shell_pid.or(pgid).and_then(procinfo::cwd)
@@ -228,6 +241,9 @@ impl Tab {
         // to move `$cwd` away from the shell's own directory.
         if shell_pid.is_some_and(|pid| pgid == Some(pid)) {
             self.foreground.cwd_baseline = self.terminal.cwd_version();
+            // Likewise titles: the prompt's own title never counts as a
+            // job's, nor does one a finished job left behind.
+            self.foreground.title_baseline = self.terminal.title_version();
         }
         let elapsed = start.elapsed();
         crate::perf::duration(crate::perf::Metric::TitleRefresh, elapsed);
@@ -466,6 +482,23 @@ pub fn osc7_is_live(reported: u64, baseline: u64, shell_foreground: bool) -> boo
     shell_foreground || reported != baseline
 }
 
+/// Whether the user is looking at tab `index`: it is the displayed tab (a
+/// foreground tab or an in-place peek) and the window has focus. Parked
+/// tabs, other strip tabs, and everything while the window is in the
+/// background are unseen.
+pub(crate) fn tab_is_seen(index: usize, active: usize, focused: bool) -> bool {
+    index == active && focused
+}
+
+/// Whether the `OSC 0/2` title was set by the job that owns the terminal,
+/// so it may replace `[tabbar] title_format` (`live_title`). Never at the
+/// prompt (`at_prompt`): shells that title every prompt keep the template,
+/// and a title a finished job left behind (`version == baseline`) does not
+/// resurface.
+pub fn title_is_live(version: u64, baseline: u64, at_prompt: bool, title: &str) -> bool {
+    !at_prompt && version != baseline && !title.is_empty()
+}
+
 /// Map an old `active` tab index across removal of `removed` indices.
 ///
 /// Counts how many removed tabs sat before `active` and shifts it down
@@ -518,6 +551,8 @@ impl App {
             .map(|(i, t)| crate::tabbar::TabLabel {
                 id: t.id,
                 title: self.title_for_tab(i, t),
+                status: t.terminal.status().summary(),
+                glow: t.attention,
             })
             .collect()
     }
@@ -533,8 +568,50 @@ impl App {
                 title: self.title_for_tab(i, t),
                 running: t.running,
                 attention: t.bg_attention,
+                status: t.terminal.status().summary(),
+                glow: t.attention,
             })
             .collect()
+    }
+
+    /// The user sees tab `index` (activated, peeked, unparked, or the
+    /// window regained focus over it): its glow stops and its `OSC 7501`
+    /// `done`/`error` results count as read. Returns whether chrome changed.
+    pub(crate) fn tab_seen(&mut self, index: usize) -> bool {
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return false;
+        };
+        let glowed = tab.attention.take().is_some();
+        tab.terminal.acknowledge_status() || glowed
+    }
+
+    /// Route one tab's attention signal (bell, notification, OSC 7501
+    /// transition) after a drain. A tab the user is looking at in a focused
+    /// window has nothing to flag: its results are read on the spot. An
+    /// unseen tab starts (or, after [`crate::tabbar::GLOW_REPULSE`],
+    /// restarts) its glow. Returns whether chrome changed.
+    pub(crate) fn tab_wants_attention(&mut self, index: usize, now: Instant) -> bool {
+        if tab_is_seen(index, self.active, self.focused) {
+            return self.tab_seen(index);
+        }
+        let mode = crate::tabbar::AttentionMode::from_config(&self.config.tabbar.attention);
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return false;
+        };
+        if mode == crate::tabbar::AttentionMode::Off {
+            return false;
+        }
+        match tab.attention {
+            Some(started)
+                if now.saturating_duration_since(started) < crate::tabbar::GLOW_REPULSE =>
+            {
+                false
+            }
+            _ => {
+                tab.attention = Some(now);
+                true
+            }
+        }
     }
 
     /// Foreground tabs occupy a prefix of `App::tabs`, so strip indices,
@@ -627,6 +704,21 @@ impl App {
             shell_foreground,
         )
         .map(procinfo::shorten_home);
+        // `running` (not `!shell_foreground`): with no known foreground
+        // group nothing is a job, so a title can never stick.
+        if self.config.tabbar.live_title
+            && title_is_live(
+                t.terminal.title_version(),
+                t.foreground.title_baseline,
+                !t.running,
+                t.terminal.title().trim(),
+            )
+        {
+            return truncate_label(
+                t.terminal.title().trim(),
+                self.config.tabbar.max_label_chars,
+            );
+        }
         format_title(
             &TitleVars {
                 title: t.terminal.title(),
@@ -818,6 +910,8 @@ impl App {
             old.last_key_write = None;
         }
         self.active = index;
+        // The frame below repaints the strip either way.
+        self.tab_seen(index);
         let id = self.tabs[index].id;
         if self.tabs[index].background {
             // Seeing the tab clears its "job finished" marker.
@@ -1004,6 +1098,7 @@ impl App {
         let insert = self.foreground_count();
         self.tabs.insert(insert, tab);
         self.active = insert;
+        self.tab_seen(insert);
         self.last_foreground_tab = Some(id);
         self.bg_popover_open = false;
         self.pty_schedule.moved(from, insert);
@@ -1080,6 +1175,11 @@ impl App {
             self.tabs.insert(0, tab);
             self.pty_schedule.moved(promote, 0);
             self.active = 0;
+        }
+        // Whatever is displayed now is seen if the window has focus; the
+        // callers repaint after reconciling.
+        if self.focused {
+            self.tab_seen(self.active);
         }
         let (id, background) = self
             .tabs
@@ -1507,6 +1607,102 @@ mod tests {
             Some("/reported")
         );
         assert_eq!(preferred_cwd(None, None, true), None);
+    }
+
+    #[test]
+    fn title_liveness_requires_a_job_title_newer_than_the_prompt() {
+        assert!(title_is_live(2, 1, false, "OC | fix"));
+        assert!(!title_is_live(1, 1, false, "left behind"));
+        assert!(!title_is_live(2, 1, true, "prompt title"));
+        assert!(!title_is_live(2, 1, false, ""));
+    }
+
+    #[test]
+    fn live_title_replaces_the_template_only_while_a_job_set_it() {
+        let (mut app, _inputs) = app_with_tabs(1);
+        let label = |app: &App| app.title_for_tab(0, &app.tabs[0]);
+        // The shell titles its prompt: the template ("$tab") still applies.
+        app.tabs[0].terminal.feed(b"\x1b]2;zsh: ~/dev\x07");
+        app.tabs[0].foreground.title_baseline = app.tabs[0].terminal.title_version();
+        assert_eq!(label(&app), "1");
+        // A job without a title of its own keeps the template too.
+        app.tabs[0].running = true;
+        assert_eq!(label(&app), "1");
+        app.tabs[0].terminal.feed(b"\x1b]2;OC | fix the bug\x07");
+        assert_eq!(label(&app), "OC | fix the bug");
+        app.config.tabbar.max_label_chars = 5;
+        assert_eq!(label(&app), "OC |\u{2026}");
+        app.config.tabbar.max_label_chars = 32;
+        app.config.tabbar.live_title = false;
+        assert_eq!(label(&app), "1");
+        app.config.tabbar.live_title = true;
+        // An empty title (opencode resets it on exit) is no title.
+        app.tabs[0].terminal.feed(b"\x1b]2;\x07");
+        assert_eq!(label(&app), "1");
+        // Back at the prompt, a leftover title never resurfaces.
+        app.tabs[0].terminal.feed(b"\x1b]2;stale\x07");
+        app.tabs[0].running = false;
+        app.tabs[0].foreground.title_baseline = app.tabs[0].terminal.title_version();
+        assert_eq!(label(&app), "1");
+        app.tabs[0].running = true;
+        assert_eq!(label(&app), "1");
+    }
+
+    #[test]
+    fn attention_glows_only_unseen_tabs_and_viewing_clears_it() {
+        let (mut app, _inputs) = app_with_tabs(3);
+        let now = Instant::now();
+        app.active = 0;
+        app.focused = true;
+        // The watched tab never glows; its results are read on the spot.
+        app.tabs[0].terminal.feed(b"\x1b]7501;state=done\x1b\\");
+        assert!(app.tabs[0].terminal.take_attention());
+        app.tab_wants_attention(0, now);
+        assert!(app.tabs[0].attention.is_none());
+        assert_eq!(app.tabs[0].terminal.status().len(), 0);
+        // Another strip tab is unseen.
+        app.tabs[1].terminal.feed(b"\x1b]7501;state=error\x1b\\");
+        assert!(app.tab_wants_attention(1, now));
+        assert_eq!(app.tabs[1].attention, Some(now));
+        // A burst does not restart the pulse until the repulse delay.
+        assert!(!app.tab_wants_attention(1, now + Duration::from_secs(1)));
+        assert_eq!(app.tabs[1].attention, Some(now));
+        let later = now + crate::tabbar::GLOW_REPULSE;
+        assert!(app.tab_wants_attention(1, later));
+        assert_eq!(app.tabs[1].attention, Some(later));
+        // With the window in the background even the displayed tab glows,
+        // until focus returns.
+        app.focused = false;
+        assert!(app.tab_wants_attention(0, now));
+        app.on_focused(true);
+        assert!(app.tabs[0].attention.is_none());
+        // Activating tab 1 clears its glow and reads its error result.
+        app.switch_tab(1);
+        assert!(app.tabs[1].attention.is_none());
+        assert_eq!(app.tabs[1].terminal.status().len(), 0);
+        // `off` never glows.
+        app.config.tabbar.attention = "off".into();
+        assert!(!app.tab_wants_attention(2, now));
+        assert!(app.tabs[2].attention.is_none());
+    }
+
+    #[test]
+    fn peeking_and_unparking_clear_a_parked_tab_glow() {
+        let (mut app, _inputs) = app_with_tabs(3);
+        app.focused = true;
+        app.park_tab(app.tabs[2].id);
+        let parked = app.tabs.iter().position(|t| t.background).unwrap();
+        let id = app.tabs[parked].id;
+        assert!(app.tab_wants_attention(parked, Instant::now()));
+        assert!(app.background_labels()[0].glow.is_some());
+        app.peek_background_tab(id);
+        let index = app.tab_index(id).unwrap();
+        assert!(app.tabs[index].attention.is_none());
+        app.switch_tab(0);
+        assert!(app.tab_wants_attention(index, Instant::now()));
+        app.unpark_tab(id);
+        let index = app.tab_index(id).unwrap();
+        assert!(app.tabs[index].attention.is_none());
     }
 
     #[test]

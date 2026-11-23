@@ -170,6 +170,7 @@ impl Renderer {
                 background: background_tabs,
                 peeking,
                 popover_open: bg_popover_open,
+                now: std::time::Instant::now(),
             },
             tab_drag,
             &tabbar_cfg,
