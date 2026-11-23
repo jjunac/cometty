@@ -412,7 +412,8 @@ pub fn mouse_button_base(button: MouseButton) -> Option<u8> {
 }
 
 /// Core mouse encoder. `cb_base` is the pre-modifier code
-/// (`0/1/2` press, `3` release, `32-35` motion, `64/65` wheel).
+/// (`0/1/2` press and SGR release, `3` legacy release, `32-35` motion,
+/// `64/65` wheel).
 /// `col`/`row` are 0-based view cells; encoded 1-based.
 /// SGR (`1006`) uses `ESC[<cb;x;yM/m`; otherwise legacy X10
 /// `ESC[M Cb Cx Cy`. Legacy returns `None` when out of range.
@@ -466,14 +467,18 @@ pub fn encode_mouse_press(
     encode_mouse(base, col, row, modifiers, sgr, false)
 }
 
-/// Release event (always `Cb=3`, SGR suffix `m`).
+/// Release event for `1000/1002/1003`.
+/// SGR (`1006`) encodes the released button (`0/1/2`) with suffix `m`;
+/// legacy X10 has no per-button release code and uses `Cb=3`.
 pub fn encode_mouse_release(
+    button: MouseButton,
     col: usize,
     row: usize,
     modifiers: &ModifiersState,
     sgr: bool,
 ) -> Option<Vec<u8>> {
-    encode_mouse(3, col, row, modifiers, sgr, true)
+    let base = mouse_button_base(button)?;
+    encode_mouse(if sgr { base } else { 3 }, col, row, modifiers, sgr, true)
 }
 
 /// Drag motion while a button is held: `Cb = button + 32`.
@@ -1302,32 +1307,64 @@ mod tests {
             encode_mouse_press(MouseButton::Left, 0, 0, &none, true),
             Some(b"\x1b[<0;1;1M".to_vec())
         );
-        // Release uses Cb=3, suffix m.
+        // SGR release encodes the released button (0/1/2) with suffix m.
         assert_eq!(
-            encode_mouse_release(1, 2, &none, true),
-            Some(b"\x1b[<3;2;3m".to_vec())
+            encode_mouse_release(MouseButton::Left, 1, 2, &none, true),
+            Some(b"\x1b[<0;2;3m".to_vec())
+        );
+        assert_eq!(
+            encode_mouse_release(MouseButton::Middle, 1, 2, &none, true),
+            Some(b"\x1b[<1;2;3m".to_vec())
+        );
+        assert_eq!(
+            encode_mouse_release(MouseButton::Right, 1, 2, &none, true),
+            Some(b"\x1b[<2;2;3m".to_vec())
         );
         // Right press at 10,5 -> 11;6.
         assert_eq!(
             encode_mouse_press(MouseButton::Right, 10, 5, &none, true),
             Some(b"\x1b[<2;11;6M".to_vec())
         );
+        // Unsupported buttons drop on release too.
+        assert_eq!(
+            encode_mouse_release(MouseButton::Back, 0, 0, &none, true),
+            None
+        );
     }
 
     #[test]
-    fn mouse_legacy_press() {
+    fn mouse_legacy_press_and_release() {
         let none = ModifiersState::empty();
         // Left at 0,0: Cb=0+32=32(' '), Cx=33('!'), Cy=33.
         assert_eq!(
             encode_mouse_press(MouseButton::Left, 0, 0, &none, false),
             Some(vec![0x1b, b'[', b'M', 32, 33, 33])
         );
+        // Legacy X10 release has no per-button code and uses Cb=3+32=35('#').
+        for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+            assert_eq!(
+                encode_mouse_release(button, 1, 2, &none, false),
+                Some(vec![0x1b, b'[', b'M', 35, 34, 35])
+            );
+        }
+        assert_eq!(
+            encode_mouse_release(MouseButton::Back, 1, 2, &none, false),
+            None
+        );
         // Out of range (>223) drops in legacy but still encodes SGR.
         assert_eq!(
             encode_mouse_press(MouseButton::Left, 300, 0, &none, false),
             None
         );
+        assert_eq!(
+            encode_mouse_release(MouseButton::Left, 300, 0, &none, false),
+            None
+        );
         assert!(encode_mouse_press(MouseButton::Left, 300, 0, &none, true).is_some());
+        assert_eq!(
+            encode_mouse_release(MouseButton::Left, 300, 0, &none, true),
+            Some(b"\x1b[<0;301;1m".to_vec())
+        );
     }
 
     #[test]
@@ -1335,15 +1372,23 @@ mod tests {
         let shift = ModifiersState::SHIFT;
         let ctrl = ModifiersState::CONTROL;
         let none = ModifiersState::empty();
-        // Shift adds 4: left press Cb=4.
+        // Shift adds 4: left press Cb=4, left release Cb=4.
         assert_eq!(
             encode_mouse_press(MouseButton::Left, 0, 0, &shift, true),
             Some(b"\x1b[<4;1;1M".to_vec())
         );
-        // Ctrl adds 16.
+        assert_eq!(
+            encode_mouse_release(MouseButton::Left, 0, 0, &shift, true),
+            Some(b"\x1b[<4;1;1m".to_vec())
+        );
+        // Ctrl adds 16: left press Cb=16, right release Cb=18.
         assert_eq!(
             encode_mouse_press(MouseButton::Left, 0, 0, &ctrl, true),
             Some(b"\x1b[<16;1;1M".to_vec())
+        );
+        assert_eq!(
+            encode_mouse_release(MouseButton::Right, 0, 0, &ctrl, true),
+            Some(b"\x1b[<18;1;1m".to_vec())
         );
         assert_eq!(mouse_modifier_bits(&none), 0);
         assert_eq!(mouse_modifier_bits(&shift), 4);

@@ -19,6 +19,14 @@ impl App {
         self.renderer.as_ref()?.cell_at_pos(x, y, tab_count)
     }
 
+    /// Visible `(col, view_row)` clamped to the nearest grid edge, or `None`
+    /// when the cursor position is unknown or the renderer is unavailable.
+    pub(crate) fn clamped_cell_under_cursor(&self) -> Option<(usize, usize)> {
+        let (x, y) = self.cursor_pos?;
+        let tab_count = self.tabs.len();
+        self.renderer.as_ref()?.cell_at_pos_clamped(x, y, tab_count)
+    }
+
     /// Whether the overlay scrollbar is currently painted.
     pub(crate) fn scrollbar_visible(&self) -> bool {
         let Some(t) = self.active_tab() else {

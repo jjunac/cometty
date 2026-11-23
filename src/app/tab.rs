@@ -910,6 +910,8 @@ impl App {
             old.last_key_write = None;
         }
         self.active = index;
+        self.mouse_reported = None;
+        self.last_mouse_report = None;
         // The frame below repaints the strip either way.
         self.tab_seen(index);
         let id = self.tabs[index].id;

@@ -756,6 +756,22 @@ impl Renderer {
         )
     }
 
+    /// Like [`Self::cell_at_pos`], clamping out-of-bounds positions (tab bar,
+    /// margins) to the nearest grid edge.
+    pub fn cell_at_pos_clamped(&self, x: f32, y: f32, tab_count: usize) -> Option<(usize, usize)> {
+        let tab_bar = self.tab_bar_px(tab_count);
+        let cols = self.cols_for_width(self.width);
+        let rows = self.term_rows(tab_count);
+        crate::selection::cell_at_pos_clamped(
+            x,
+            y - tab_bar,
+            self.cell_width,
+            self.line_height,
+            cols,
+            rows,
+        )
+    }
+
     /// True when physical `y` falls on the tab-bar chrome (never when the
     /// bar is hidden for a single tab).
     pub fn over_tab_bar(&self, y_phys: f32, tab_count: usize) -> bool {

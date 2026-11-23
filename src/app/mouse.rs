@@ -19,6 +19,16 @@ pub(crate) struct MotionState {
     sgr: bool,
 }
 
+/// PTY-reported mouse buttons currently held on a specific tab, plus the last
+/// grid cell reported for them (fallback when the release lands outside the
+/// grid).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReportedMouse {
+    tab: u64,
+    buttons: u8,
+    last_cell: (usize, usize),
+}
+
 /// What the pointer is over in egui chrome, judged from the last painted
 /// frame. Only these can change appearance under a moving pointer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -173,24 +183,10 @@ fn mouse_bit(button: MouseButton) -> Option<u8> {
 }
 
 impl App {
-    fn held_button_base(&self) -> Option<u8> {
-        if self.mouse_pressed & 1 != 0 {
-            Some(0)
-        } else if self.mouse_pressed & 2 != 0 {
-            Some(1)
-        } else if self.mouse_pressed & 4 != 0 {
-            Some(2)
-        } else {
-            None
-        }
-    }
-
-    /// Active mouse-reporting state, or `None` for local handling.
-    /// `Shift` held forces local selection/scroll (override).
-    fn mouse_report_state(&self) -> Option<(MouseMode, bool)> {
-        if self.modifiers.shift_key() {
-            return None;
-        }
+    /// Active tab's mouse-reporting state, ignoring the `Shift` override.
+    /// Used so an already-reported PTY drag/release still finishes cleanly if
+    /// `Shift` is pressed before release.
+    fn active_mouse_report_state(&self) -> Option<(MouseMode, bool)> {
         let tab = self.active_tab()?;
         let mode = tab.terminal.mouse_mode();
         if !mode.enabled() {
@@ -199,12 +195,140 @@ impl App {
         Some((mode, tab.terminal.mouse_sgr()))
     }
 
+    /// Active mouse-reporting state, or `None` for local handling.
+    /// `Shift` held forces local selection/scroll (override).
+    fn mouse_report_state(&self) -> Option<(MouseMode, bool)> {
+        if self.modifiers.shift_key() {
+            return None;
+        }
+        self.active_mouse_report_state()
+    }
+
+    /// Lowest held button (`0=left, 1=middle, 2=right`) among presses that were
+    /// actually reported to the active tab's PTY.
+    fn reported_button_base(&self) -> Option<u8> {
+        let active_id = self.active_tab()?.id;
+        let reported = self.mouse_reported.filter(|r| r.tab == active_id)?;
+        if reported.buttons & 1 != 0 {
+            Some(0)
+        } else if reported.buttons & 2 != 0 {
+            Some(1)
+        } else if reported.buttons & 4 != 0 {
+            Some(2)
+        } else {
+            None
+        }
+    }
+
+    fn record_reported_press(&mut self, tab: u64, bit: u8, cell: (usize, usize)) {
+        match self.mouse_reported.as_mut() {
+            Some(reported) if reported.tab == tab => {
+                reported.buttons |= bit;
+                reported.last_cell = cell;
+            }
+            _ => {
+                self.mouse_reported = Some(ReportedMouse {
+                    tab,
+                    buttons: bit,
+                    last_cell: cell,
+                });
+            }
+        }
+    }
+
+    fn clear_reported_button(&mut self, bit: u8) {
+        if let Some(reported) = self.mouse_reported.as_mut() {
+            reported.buttons &= !bit;
+            if reported.buttons == 0 {
+                self.mouse_reported = None;
+            }
+        }
+    }
+
+    /// Clear `bit` from the active tab's reported press set and return its last
+    /// reported cell when that button was actually reported on this tab.
+    fn take_reported_release(&mut self, bit: u8) -> Option<(usize, usize)> {
+        let active_id = self.active_tab().map(|t| t.id);
+        let reported = self.mouse_reported.as_mut()?;
+        if Some(reported.tab) != active_id {
+            self.mouse_reported = None;
+            return None;
+        }
+        if reported.buttons & bit == 0 {
+            return None;
+        }
+        let last_cell = reported.last_cell;
+        reported.buttons &= !bit;
+        if reported.buttons == 0 {
+            self.mouse_reported = None;
+        }
+        Some(last_cell)
+    }
+
     fn send_to_active_pty(&self, bytes: Option<Vec<u8>>) -> bool {
         if let (Some(data), Some(tab)) = (bytes, self.active_tab()) {
             tab.pty.write(data)
         } else {
             false
         }
+    }
+
+    /// Forward pointer motion to the active PTY when mouse reporting owns it.
+    /// Returns `true` when mouse reporting handled (or suppressed) the motion
+    /// so local selection does not also run. Split from [`Self::on_cursor_moved`]
+    /// so motion/dedup rules are testable without a renderer.
+    fn route_mouse_motion_at(&mut self, cell: Option<(usize, usize)>) -> bool {
+        // An in-progress local selection (e.g. started with Shift held) owns
+        // motion until release, even if Shift is released mid-drag.
+        if self.active_tab().is_some_and(|t| t.selecting) {
+            self.last_mouse_report = None;
+            return false;
+        }
+        let held_base = self.reported_button_base();
+        let report_state = if held_base.is_some() {
+            self.active_mouse_report_state()
+        } else {
+            self.mouse_report_state()
+        };
+        let Some((mode, sgr)) = report_state else {
+            self.last_mouse_report = None;
+            return false;
+        };
+        let button_held = held_base.is_some();
+        if !mode.reports_motion(button_held) {
+            self.last_mouse_report = None;
+            return true;
+        }
+        let Some((col, view_row)) = cell else {
+            return true;
+        };
+        let tab_id = self.active_tab().unwrap().id;
+        let state = MotionState {
+            tab: tab_id,
+            cell: (col, view_row),
+            button: held_base,
+            modifiers: self.modifiers,
+            mode,
+            sgr,
+        };
+        if self.last_mouse_report == Some(state) {
+            return true;
+        }
+        let bytes = match held_base {
+            Some(base) => {
+                crate::input::encode_mouse_drag(base, col, view_row, &self.modifiers, sgr)
+            }
+            None => crate::input::encode_mouse_hover(col, view_row, &self.modifiers, sgr),
+        };
+        if self.send_to_active_pty(bytes) {
+            self.last_mouse_report = Some(state);
+            if let Some(reported) = self.mouse_reported.as_mut()
+                && reported.tab == tab_id
+            {
+                reported.last_cell = (col, view_row);
+            }
+        }
+        true
     }
 
     pub(crate) fn on_cursor_moved(&mut self, x: f32, y: f32) {
@@ -232,43 +356,14 @@ impl App {
             return;
         }
         // Mouse reporting: forward motion instead of extending a selection.
-        if let Some((mode, sgr)) = self.mouse_report_state() {
-            let button_held = self.mouse_pressed != 0;
-            if !mode.reports_motion(button_held) {
-                self.last_mouse_report = None;
-                return;
-            }
-            let Some((col, view_row)) = self.cell_under_cursor() else {
-                return;
-            };
-            let state = MotionState {
-                tab: self.active_tab().unwrap().id,
-                cell: (col, view_row),
-                button: self.held_button_base(),
-                modifiers: self.modifiers,
-                mode,
-                sgr,
-            };
-            if self.last_mouse_report == Some(state) {
-                return;
-            }
-            let bytes = match self.held_button_base() {
-                Some(base) => {
-                    crate::input::encode_mouse_drag(base, col, view_row, &self.modifiers, sgr)
-                }
-                None => crate::input::encode_mouse_hover(col, view_row, &self.modifiers, sgr),
-            };
-            if self.send_to_active_pty(bytes) {
-                self.last_mouse_report = Some(state);
-            }
+        let cell = self.cell_under_cursor();
+        if self.route_mouse_motion_at(cell) {
             return;
         }
-        self.last_mouse_report = None;
         let selecting = self.active_tab().is_some_and(|t| t.selecting);
         if !selecting {
             return;
         }
-        let cell = self.cell_under_cursor();
         let global = cell.and_then(|(_, row)| self.view_to_global(row));
         let (Some((col, _)), Some(g)) = (cell, global) else {
             return;
@@ -434,6 +529,7 @@ impl App {
             self.bg_popover_open = false;
             self.last_mouse_report = None;
             self.mouse_pressed = 0;
+            self.mouse_reported = None;
             self.link_press = false;
         }
         let report = self.active_tab().is_some_and(|t| t.terminal.focus_report());
@@ -463,20 +559,24 @@ impl App {
         egui_consumed: bool,
     ) {
         let notice = self.update_notice_under_cursor();
-        self.route_mouse_input(button, state, egui_consumed, notice);
+        let cell = self.cell_under_cursor();
+        let clamped_cell = cell.or_else(|| self.clamped_cell_under_cursor());
+        self.route_mouse_input_at(button, state, egui_consumed, notice, cell, clamped_cell);
     }
 
-    /// [`Self::on_mouse_input`] with the update-notice hit-test resolved,
-    /// so routing is testable without a renderer. egui has already seen the
-    /// event (its buttons click there); here a press on the notice is chrome.
-    fn route_mouse_input(
+    /// [`Self::on_mouse_input`] with the update-notice hit-test and grid cell
+    /// resolved, so routing is testable without a renderer. egui has already
+    /// seen the event (its buttons click there); here a press on the notice is
+    /// chrome.
+    fn route_mouse_input_at(
         &mut self,
         button: MouseButton,
         state: ElementState,
         egui_consumed: bool,
         notice: Option<crate::renderer::update_ui::NoticeTarget>,
+        cell: Option<(usize, usize)>,
+        clamped_cell: Option<(usize, usize)>,
     ) {
-        self.last_mouse_report = None;
         // A press anywhere but the popover (or its tray toggle) dismisses
         // the menu, then continues as a normal click. The tray press is
         // excluded so its release toggles the popover exactly once.
@@ -505,15 +605,19 @@ impl App {
                 // the previous button was released outside this window.
                 self.tab_drag = crate::tabbar::TabDrag::default();
             } else if self.tab_drag.release() {
+                self.last_mouse_report = None;
                 self.mouse_pressed &= !1;
+                self.clear_reported_button(1);
                 return;
             }
         }
         if self.tab_drag.captures_pointer() {
+            self.last_mouse_report = None;
             if state == ElementState::Released
                 && let Some(bit) = mouse_bit(button)
             {
                 self.mouse_pressed &= !bit;
+                self.clear_reported_button(bit);
             }
             return;
         }
@@ -522,6 +626,7 @@ impl App {
         // terminal selection. Releases always flow through so a drag started
         // before the panel opened can't stick.
         if self.settings.open && egui_consumed && state == ElementState::Pressed {
+            self.last_mouse_report = None;
             return;
         }
         let is_grid_button = matches!(
@@ -529,6 +634,7 @@ impl App {
             MouseButton::Left | MouseButton::Middle | MouseButton::Right
         );
         if is_grid_button {
+            self.last_mouse_report = None;
             match state {
                 ElementState::Pressed => {
                     // The update notice floats over the grid: its press is
@@ -579,8 +685,8 @@ impl App {
                     if let Some(bit) = mouse_bit(button) {
                         self.mouse_pressed |= bit;
                     }
-                    if let Some((_, sgr)) = self.mouse_report_state() {
-                        let Some((col, view_row)) = self.cell_under_cursor() else {
+                    if let Some((mode, sgr)) = self.mouse_report_state() {
+                        let Some((col, view_row)) = cell else {
                             return;
                         };
                         let bytes = crate::input::encode_mouse_press(
@@ -590,7 +696,25 @@ impl App {
                             &self.modifiers,
                             sgr,
                         );
-                        self.send_to_active_pty(bytes);
+                        if self.send_to_active_pty(bytes) {
+                            let tab_id = self.active_tab().unwrap().id;
+                            if let Some(bit) = mouse_bit(button) {
+                                self.record_reported_press(tab_id, bit, (col, view_row));
+                            }
+                            // Seed motion deduplication at the press cell so
+                            // subpixel jitter during a click does not emit a
+                            // spurious same-cell drag before leaving the cell.
+                            if mode.reports_motion(true) {
+                                self.last_mouse_report = Some(MotionState {
+                                    tab: tab_id,
+                                    cell: (col, view_row),
+                                    button: self.reported_button_base(),
+                                    modifiers: self.modifiers,
+                                    mode,
+                                    sgr,
+                                });
+                            }
+                        }
                         return;
                     }
                     // Local fallback below only selects with the left button.
@@ -603,6 +727,8 @@ impl App {
                     if let Some(bit) = mouse_bit(button) {
                         self.mouse_pressed &= !bit;
                     }
+                    let reported_fallback =
+                        mouse_bit(button).and_then(|bit| self.take_reported_release(bit));
                     // The press opened a link: swallow its release.
                     if button == MouseButton::Left && self.link_press {
                         self.link_press = false;
@@ -614,13 +740,33 @@ impl App {
                     if notice.is_some() && !held {
                         return;
                     }
-                    if let Some((_, sgr)) = self.mouse_report_state() {
-                        let Some((col, view_row)) = self.cell_under_cursor() else {
-                            return;
-                        };
-                        let bytes =
-                            crate::input::encode_mouse_release(col, view_row, &self.modifiers, sgr);
-                        self.send_to_active_pty(bytes);
+                    // Only report releases that match a PTY-reported press on
+                    // this tab (bypassing Shift and clamping off-grid releases
+                    // so the app never gets stuck with a held button).
+                    if let Some(fallback_cell) = reported_fallback {
+                        if let Some((mode, sgr)) = self.active_mouse_report_state() {
+                            let (col, view_row) = clamped_cell.unwrap_or(fallback_cell);
+                            let bytes = crate::input::encode_mouse_release(
+                                button,
+                                col,
+                                view_row,
+                                &self.modifiers,
+                                sgr,
+                            );
+                            if self.send_to_active_pty(bytes) {
+                                let remaining = self.reported_button_base();
+                                if mode.reports_motion(remaining.is_some()) {
+                                    self.last_mouse_report = Some(MotionState {
+                                        tab: self.active_tab().unwrap().id,
+                                        cell: (col, view_row),
+                                        button: remaining,
+                                        modifiers: self.modifiers,
+                                        mode,
+                                        sgr,
+                                    });
+                                }
+                            }
+                        }
                         return;
                     }
                     if button != MouseButton::Left {
@@ -632,7 +778,7 @@ impl App {
         match (button, state) {
             (MouseButton::Left, ElementState::Pressed) => {
                 let now = Instant::now();
-                let Some((col, view_row)) = self.cell_under_cursor() else {
+                let Some((col, view_row)) = cell else {
                     return;
                 };
                 let Some(global) = self.view_to_global(view_row) else {
@@ -1177,13 +1323,27 @@ mod tests {
             NoticeTarget::Open,
         ] {
             for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
-                app.route_mouse_input(button, ElementState::Pressed, true, Some(target));
+                app.route_mouse_input_at(
+                    button,
+                    ElementState::Pressed,
+                    true,
+                    Some(target),
+                    None,
+                    None,
+                );
                 assert_eq!(
                     app.mouse_pressed, 0,
                     "{target:?} {button:?} is no grid press"
                 );
                 assert!(!app.link_press);
-                app.route_mouse_input(button, ElementState::Released, true, Some(target));
+                app.route_mouse_input_at(
+                    button,
+                    ElementState::Released,
+                    true,
+                    Some(target),
+                    None,
+                    None,
+                );
                 assert_eq!(app.mouse_pressed, 0);
             }
         }
@@ -1196,17 +1356,281 @@ mod tests {
 
         // Control: the same press off the notice is a terminal press, and a
         // drag that ends over the notice still finishes its selection.
-        app.route_mouse_input(MouseButton::Left, ElementState::Pressed, false, None);
+        app.route_mouse_input_at(
+            MouseButton::Left,
+            ElementState::Pressed,
+            false,
+            None,
+            None,
+            None,
+        );
         assert_eq!(app.mouse_pressed, 1);
         app.tabs[0].selecting = true;
-        app.route_mouse_input(
+        app.route_mouse_input_at(
             MouseButton::Left,
             ElementState::Released,
             false,
             Some(NoticeTarget::Later),
+            None,
+            None,
         );
         assert_eq!(app.mouse_pressed, 0);
         assert!(!app.tabs[0].selecting, "release finalizes the drag");
+    }
+
+    #[test]
+    fn sgr_click_reports_released_button_and_suppresses_same_cell_drag_jitter() {
+        use winit::event::{ElementState, MouseButton};
+        let (mut app, inputs) = mouse_app();
+        // Enable 1000/1002/1003 + 1006 SGR tracking, matching OpenTUI / opencode.
+        app.tabs[0]
+            .terminal
+            .feed(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h");
+
+        for (button, code) in [
+            (MouseButton::Left, 0),
+            (MouseButton::Middle, 1),
+            (MouseButton::Right, 2),
+        ] {
+            app.route_mouse_input_at(
+                button,
+                ElementState::Pressed,
+                false,
+                None,
+                Some((4, 1)),
+                Some((4, 1)),
+            );
+            assert_eq!(
+                inputs[0].try_recv().unwrap(),
+                format!("\x1b[<{code};5;2M").into_bytes()
+            );
+            // Subpixel motion inside the same cell must not emit a drag report.
+            assert!(app.route_mouse_motion_at(Some((4, 1))));
+            assert!(
+                inputs[0].try_recv().is_err(),
+                "same-cell jitter after {button:?} press must not emit a drag"
+            );
+            app.route_mouse_input_at(
+                button,
+                ElementState::Released,
+                false,
+                None,
+                Some((4, 1)),
+                Some((4, 1)),
+            );
+            assert_eq!(
+                inputs[0].try_recv().unwrap(),
+                format!("\x1b[<{code};5;2m").into_bytes()
+            );
+            // Same-cell jitter right after release must not emit a redundant hover.
+            assert!(app.route_mouse_motion_at(Some((4, 1))));
+            assert!(inputs[0].try_recv().is_err());
+            // Leaving the cell reports hover immediately.
+            assert!(app.route_mouse_motion_at(Some((5, 1))));
+            assert_eq!(inputs[0].try_recv().unwrap(), b"\x1b[<35;6;2M");
+        }
+    }
+
+    #[test]
+    fn sgr_drag_emits_only_after_leaving_press_cell_and_handles_off_grid_release() {
+        use winit::event::{ElementState, MouseButton};
+        let (mut app, inputs) = mouse_app();
+        app.tabs[0].terminal.feed(b"\x1b[?1002h\x1b[?1006h");
+
+        app.route_mouse_input_at(
+            MouseButton::Left,
+            ElementState::Pressed,
+            false,
+            None,
+            Some((3, 0)),
+            Some((3, 0)),
+        );
+        assert_eq!(inputs[0].try_recv().unwrap(), b"\x1b[<0;4;1M");
+        // Staying in (3, 0): no drag.
+        assert!(app.route_mouse_motion_at(Some((3, 0))));
+        assert!(inputs[0].try_recv().is_err());
+        // Moving to (4, 0): drag reported once; repeating (4, 0) deduplicates.
+        assert!(app.route_mouse_motion_at(Some((4, 0))));
+        assert_eq!(inputs[0].try_recv().unwrap(), b"\x1b[<32;5;1M");
+        assert!(app.route_mouse_motion_at(Some((4, 0))));
+        assert!(inputs[0].try_recv().is_err());
+        // Release outside the grid uses the clamped edge cell (e.g. tab bar -> row 0).
+        app.route_mouse_input_at(
+            MouseButton::Left,
+            ElementState::Released,
+            false,
+            None,
+            None,
+            Some((6, 0)),
+        );
+        assert_eq!(inputs[0].try_recv().unwrap(), b"\x1b[<0;7;1m");
+
+        // Release after cursor left the window altogether falls back to last reported cell.
+        app.route_mouse_input_at(
+            MouseButton::Left,
+            ElementState::Pressed,
+            false,
+            None,
+            Some((2, 1)),
+            Some((2, 1)),
+        );
+        assert_eq!(inputs[0].try_recv().unwrap(), b"\x1b[<0;3;2M");
+        app.on_cursor_left();
+        app.route_mouse_input_at(
+            MouseButton::Left,
+            ElementState::Released,
+            false,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(inputs[0].try_recv().unwrap(), b"\x1b[<0;3;2m");
+    }
+
+    #[test]
+    fn mouse_reporting_pairs_presses_and_releases_across_shift_chrome_and_tabs() {
+        use winit::event::{ElementState, MouseButton};
+        use winit::keyboard::ModifiersState;
+        let (mut app, inputs) = mouse_app();
+        for tab in &mut app.tabs {
+            tab.terminal.feed(b"\x1b[?1003h\x1b[?1006h");
+        }
+
+        // Unpaired release (e.g. press started on chrome or outside the window)
+        // never emits a stray release to the PTY.
+        app.route_mouse_input_at(
+            MouseButton::Left,
+            ElementState::Released,
+            false,
+            None,
+            Some((2, 0)),
+            Some((2, 0)),
+        );
+        assert!(inputs[0].try_recv().is_err());
+
+        // Shift+press forces local selection; releasing Shift before releasing
+        // Left must keep selecting and finalize locally without sending to PTY.
+        app.modifiers = ModifiersState::SHIFT;
+        app.route_mouse_input_at(
+            MouseButton::Left,
+            ElementState::Pressed,
+            false,
+            None,
+            Some((1, 0)),
+            Some((1, 0)),
+        );
+        assert!(app.tabs[0].selecting);
+        assert!(inputs[0].try_recv().is_err());
+        app.modifiers = ModifiersState::empty();
+        assert!(!app.route_mouse_motion_at(Some((3, 0))));
+        assert!(inputs[0].try_recv().is_err());
+        app.route_mouse_input_at(
+            MouseButton::Left,
+            ElementState::Released,
+            false,
+            None,
+            Some((3, 0)),
+            Some((3, 0)),
+        );
+        assert!(!app.tabs[0].selecting);
+        assert!(inputs[0].try_recv().is_err());
+
+        // Press reported to PTY, then Shift held before release: matching
+        // release still reaches the PTY so the app is not left stuck.
+        app.route_mouse_input_at(
+            MouseButton::Left,
+            ElementState::Pressed,
+            false,
+            None,
+            Some((2, 0)),
+            Some((2, 0)),
+        );
+        assert_eq!(inputs[0].try_recv().unwrap(), b"\x1b[<0;3;1M");
+        app.modifiers = ModifiersState::SHIFT;
+        app.route_mouse_input_at(
+            MouseButton::Left,
+            ElementState::Released,
+            false,
+            None,
+            Some((2, 0)),
+            Some((2, 0)),
+        );
+        assert_eq!(inputs[0].try_recv().unwrap(), b"\x1b[<4;3;1m");
+        app.modifiers = ModifiersState::empty();
+
+        // Switching tabs while a button is held clears the pending release so
+        // it never leaks to the newly active tab.
+        app.route_mouse_input_at(
+            MouseButton::Left,
+            ElementState::Pressed,
+            false,
+            None,
+            Some((2, 0)),
+            Some((2, 0)),
+        );
+        assert_eq!(inputs[0].try_recv().unwrap(), b"\x1b[<0;3;1M");
+        app.switch_tab(1);
+        app.route_mouse_input_at(
+            MouseButton::Left,
+            ElementState::Released,
+            false,
+            None,
+            Some((2, 0)),
+            Some((2, 0)),
+        );
+        assert!(inputs[0].try_recv().is_err());
+        assert!(inputs[1].try_recv().is_err());
+    }
+
+    #[test]
+    fn sgr_multi_button_chord_reports_each_released_button_and_remaining_drag() {
+        use winit::event::{ElementState, MouseButton};
+        let (mut app, inputs) = mouse_app();
+        app.tabs[0].terminal.feed(b"\x1b[?1002h\x1b[?1006h");
+
+        app.route_mouse_input_at(
+            MouseButton::Left,
+            ElementState::Pressed,
+            false,
+            None,
+            Some((1, 0)),
+            Some((1, 0)),
+        );
+        assert_eq!(inputs[0].try_recv().unwrap(), b"\x1b[<0;2;1M");
+        app.route_mouse_input_at(
+            MouseButton::Right,
+            ElementState::Pressed,
+            false,
+            None,
+            Some((1, 0)),
+            Some((1, 0)),
+        );
+        assert_eq!(inputs[0].try_recv().unwrap(), b"\x1b[<2;2;1M");
+        // Release Left: reports button 0 release, while Right remains held.
+        app.route_mouse_input_at(
+            MouseButton::Left,
+            ElementState::Released,
+            false,
+            None,
+            Some((1, 0)),
+            Some((1, 0)),
+        );
+        assert_eq!(inputs[0].try_recv().unwrap(), b"\x1b[<0;2;1m");
+        // Same-cell jitter does not drag yet; moving to (2, 0) drags with Right (34).
+        assert!(app.route_mouse_motion_at(Some((1, 0))));
+        assert!(inputs[0].try_recv().is_err());
+        assert!(app.route_mouse_motion_at(Some((2, 0))));
+        assert_eq!(inputs[0].try_recv().unwrap(), b"\x1b[<34;3;1M");
+        // Release Right: reports button 2 release.
+        app.route_mouse_input_at(
+            MouseButton::Right,
+            ElementState::Released,
+            false,
+            None,
+            Some((2, 0)),
+            Some((2, 0)),
+        );
+        assert_eq!(inputs[0].try_recv().unwrap(), b"\x1b[<2;3;1m");
     }
 
     #[test]

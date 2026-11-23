@@ -398,6 +398,39 @@ pub fn cell_at_pos(
     Some((col, row))
 }
 
+/// Map physical pixels to a cell `(col, row)`, clamping out-of-bounds
+/// coordinates to the nearest grid edge. Used so a drag release that lands
+/// outside the grid still reports a valid cell to a mouse-reporting app.
+pub fn cell_at_pos_clamped(
+    x: f32,
+    y: f32,
+    cell_width: f32,
+    line_height: f32,
+    cols: usize,
+    rows: usize,
+) -> Option<(usize, usize)> {
+    if !x.is_finite()
+        || !y.is_finite()
+        || cell_width <= 0.0
+        || line_height <= 0.0
+        || cols == 0
+        || rows == 0
+    {
+        return None;
+    }
+    let col = if x <= 0.0 {
+        0
+    } else {
+        ((x / cell_width).floor() as usize).min(cols - 1)
+    };
+    let row = if y <= 0.0 {
+        0
+    } else {
+        ((y / line_height).floor() as usize).min(rows - 1)
+    };
+    Some((col, row))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,5 +594,20 @@ mod tests {
         assert_eq!(cell_at_pos(-1.0, 5.0, 10.0, 20.0, 80, 24), None);
         assert_eq!(cell_at_pos(800.0, 5.0, 10.0, 20.0, 80, 24), None);
         assert_eq!(cell_at_pos(5.0, 5.0, 0.0, 20.0, 80, 24), None);
+
+        assert_eq!(
+            cell_at_pos_clamped(-10.0, -5.0, 10.0, 20.0, 80, 24),
+            Some((0, 0))
+        );
+        assert_eq!(
+            cell_at_pos_clamped(999.0, 999.0, 10.0, 20.0, 80, 24),
+            Some((79, 23))
+        );
+        assert_eq!(
+            cell_at_pos_clamped(25.0, 45.0, 10.0, 20.0, 80, 24),
+            Some((2, 2))
+        );
+        assert_eq!(cell_at_pos_clamped(f32::NAN, 5.0, 10.0, 20.0, 80, 24), None);
+        assert_eq!(cell_at_pos_clamped(5.0, 5.0, 10.0, 20.0, 0, 24), None);
     }
 }

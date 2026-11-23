@@ -95,8 +95,13 @@ materialize selected rows, but must use the same projected history semantics.
 
 Application mouse modes coexist with local operations: Shift forces local
 selection/scrolling, link activation precedes mouse reporting, and the matching
-release after a link-open press is swallowed. Motion reports deduplicate encoded
-cell/button/modifier state, not just pixel motion; preserve transitions.
+release after a link-open press is swallowed. SGR (`1006`) releases carry the
+released button (`0`/`1`/`2`) with suffix `m`, while legacy X10 uses `Cb=3`.
+Motion reports deduplicate encoded cell/button/modifier state, seeded on press
+and release so subpixel jitter within one cell does not emit a spurious drag or
+hover; preserve transitions. Releases reach the PTY only for presses reported on
+the active tab, still completing (clamped to the grid or last reported cell) if
+Shift is pressed later or the pointer leaves the grid.
 
 ## Hyperlinks and clipboard security
 

@@ -108,6 +108,7 @@ pub struct App {
     /// zoom. Separate from grid `last_click` (cell-based word select).
     pub(crate) last_titlebar_click: Option<Instant>,
     pub(crate) mouse_pressed: u8,
+    pub(crate) mouse_reported: Option<mouse::ReportedMouse>,
     pub(crate) last_mouse_report: Option<mouse::MotionState>,
     /// Last cursor icon pushed to the window (link hover changes it).
     pub(crate) cursor_icon: winit::window::CursorIcon,
@@ -191,6 +192,7 @@ impl App {
             last_click: None,
             last_titlebar_click: None,
             mouse_pressed: 0,
+            mouse_reported: None,
             last_mouse_report: None,
             cursor_icon: winit::window::CursorIcon::Default,
             link_press: false,
