@@ -9,7 +9,7 @@ Release usage:
 Changelog usage:
   ./scripts/release.py changelog [--from TAG] [--to REF] [--version X.Y.Z]
                                  [--from-tag TAG] [--remote NAME]
-                                 [--repo-url URL] [--output PATH]
+                                 [--repo-url URL] [--output PATH] [--raw]
 
 Defaults (release mode):
   --bump auto      suggest patch/minor/major from Conventional Commits since
@@ -75,7 +75,7 @@ class ReleaseError(Exception):
 
 
 class Palette:
-    """ANSI colors, enabled only when both streams are interactive terminals."""
+    """ANSI styles, enabled only when both streams are interactive terminals."""
 
     def __init__(self, enabled: Optional[bool] = None) -> None:
         if enabled is None:
@@ -85,33 +85,462 @@ class Palette:
                 and not os.environ.get("NO_COLOR")
                 and os.environ.get("TERM") != "dumb"
             )
+        self.enabled = enabled
         self.bold = "\033[1m" if enabled else ""
         self.dim = "\033[2m" if enabled else ""
+        self.italic = "\033[3m" if enabled else ""
+        self.underline = "\033[4m" if enabled else ""
+        self.strike = "\033[9m" if enabled else ""
+        self.no_bold_dim = "\033[22m" if enabled else ""
+        self.no_italic = "\033[23m" if enabled else ""
+        self.no_underline = "\033[24m" if enabled else ""
+        self.no_strike = "\033[29m" if enabled else ""
+        self.fg_reset = "\033[39m" if enabled else ""
         self.red = "\033[31m" if enabled else ""
         self.green = "\033[32m" if enabled else ""
         self.yellow = "\033[33m" if enabled else ""
         self.blue = "\033[34m" if enabled else ""
+        self.magenta = "\033[35m" if enabled else ""
+        self.cyan = "\033[36m" if enabled else ""
+        self.step_badge = "\033[1;30;46m" if enabled else ""
+        self.dry_badge = "\033[1;30;43m" if enabled else ""
         self.reset = "\033[0m" if enabled else ""
 
 
+ANSI_ESCAPE_RE = re.compile(r"\033\[[0-9;]*m")
+INLINE_MD_RE = re.compile(
+    r"`(?P<code>[^`]+)`"
+    r"|\[(?P<link_label>[^\]]+)\]\((?P<link_url>https?://[^)\s]+)\)"
+    r"|\*\*(?P<bold>[^*]+)\*\*"
+    r"|~~(?P<strike>[^~]+)~~"
+    r"|(?<!\*)\*(?P<italic>[^*\s][^*]*?)\*(?!\*)"
+    r"|(?P<url>https?://[^\s<>)]+)"
+    r"|(?<=\s)\((?P<sha>[0-9a-f]{7,12})\)(?=(?:\s|$))"
+)
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*$")
+HR_RE = re.compile(r"^(?:[-*_]\s*){3,}$")
+ULIST_RE = re.compile(r"^(\s*)[-*+]\s+(.*)$")
+OLIST_RE = re.compile(r"^(\s*)(\d+[.)])\s+(.*)$")
+SUMMARY_RE = re.compile(
+    r"^<summary>(.*?)</summary>$", re.IGNORECASE
+)
+
+
+def terminal_width(
+    default: int = 84, minimum: int = 60, maximum: int = 96
+) -> int:
+    cols = shutil.get_terminal_size((default, 24)).columns
+    return max(minimum, min(cols, maximum))
+
+
+def _visible_len(text: str) -> int:
+    return len(ANSI_ESCAPE_RE.sub("", text))
+
+
+def _update_sgr_state(active: List[str], esc: str) -> None:
+    """Track active SGR attributes so wrapped lines neither bleed nor drop style."""
+    codes = esc[2:-1].split(";") if len(esc) > 3 else ["0"]
+    for code in codes:
+        if code in ("", "0"):
+            active.clear()
+        elif code == "22":
+            active[:] = [s for s in active if s not in ("1", "2")]
+        elif code == "23":
+            active[:] = [s for s in active if s != "3"]
+        elif code == "24":
+            active[:] = [s for s in active if s != "4"]
+        elif code == "29":
+            active[:] = [s for s in active if s != "9"]
+        elif code == "39":
+            active[:] = [s for s in active if not (s.isdigit() and (30 <= int(s) <= 37 or 90 <= int(s) <= 97))]
+        elif code.isdigit():
+            n = int(code)
+            if 30 <= n <= 37 or 90 <= n <= 97:
+                active[:] = [s for s in active if not (s.isdigit() and (30 <= int(s) <= 37 or 90 <= int(s) <= 97))]
+            if code not in active:
+                active.append(code)
+
+
+def _wrap_ansi(
+    text: str,
+    width: int,
+    initial_indent: str = "",
+    subsequent_indent: str = "",
+) -> List[str]:
+    """Word-wrap text containing ANSI escapes without splitting URLs or codes."""
+    if width <= 10:
+        return [f"{initial_indent}{text}"]
+    tokens = text.split(" ")
+    raw_lines: List[Tuple[str, str]] = []
+    prefix = initial_indent
+    prefix_w = _visible_len(prefix)
+    cur_tokens: List[str] = []
+    cur_w = prefix_w
+
+    for tok in tokens:
+        tok_w = _visible_len(tok)
+        if not cur_tokens:
+            cur_tokens.append(tok)
+            cur_w = prefix_w + tok_w
+            continue
+        if cur_w + 1 + tok_w <= width:
+            cur_tokens.append(tok)
+            cur_w += 1 + tok_w
+        else:
+            raw_lines.append((prefix, " ".join(cur_tokens)))
+            prefix = subsequent_indent
+            prefix_w = _visible_len(prefix)
+            cur_tokens = [tok]
+            cur_w = prefix_w + tok_w
+
+    if cur_tokens:
+        raw_lines.append((prefix, " ".join(cur_tokens)))
+    if not raw_lines:
+        return [initial_indent]
+
+    lines: List[str] = []
+    active: List[str] = []
+    for idx, (pfx, body) in enumerate(raw_lines):
+        reopen = f"\033[{';'.join(active)}m" if active else ""
+        for m in ANSI_ESCAPE_RE.finditer(body):
+            _update_sgr_state(active, m.group(0))
+        close = "\033[0m" if active and idx < len(raw_lines) - 1 else ""
+        lines.append(f"{pfx}{reopen}{body}{close}")
+    return lines
+
+
+def _render_inline_markdown(text: str, c: Palette) -> str:
+    """Render common inline Markdown spans to ANSI (or clean plain text)."""
+
+    def replace(m: re.Match) -> str:
+        code = m.group("code")
+        if code is not None:
+            if c.enabled:
+                return f"{c.cyan}{code}{c.fg_reset}"
+            return f"`{code}`"
+        link_label = m.group("link_label")
+        if link_label is not None:
+            url = m.group("link_url")
+            if c.enabled:
+                return (
+                    f"{c.underline}{link_label}{c.no_underline} "
+                    f"{c.dim}({url}){c.no_bold_dim}"
+                )
+            return f"{link_label} ({url})"
+        bold = m.group("bold")
+        if bold is not None:
+            return f"{c.bold}{bold}{c.no_bold_dim}"
+        strike = m.group("strike")
+        if strike is not None:
+            return f"{c.strike}{strike}{c.no_strike}"
+        italic = m.group("italic")
+        if italic is not None:
+            return f"{c.italic}{italic}{c.no_italic}"
+        url = m.group("url")
+        if url is not None:
+            if c.enabled:
+                return f"{c.underline}{c.blue}{url}{c.no_underline}{c.fg_reset}"
+            return url
+        sha = m.group("sha")
+        if sha is not None:
+            return f"{c.dim}({sha}){c.no_bold_dim}"
+        return m.group(0)
+
+    return INLINE_MD_RE.sub(replace, text)
+
+
+def render_markdown_ansi(
+    markdown: str, palette: Palette, width: int = 72
+) -> List[str]:
+    """Fast, dependency-free Markdown renderer for terminal release notes."""
+    c = palette
+    out: List[str] = []
+    in_code = False
+    in_details = False
+    in_breaking = False
+    after_heading = False
+
+    def push_blank() -> None:
+        if out and out[-1] != "":
+            out.append("")
+
+    for raw_line in markdown.rstrip("\n").splitlines():
+        stripped = raw_line.strip()
+
+        if stripped.startswith("```"):
+            in_code = not in_code
+            after_heading = False
+            if not in_code:
+                push_blank()
+            continue
+
+        if in_code:
+            indent = "  " * (2 if in_details else 1)
+            out.append(f"{indent}{c.cyan}{raw_line}{c.reset}")
+            continue
+
+        if not stripped:
+            if not after_heading:
+                push_blank()
+            continue
+
+        low = stripped.lower()
+        if low == "<details>":
+            in_details = True
+            in_breaking = False
+            after_heading = False
+            push_blank()
+            continue
+        if low == "</details>":
+            in_details = False
+            after_heading = False
+            push_blank()
+            continue
+
+        summary_m = SUMMARY_RE.match(stripped)
+        if summary_m:
+            title = summary_m.group(1).strip()
+            push_blank()
+            out.append(
+                f"{c.dim}▸ {c.reset}{c.bold}{c.dim}{title}{c.reset} "
+                f"{c.dim}(collapsed on GitHub){c.reset}"
+            )
+            after_heading = True
+            continue
+
+        heading_m = HEADING_RE.match(stripped)
+        if heading_m:
+            level = len(heading_m.group(1))
+            title = heading_m.group(2).strip()
+            in_breaking = "breaking" in title.lower()
+            push_blank()
+            rendered_title = _render_inline_markdown(title, c)
+            if in_breaking:
+                style = f"{c.bold}{c.red}"
+            elif level <= 2:
+                style = f"{c.bold}{c.cyan}{c.underline}"
+            else:
+                style = f"{c.bold}{c.cyan}"
+            out.append(f"{style}{rendered_title}{c.reset}")
+            after_heading = True
+            continue
+
+        after_heading = False
+
+        if HR_RE.match(stripped):
+            push_blank()
+            out.append(f"{c.dim}{'─' * min(width, 40)}{c.reset}")
+            continue
+
+        if stripped.startswith(">"):
+            quote_text = stripped[1:].lstrip()
+            styled = _render_inline_markdown(quote_text, c)
+            base = "  " if in_details else ""
+            gutter = f"{base}{c.dim}▎{c.reset} "
+            out.extend(
+                _wrap_ansi(
+                    f"{c.italic}{styled}{c.reset}",
+                    width,
+                    initial_indent=gutter,
+                    subsequent_indent=gutter,
+                )
+            )
+            continue
+
+        ulist_m = ULIST_RE.match(raw_line)
+        if ulist_m:
+            nest = len(ulist_m.group(1))
+            item = _render_inline_markdown(ulist_m.group(2).strip(), c)
+            base = "  " * (1 if in_details else 0) + " " * nest
+            if in_breaking:
+                bullet_color = c.red
+            elif in_details:
+                bullet_color = c.dim
+            else:
+                bullet_color = c.cyan
+            initial = f"{base}{bullet_color}•{c.reset} "
+            subsequent = f"{base}  "
+            out.extend(
+                _wrap_ansi(
+                    item,
+                    width,
+                    initial_indent=initial,
+                    subsequent_indent=subsequent,
+                )
+            )
+            continue
+
+        olist_m = OLIST_RE.match(raw_line)
+        if olist_m:
+            nest = len(olist_m.group(1))
+            marker = olist_m.group(2)
+            item = _render_inline_markdown(olist_m.group(3).strip(), c)
+            base = "  " * (1 if in_details else 0) + " " * nest
+            initial = f"{base}{c.cyan}{marker}{c.reset} "
+            subsequent = f"{base}{' ' * (len(marker) + 1)}"
+            out.extend(
+                _wrap_ansi(
+                    item,
+                    width,
+                    initial_indent=initial,
+                    subsequent_indent=subsequent,
+                )
+            )
+            continue
+
+        base = "  " if in_details else ""
+        styled = _render_inline_markdown(stripped, c)
+        out.extend(
+            _wrap_ansi(
+                styled, width, initial_indent=base, subsequent_indent=base
+            )
+        )
+
+    while out and out[-1] == "":
+        out.pop()
+    return out
+
+
+def render_card(
+    title: str,
+    body_lines: Sequence[str],
+    palette: Palette,
+    *,
+    width: int = 84,
+    indent: str = "  ",
+    border_color: Optional[str] = None,
+    title_color: Optional[str] = None,
+    pad_y: bool = True,
+) -> str:
+    """Render an open-right framed card so wrapped lines and URLs stay clean."""
+    c = palette
+    bc = c.cyan if border_color is None else border_color
+    tc = f"{c.bold}{c.cyan}" if title_color is None else title_color
+    inner_w = max(24, width - len(indent))
+
+    header_prefix = f"╭─ {title} "
+    dash_count = max(3, inner_w - _visible_len(header_prefix))
+    top = (
+        f"{indent}{bc}╭─{c.reset} {tc}{title}{c.reset} "
+        f"{bc}{'─' * dash_count}{c.reset}"
+    )
+    bottom = f"{indent}{bc}╰{'─' * (inner_w - 1)}{c.reset}"
+    gutter = f"{indent}{bc}│{c.reset}"
+
+    lines = [top]
+    if pad_y:
+        lines.append(gutter)
+    for line in body_lines:
+        lines.append(f"{gutter}  {line}" if line else gutter)
+    if pad_y:
+        lines.append(gutter)
+    lines.append(bottom)
+    return "\n".join(lines)
+
+
 class Reporter:
-    """Step-numbered terminal reporter matching the previous shell UX."""
+    """Structured terminal reporter with clear step banners and framed cards."""
 
     def __init__(self, total_steps: int, dry_run: bool = False) -> None:
         self.c = Palette()
         self.step_num = 0
         self.total_steps = total_steps
         self.dry_run = dry_run
+        self.width = terminal_width()
 
     def _indent(self) -> str:
         return "  " if self.step_num else ""
 
+    def banner(self, current: str, branch: str, remote: str) -> None:
+        c = self.c
+        meta = (
+            f"{c.dim}current{c.reset} {c.bold}v{current}{c.reset}"
+            f"  {c.dim}·{c.reset}  "
+            f"{c.bold}{branch}{c.reset} {c.dim}->{c.reset} {c.bold}{remote}{c.reset}"
+        )
+        if self.dry_run:
+            badge = (
+                f"{c.dry_badge} DRY RUN {c.reset}"
+                if c.enabled
+                else "[DRY RUN]"
+            )
+            meta = f"{meta}   {badge}"
+        print(
+            render_card(
+                "Cometty Release",
+                [meta],
+                c,
+                width=self.width,
+                indent="",
+                border_color=c.yellow if self.dry_run else c.blue,
+                title_color=f"{c.bold}{c.yellow if self.dry_run else c.blue}",
+                pad_y=False,
+            ),
+            flush=True,
+        )
+
     def step(self, title: str) -> None:
         self.step_num += 1
         c = self.c
+        if c.enabled:
+            badge_plain = f" STEP {self.step_num}/{self.total_steps} "
+            badge = f"{c.step_badge}{badge_plain}{c.reset}"
+        else:
+            badge_plain = f"[STEP {self.step_num}/{self.total_steps}]"
+            badge = badge_plain
+        used = len(badge_plain) + 1 + len(title) + 1
+        rule_len = max(3, self.width - used)
+        rule = f"{c.dim}{'─' * rule_len}{c.reset}"
+        print(f"\n{badge} {c.bold}{title}{c.reset} {rule}", flush=True)
+
+    def markdown_card(self, title: str, markdown: str) -> None:
+        content_width = max(36, self.width - 6)
+        rendered = render_markdown_ansi(markdown, self.c, width=content_width)
         print(
-            f"\n{c.blue}{c.bold}[{self.step_num}/{self.total_steps}]{c.reset} "
-            f"{c.bold}{title}{c.reset}",
+            "\n"
+            + render_card(
+                title,
+                rendered,
+                self.c,
+                width=self.width,
+                indent="  ",
+                border_color=self.c.cyan,
+                title_color=f"{self.c.bold}{self.c.cyan}",
+            ),
+            flush=True,
+        )
+
+    def success_card(
+        self, tag: str, repo_url: Optional[str]
+    ) -> None:
+        c = self.c
+        lines = [
+            "The release workflow will verify, build the macOS bundle, "
+            f"and publish {c.bold}{tag}{c.reset} directly."
+        ]
+        if repo_url:
+            actions_url = f"{repo_url}/actions/workflows/release.yml"
+            release_url = f"{repo_url}/releases/tag/{tag}"
+            url_style = f"{c.underline}{c.blue}" if c.enabled else ""
+            url_end = f"{c.no_underline}{c.fg_reset}" if c.enabled else ""
+            lines.append("")
+            lines.append(
+                f"{c.dim}Actions:{c.reset} {url_style}{actions_url}{url_end}"
+            )
+            lines.append(
+                f"{c.dim}Release:{c.reset} {url_style}{release_url}{url_end}"
+            )
+        print(
+            "\n"
+            + render_card(
+                f"✓ Released {tag}",
+                lines,
+                c,
+                width=self.width,
+                indent="",
+                border_color=c.green,
+                title_color=f"{c.bold}{c.green}",
+            ),
             flush=True,
         )
 
@@ -758,6 +1187,11 @@ def build_changelog_parser() -> argparse.ArgumentParser:
         "--output",
         help="write notes to PATH instead of stdout",
     )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="emit raw Markdown even when writing to an interactive terminal",
+    )
     return parser
 
 
@@ -769,7 +1203,9 @@ def run_changelog(argv: Sequence[str]) -> int:
         raise ReleaseError("git not found")
 
     notes: Optional[str] = None
+    card_title = "Release Notes"
     if args.annotated_tag:
+        card_title = f"Release Notes · {args.annotated_tag}"
         notes = read_tag_notes(args.annotated_tag)
 
     if notes is None:
@@ -797,6 +1233,9 @@ def run_changelog(argv: Sequence[str]) -> int:
         else:
             target_ref = to_ref
 
+        if target_ref:
+            card_title = f"Release Notes · {target_ref}"
+
         prev_tag = args.from_tag or find_previous_tag(
             to_ref,
             exclude_tag=exclude_tag,
@@ -810,6 +1249,21 @@ def run_changelog(argv: Sequence[str]) -> int:
         out_path = Path(args.output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(notes, encoding="utf-8")
+    elif sys.stdout.isatty() and not args.raw:
+        palette = Palette()
+        width = terminal_width()
+        rendered = render_markdown_ansi(
+            notes, palette, width=max(36, width - 4)
+        )
+        print(
+            render_card(
+                card_title,
+                rendered,
+                palette,
+                width=width,
+                indent="",
+            )
+        )
     else:
         sys.stdout.write(notes)
     return 0
@@ -872,11 +1326,6 @@ def build_release_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _print_indented_block(text: str, prefix: str = "    ") -> None:
-    for line in text.rstrip("\n").splitlines():
-        print(f"{prefix}{line}" if line else "")
-
-
 def run_release(argv: Sequence[str]) -> int:
     args = build_release_parser().parse_args(argv)
     os.chdir(ROOT)
@@ -900,13 +1349,15 @@ def run_release(argv: Sequence[str]) -> int:
             f"Cargo.toml version is not canonical X.Y.Z: {current_str}"
         )
 
-    ui = Reporter(total_steps=8, dry_run=args.dry_run)
     remote = args.remote
+    branch_res = run_git("symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    branch = branch_res.stdout.strip()
+
+    ui = Reporter(total_steps=6, dry_run=args.dry_run)
+    ui.banner(current_str, branch or "(detached)", remote)
 
     # 1. Working tree & branch
     ui.step("Checking the working tree")
-    branch_res = run_git("symbolic-ref", "--quiet", "--short", "HEAD", check=False)
-    branch = branch_res.stdout.strip()
     if branch_res.returncode != 0 or not branch:
         raise ReleaseError("HEAD is detached; check out a branch before releasing")
 
@@ -998,8 +1449,8 @@ def run_release(argv: Sequence[str]) -> int:
                     else:
                         ui.ok(f"{branch} is up to date with {remote}/{branch}")
 
-    # 3. Changelog preview & bump suggestion
-    ui.step("Building changelog preview")
+    # 3. Review release notes, choose version, and confirm
+    ui.step("Review release & confirm")
     prev_tag = find_previous_tag("HEAD")
     commits = collect_commits(prev_tag, "HEAD")
     meaningful_commits = [c for c in commits if not c.is_release_commit]
@@ -1018,11 +1469,8 @@ def run_release(argv: Sequence[str]) -> int:
 
     preview_target = f"v{args.version or suggested}"
     preview_notes = render_changelog(commits, prev_tag, preview_target, repo_url)
-    print()
-    _print_indented_block(preview_notes)
-
-    # 4. Version selection
-    ui.step("Choosing the version")
+    ui.markdown_card(f"Release Notes · {preview_target}", preview_notes)
+    print(flush=True)
 
     def version_problem(candidate: str) -> Optional[str]:
         parsed = parse_version(candidate)
@@ -1048,6 +1496,7 @@ def run_release(argv: Sequence[str]) -> int:
             return f"{remote} already has tag v{candidate}"
         return None
 
+    c = ui.c
     if args.version is not None:
         new_version = args.version
         problem = version_problem(new_version)
@@ -1071,11 +1520,12 @@ def run_release(argv: Sequence[str]) -> int:
             if bump_mode == "auto"
             else f"--bump {effective_bump}"
         )
-        ui.info(f"suggested {suggested} ({hint})")
+        ui.info(f"{c.dim}suggested {suggested} ({hint}){c.reset}")
         while True:
             try:
                 answer = input(
-                    f"  Next version (current {current_str}) [{suggested}]: "
+                    f"  {c.bold}Next version{c.reset} "
+                    f"(current {current_str}) [{c.cyan}{suggested}{c.reset}]: "
                 ).strip()
             except EOFError:
                 print(file=sys.stderr)
@@ -1089,26 +1539,27 @@ def run_release(argv: Sequence[str]) -> int:
 
     tag = f"v{new_version}"
     notes = render_changelog(commits, prev_tag, tag, repo_url)
-    ui.ok(f"releasing {tag} (from {current_str})")
+    verify_plan = (
+        "skip make verify (--no-verify)" if args.no_verify else "run make verify"
+    )
 
-    # 5. Confirmation (or dry-run summary)
-    ui.step("Confirming release")
-    verify_plan = "skip make verify (--no-verify)" if args.no_verify else "run make verify"
     if args.dry_run:
-        c = ui.c
+        ui.ok(f"releasing {tag} (from {current_str})")
         print(
-            f"\n{c.yellow}{c.bold}Dry run:{c.reset} nothing was changed. "
-            "A real release would:"
+            f"\n  {c.yellow}{c.bold}Dry run:{c.reset} nothing was changed. "
+            "A real release would:",
+            flush=True,
         )
-        print(f"  - update Cargo.toml and Cargo.lock to {new_version}")
-        print(f"  - {verify_plan}")
+        print(f"    • update Cargo.toml and Cargo.lock to {new_version}")
+        print(f"    • {verify_plan}")
         print(
-            f'  - commit "chore: release {tag}" on {branch} and create '
+            f'    • commit "chore: release {tag}" on {branch} and create '
             f"annotated tag {tag} with the release notes above"
         )
         print(
-            f"  - push {branch} and {tag} atomically to {remote} "
-            "(publishing directly to GitHub Releases & auto-updater)"
+            f"    • push {branch} and {tag} atomically to {remote} "
+            "(publishing directly to GitHub Releases & auto-updater)",
+            flush=True,
         )
         return 0
 
@@ -1118,16 +1569,22 @@ def run_release(argv: Sequence[str]) -> int:
                 "no terminal to confirm release; pass --yes "
                 "(make: RELEASE_YES=1)"
             )
+        print(flush=True)
+        ui.info(
+            f"{c.dim}Release:{c.reset} {c.bold}{current_str} -> {new_version}{c.reset} "
+            f"(tag {c.cyan}{tag}{c.reset})"
+        )
+        ui.info(
+            f"{c.dim}Target:{c.reset}  {branch} -> {remote} ({verify_plan})"
+        )
+        ui.info(
+            f"{c.dim}Publish:{c.reset} direct "
+            "(GitHub Release goes live & reaches the auto-updater once CI finishes)"
+        )
         while True:
-            ui.info(f"version: {current_str} -> {new_version} (tag {tag})")
-            ui.info(f"target:  {branch} -> {remote} ({verify_plan})")
-            ui.info(
-                "publish: direct (GitHub Release goes live & reaches the "
-                "in-app updater once CI completes)"
-            )
             try:
                 reply = input(
-                    "  Proceed? [y/N/e (e = edit release notes)]: "
+                    f"  {c.bold}Proceed?{c.reset} [y/N/e (e = edit notes)]: "
                 ).strip().lower()
             except EOFError:
                 print(file=sys.stderr)
@@ -1140,17 +1597,16 @@ def run_release(argv: Sequence[str]) -> int:
                     ui.warn("release notes were empty; keeping previous notes")
                 else:
                     notes = edited
-                    ui.ok("updated release notes:")
-                    print()
-                    _print_indented_block(notes)
+                    ui.markdown_card(f"Release Notes · {tag} (edited)", notes)
+                    print(flush=True)
                 continue
             if reply in ("", "n", "no"):
                 raise ReleaseError("aborted by user")
             ui.error("enter y to release, e to edit notes, or n to abort")
     else:
-        ui.ok("confirmed (--yes)")
+        ui.ok(f"releasing {tag} (from {current_str}) — confirmed (--yes)")
 
-    # 6-8. Mutate, verify, commit, tag, push (with rollback before commit)
+    # 4-6. Mutate, verify, commit, tag, push (with rollback before commit)
     modified = False
     committed = False
     try:
@@ -1258,15 +1714,7 @@ def run_release(argv: Sequence[str]) -> int:
             run_git("reset", "-q", "--", "Cargo.toml", "Cargo.lock", check=False)
             run_git("checkout", "--", "Cargo.toml", "Cargo.lock", check=False)
 
-    c = ui.c
-    print(f"\n{c.green}{c.bold}✓ Released {tag}{c.reset}")
-    print(
-        f"  {c.dim}The release workflow will verify, build the macOS bundle, "
-        f"and publish {tag} directly.{c.reset}"
-    )
-    if repo_url:
-        print(f"  Actions: {repo_url}/actions/workflows/release.yml")
-        print(f"  Release: {repo_url}/releases/tag/{tag}")
+    ui.success_card(tag, repo_url)
 
     if args.watch:
         print()

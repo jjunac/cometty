@@ -270,5 +270,88 @@ class GitTagIntegrationTests(unittest.TestCase):
                 release.ROOT = orig_root
 
 
+class MarkdownRendererTests(unittest.TestCase):
+    SAMPLE_MD = """\
+### Breaking Changes
+
+- **config:** remove legacy `old_key` (1111111)
+
+### Features
+
+- support `file://` links and **local paths** on Cmd/Ctrl+click with safety guardrails (6d8d5aa)
+- see [guide](https://example.com/guide) and *italic* text
+
+<details>
+<summary>Maintenance</summary>
+
+- **build:** fix CI (17a71c5)
+
+</details>
+
+> Note: keep backups handy.
+
+**Full Changelog**: https://github.com/jjunac/cometty/compare/v0.2.0...v0.3.0
+"""
+
+    def test_ansi_renderer_styles_headings_details_inline_and_links(self) -> None:
+        palette = release.Palette(enabled=True)
+        lines = release.render_markdown_ansi(self.SAMPLE_MD, palette, width=72)
+        joined = "\n".join(lines)
+        plain = release.ANSI_ESCAPE_RE.sub("", joined)
+
+        # Raw HTML details/summary tags and Markdown ### prefixes are gone.
+        self.assertNotIn("<details>", plain)
+        self.assertNotIn("</details>", plain)
+        self.assertNotIn("<summary>", plain)
+        self.assertNotIn("### ", plain)
+
+        # Sections, bullets, details summary, blockquote, and compare URL render.
+        self.assertIn("Breaking Changes", plain)
+        self.assertIn("Features", plain)
+        self.assertIn("• config: remove legacy old_key (1111111)", plain)
+        self.assertIn("▸ Maintenance (collapsed on GitHub)", plain)
+        self.assertIn("  • build: fix CI (17a71c5)", plain)
+        self.assertIn("▎ Note: keep backups handy.", plain)
+        self.assertIn("https://github.com/jjunac/cometty/compare/v0.2.0...v0.3.0", plain)
+
+        # Breaking Changes heading uses red; inline code uses cyan; URL underlined.
+        self.assertIn("\033[1m\033[31mBreaking Changes\033[0m", joined)
+        self.assertIn("\033[36mfile://\033[39m", joined)
+        self.assertIn("\033[4m\033[34mhttps://github.com/jjunac/cometty/compare/v0.2.0...v0.3.0", joined)
+        self.assertIn("\033[2m(6d8d5aa)\033[22m", joined)
+
+    def test_plain_palette_emits_no_ansi_escapes(self) -> None:
+        palette = release.Palette(enabled=False)
+        lines = release.render_markdown_ansi(self.SAMPLE_MD, palette, width=60)
+        card = release.render_card("Release Notes · v0.3.0", lines, palette, width=66)
+        self.assertNotIn("\033[", card)
+        self.assertIn("╭─ Release Notes · v0.3.0", card)
+        self.assertIn("• config: remove legacy `old_key` (1111111)", card)
+
+    def test_wrapping_preserves_open_sgr_across_lines_without_breaking_urls(self) -> None:
+        palette = release.Palette(enabled=True)
+        md = (
+            "- **this is a deliberately long bold sentence that must wrap cleanly across lines**\n"
+            "- https://github.com/jjunac/cometty/compare/v0.2.0...v0.3.0\n"
+        )
+        lines = release.render_markdown_ansi(md, palette, width=36)
+        # Bold wraps onto multiple lines: first line closes SGR, next reopens bold.
+        bold_lines = [line for line in lines if "this is" in line or "wrap" in line]
+        self.assertGreaterEqual(len(bold_lines), 2)
+        self.assertTrue(bold_lines[0].endswith("\033[0m"))
+        self.assertIn("\033[1m", bold_lines[1])
+        # Long URL stays unbroken on a single line.
+        url_lines = [
+            release.ANSI_ESCAPE_RE.sub("", line)
+            for line in lines
+            if "https://github.com/" in line
+        ]
+        self.assertEqual(len(url_lines), 1)
+        self.assertIn(
+            "https://github.com/jjunac/cometty/compare/v0.2.0...v0.3.0",
+            url_lines[0],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

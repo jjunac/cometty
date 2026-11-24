@@ -43,26 +43,27 @@ current branch into a published release, in numbered steps:
   `vX.Y.Z` tag (grouping `feat`, `fix`/`revert`, `perf`/`mem`, breaking changes,
   and a collapsed `<details>` Maintenance section for `refactor`/`docs`/`build`/
   `ci`/`chore`/`test`/`style`), refusing if there are no new commits,
-- asks for the next version, auto-suggesting the bump from Conventional Commits
-  (`feat` → minor, breaking → major on `>=1.0.0` or minor on `0.x`, else patch;
+- renders the release notes in a framed terminal Markdown preview, asks for the
+  next version (auto-suggesting from Conventional Commits: `feat` → minor,
+  breaking → major on `>=1.0.0` or minor on `0.x`, else patch;
   `RELEASE_BUMP=patch|minor|major` or `RELEASE_VERSION=X.Y.Z` overrides it),
-- prints the release summary and asks for explicit confirmation (`[y/N/e]`,
-  where `e` opens the release notes in `$EDITOR` before re-confirming; non-TTY
-  runs require both `RELEASE_VERSION=X.Y.Z` and `RELEASE_YES=1`),
+  and immediately shows a compact summary before asking for confirmation
+  (`[y/N/e]`, where `e` opens the notes in `$EDITOR` and re-renders the preview;
+  non-TTY runs require both `RELEASE_VERSION=X.Y.Z` and `RELEASE_YES=1`),
 - writes the version to `Cargo.toml` and refreshes `Cargo.lock` offline via
   `cargo update --workspace --offline`,
 - runs `make verify` (`RELEASE_SKIP_VERIFY=1` skips it),
-- commits `chore: release vX.Y.Z` and creates the annotated `vX.Y.Z` tag
-  carrying the finalized release notes,
-- pushes the branch and tag in one atomic push (and with `RELEASE_WATCH=1` /
-  `--watch`, tails the GitHub Actions workflow via `gh`).
+- commits `chore: release vX.Y.Z`, creates the annotated `vX.Y.Z` tag carrying
+  the finalized release notes, and pushes branch and tag in one atomic push
+  (with `RELEASE_WATCH=1` / `--watch`, tails the GitHub Actions workflow via `gh`).
 
 The prompt rejects versions that are not canonical `X.Y.Z` (no leading zeros,
 strictly greater than the current version) or whose tag already exists locally
 or on the remote. A failed push leaves the commit and tag local and prints the
 retry and undo commands. `RELEASE_DRY_RUN=1` runs the checks and prints the
 changelog and plan without changing, committing, or pushing anything; refused
-checks become warnings. `make changelog` previews unreleased notes at any time.
+checks become warnings. `make changelog` previews unreleased notes at any time
+(styled on an interactive terminal; pass `--raw` or pipe stdout for raw Markdown).
 Pushing the tag triggers [`release.yml`](../.github/workflows/release.yml),
 which runs the shared [`.github/actions/verify`](../.github/actions/verify/action.yml)
 gate (avoiding a duplicate `ci.yml` run for `chore: release v*` commits), builds
