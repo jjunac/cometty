@@ -1,16 +1,28 @@
 name: ci
+
 on:
   push:
+    branches:
+      - "**"
   pull_request:
 
 jobs:
   check-macos:
+    # Atomic release pushes run the exact same verify action inside release.yml.
+    if: >-
+      github.event_name != 'push' ||
+      !startsWith(github.event.head_commit.message, 'chore: release v')
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - run: cargo test
-      - run: cargo clippy -- -D warnings
-      - run: cargo fmt --check
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-stable
+
+      - uses: ./.github/actions/verify

@@ -5,3 +5,4 @@
 .DS_Store
 audit-report.html
 .kiro
+__pycache__/

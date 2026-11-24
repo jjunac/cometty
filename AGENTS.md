@@ -37,7 +37,7 @@ tests or headless timings with native-memory, GUI-latency, or energy verificatio
 | Parser / grid / history | `src/term.rs`, `src/term/parser.rs`, `src/grid/`, `src/progstatus.rs` (OSC 7501) | [Terminal model](docs/terminal.md) |
 | Transport / shutdown | `src/pty.rs`, `src/pty/`, `src/app/pty_io.rs` | [PTY lifecycle](docs/pty.md) |
 | Text / GPU / chrome | `src/renderer/`, `src/theme.rs`, `src/scrollbar.rs`, `src/tabbar.rs` | [Rendering](docs/rendering.md) |
-| Release / macOS bundle | `scripts/{release,bundle-macos}.sh`, `packaging/macos/`, `.github/workflows/release.yml` | [Development](docs/development.md#releasing) |
+| Release / macOS bundle | `scripts/release.py`, `scripts/bundle-macos.sh`, `packaging/macos/`, `.github/workflows/release.yml` | [Development](docs/development.md#releasing) |
 | Input / search / links / titles | `src/app/{keyboard,mouse,search,links,tab}.rs`, pure `src/{input,search,selection,links,procinfo}.rs` | [Interaction](docs/interaction.md) |
 | Storage limits / diagnostics | History, input, parser, search and renderer ownership | [Memory](docs/memory.md), [profiling](docs/performance.md) |
 | Idle CPU / wakeups / energy | `src/perf.rs` counters, `scripts/compare/idle-probe.py` (`make bench-idle`) | [Idle CPU and energy](docs/idle.md) |

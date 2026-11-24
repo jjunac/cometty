@@ -36,15 +36,18 @@ BUNDLE_ARCH ?= universal
 BUNDLE_IDENTITY ?=
 BUNDLE_NOTARY ?=
 
-RELEASE_BUMP ?= patch
+RELEASE_BUMP ?= auto
 RELEASE_VERSION ?=
 RELEASE_DRY_RUN ?=
 RELEASE_SKIP_VERIFY ?=
 RELEASE_REMOTE ?= origin
-RELEASE_FLAGS = $(if $(strip $(RELEASE_VERSION)),--version '$(RELEASE_VERSION)',--bump '$(RELEASE_BUMP)') --remote '$(RELEASE_REMOTE)' $(if $(strip $(RELEASE_DRY_RUN)),--dry-run) $(if $(strip $(RELEASE_SKIP_VERIFY)),--no-verify)
+RELEASE_ALLOW_BRANCH ?=
+RELEASE_YES ?=
+RELEASE_WATCH ?=
+RELEASE_FLAGS = $(if $(strip $(RELEASE_VERSION)),--version '$(RELEASE_VERSION)',--bump '$(RELEASE_BUMP)') --remote '$(RELEASE_REMOTE)' $(if $(strip $(RELEASE_ALLOW_BRANCH)),--allow-branch) $(if $(strip $(RELEASE_DRY_RUN)),--dry-run) $(if $(strip $(RELEASE_SKIP_VERIFY)),--no-verify) $(if $(strip $(RELEASE_YES)),--yes) $(if $(strip $(RELEASE_WATCH)),--watch)
 
 # Every target is a command rather than an artifact name.
-.PHONY: help build release run run-release test test-release check clippy fmt \
+.PHONY: help build release changelog run run-release test test-release check clippy fmt \
 	fmt-check diff-check verify bench bench-compare bench-idle probe-scheduling probe-retained-glyphs \
 	probe-uploads profile bundle deps clean
 
@@ -53,6 +56,7 @@ help: ## Show this target index
 	@awk 'BEGIN { FS = ":.*## " } /^[a-zA-Z0-9_-]+:.*## / { printf "  %-24s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 	@printf '\nExamples:\n'
 	@printf '  make test FILTER=grid::history::\n'
+	@printf '  make changelog\n'
 	@printf '  make release RELEASE_DRY_RUN=1\n'
 	@printf '  make release RELEASE_VERSION=0.3.0\n'
 	@printf '  make bench BENCH_OUT=target/perf/run1\n'
@@ -115,8 +119,11 @@ probe-uploads: ## Opt-in GPU probe: failed-upload cleanup and recovery
 profile: ## macOS Instruments trace; PROFILE_TEMPLATE=, PROFILE_TIME=, PROFILE_OUT=, PROFILE_ARGS=
 	CARGO_PROFILE_RELEASE_DEBUG=1 COMETTY_PERF=1 bash scripts/profile-macos.sh --template '$(PROFILE_TEMPLATE)' --time-limit $(PROFILE_TIME) --output $(PROFILE_OUT) -- $(PROFILE_ARGS)
 
-release: ## Check tree and remote, ask for the version (default: next patch), verify, commit, tag, push (RELEASE_VERSION=, RELEASE_BUMP=, RELEASE_DRY_RUN=1)
-	bash scripts/release.sh $(RELEASE_FLAGS)
+release: ## Preview changelog, confirm version, verify, commit, tag, push (RELEASE_VERSION=, RELEASE_BUMP=, RELEASE_DRY_RUN=1, RELEASE_WATCH=1)
+	python3 scripts/release.py $(RELEASE_FLAGS)
+
+changelog: ## Preview Conventional Commits release notes since the last tag
+	python3 scripts/release.py changelog
 
 bundle: ## Build macOS .app + zip; BUNDLE_ARCH=, BUNDLE_IDENTITY=, BUNDLE_NOTARY=
 	bash scripts/bundle-macos.sh --arch $(BUNDLE_ARCH) $(if $(BUNDLE_IDENTITY),--identity '$(BUNDLE_IDENTITY)') $(if $(BUNDLE_NOTARY),--notary-profile '$(BUNDLE_NOTARY)')

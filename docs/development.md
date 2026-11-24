@@ -30,37 +30,55 @@ For automated headless verification prefer the commands below.
 
 ## Releasing
 
-`make release` turns the current branch into a published release, in numbered
-steps:
+`make release` runs [`scripts/release.py`](../scripts/release.py) and turns the
+current branch into a published release, in numbered steps:
 
-- checks that HEAD is a branch with no uncommitted changes, untracked files
-  included,
-- fetches the branch from `RELEASE_REMOTE` (default `origin`) and refuses it if
-  the local branch is behind or has diverged; local commits that are only ahead
-  are pushed with the release,
-- asks for the next version, suggesting a patch bump of `Cargo.toml` that Enter
-  accepts (`RELEASE_BUMP=minor|major` changes the suggestion;
-  `RELEASE_VERSION=X.Y.Z` skips the prompt and is required without a terminal),
-- writes it to `Cargo.toml` and refreshes `Cargo.lock`,
+- checks that HEAD is on the default branch (`main`, unless
+  `RELEASE_ALLOW_BRANCH=1` / `--allow-branch` is passed) with no uncommitted
+  changes, untracked files included,
+- fetches the branch and tags from `RELEASE_REMOTE` (default `origin`) and
+  refuses if the local branch is behind or has diverged; local commits that are
+  only ahead are pushed with the release,
+- builds a Conventional Commits changelog from commits since the last canonical
+  `vX.Y.Z` tag (grouping `feat`, `fix`/`revert`, `perf`/`mem`, breaking changes,
+  and a collapsed `<details>` Maintenance section for `refactor`/`docs`/`build`/
+  `ci`/`chore`/`test`/`style`), refusing if there are no new commits,
+- asks for the next version, auto-suggesting the bump from Conventional Commits
+  (`feat` → minor, breaking → major on `>=1.0.0` or minor on `0.x`, else patch;
+  `RELEASE_BUMP=patch|minor|major` or `RELEASE_VERSION=X.Y.Z` overrides it),
+- prints the release summary and asks for explicit confirmation (`[y/N/e]`,
+  where `e` opens the release notes in `$EDITOR` before re-confirming; non-TTY
+  runs require both `RELEASE_VERSION=X.Y.Z` and `RELEASE_YES=1`),
+- writes the version to `Cargo.toml` and refreshes `Cargo.lock` offline via
+  `cargo update --workspace --offline`,
 - runs `make verify` (`RELEASE_SKIP_VERIFY=1` skips it),
-- commits `chore: release vX.Y.Z` and creates the annotated `vX.Y.Z` tag,
-- pushes the branch and tag in one atomic push.
+- commits `chore: release vX.Y.Z` and creates the annotated `vX.Y.Z` tag
+  carrying the finalized release notes,
+- pushes the branch and tag in one atomic push (and with `RELEASE_WATCH=1` /
+  `--watch`, tails the GitHub Actions workflow via `gh`).
 
-The prompt asks again for a version that is not X.Y.Z above the current one or
-whose tag already exists locally or on the remote. A failed push leaves the
-commit and tag local and prints the retry and undo commands.
-`RELEASE_DRY_RUN=1` runs the checks and prints the plan without changing,
-committing, or pushing anything; refused checks become warnings. Pushing the
-tag triggers [`release.yml`](../.github/workflows/release.yml), which tests,
-builds the macOS bundle, and opens a draft release. Output is colored on a
-terminal unless `NO_COLOR` is set.
+The prompt rejects versions that are not canonical `X.Y.Z` (no leading zeros,
+strictly greater than the current version) or whose tag already exists locally
+or on the remote. A failed push leaves the commit and tag local and prints the
+retry and undo commands. `RELEASE_DRY_RUN=1` runs the checks and prints the
+changelog and plan without changing, committing, or pushing anything; refused
+checks become warnings. `make changelog` previews unreleased notes at any time.
+Pushing the tag triggers [`release.yml`](../.github/workflows/release.yml),
+which runs the shared [`.github/actions/verify`](../.github/actions/verify/action.yml)
+gate (avoiding a duplicate `ci.yml` run for `chore: release v*` commits), builds
+and verifies the universal macOS bundle, and **publishes the GitHub release
+directly** with the annotated tag's notes (falling back to regenerating them
+from git history if a tag was pushed manually). Output is colored on a terminal
+unless `NO_COLOR` is set.
 
 ### Reaching the updater
 
 The in-app [updater](update.md) reads only GitHub's latest published release,
-and skips a release that is a draft or a prerelease. Because `release.yml` opens
-a draft, no user is offered the version until the maintainer publishes that
-draft; prereleases are never offered. The updater also relies on these names:
+and skips a release that is a draft or a prerelease. Because `release.yml`
+publishes directly once all assets are uploaded (`gh release create` uploads
+into a temporary draft before publishing), every installed copy is offered the
+new version as soon as the release workflow finishes; prereleases are never
+offered. The updater also relies on these names:
 
 - the tag is exactly `vX.Y.Z` (no suffix, no leading zeros),
 - the archive asset is `Cometty-<X.Y.Z>-macos-universal.zip`,
@@ -111,7 +129,7 @@ file. Pass `--identity "Developer ID Application: ..."` and
 profile once with `xcrun notarytool store-credentials NAME --apple-id ... --team-id ...`.
 The script reads the version from `Cargo.toml`, so run `make release` before
 building a bundle for a tag. [`release.yml`](../.github/workflows/release.yml)
-runs the same script on `v*` tags and opens a draft GitHub release.
+runs the same script on `v*` tags and publishes the GitHub release directly.
 
 The bundle icon is [`assets/AppIcon.icns`](../assets/AppIcon.icns), generated
 once from `logo.svg` via `assets/icon-1024.png`; the embedded 128px icon is
@@ -136,11 +154,14 @@ cross-terminal comparison, the idle probe, opt-in probes, profiling, bundling,
 and locked dependency inventories. Those preserve
 the commands and limitations documented here and in [performance](performance.md).
 
-[CI](../.github/workflows/ci.yml) runs `cargo test`,
-`cargo clippy -- -D warnings`, and `cargo fmt --check` on macOS.
-All-target Clippy also checks test-only code locally. Linux/Windows/backend
-branches exist, but CI does not establish non-macOS build/runtime coverage.
-`--offline` is optional only when dependencies are already cached.
+[CI](../.github/workflows/ci.yml) runs the shared
+[`.github/actions/verify`](../.github/actions/verify/action.yml) action
+(`cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`,
+and `cargo fmt --check`) on macOS for branch pushes and pull requests (skipping
+`chore: release v*` branch pushes, which [`release.yml`](../.github/workflows/release.yml)
+verifies in the release job itself). Linux/Windows/backend branches exist, but
+CI does not establish non-macOS build/runtime coverage. `--offline` is optional
+only when dependencies are already cached.
 
 Ordinary tests need no display, GPU, or external service. Unix lifecycle tests
 do spawn/clean up short-lived local children and use real PTYs. Process-wide

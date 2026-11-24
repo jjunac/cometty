@@ -1,6 +1,7 @@
 name: release
 
-# Tag pushes build the universal .app and open a draft GitHub release.
+# Tag pushes verify, build the universal .app, and publish the GitHub release
+# directly with notes from the annotated tag (or generated from git history).
 # CI publishes ad-hoc-signed builds. For Developer ID/notarized artifacts,
 # add the signing credentials as secrets and pass --identity/--notary-profile
 # to scripts/bundle-macos.sh in the "Build bundle" step.
@@ -12,41 +13,83 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   macos:
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          components: clippy, rustfmt
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-stable
+
       - name: Verify tag matches Cargo.toml
+        id: version
         run: |
-          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} must be canonical vX.Y.Z (no leading zeros or suffix)"
+            exit 1
+          fi
+          version="$(PYTHONPATH=scripts python3 -B -c 'import pathlib, release; print(release.read_cargo_version(pathlib.Path("Cargo.toml").read_text(encoding="utf-8")) or "")')"
           if [[ "v${version}" != "${GITHUB_REF_NAME}" ]]; then
             echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}"
             exit 1
           fi
+          echo "value=${version}" >> "$GITHUB_OUTPUT"
 
-      - name: Test
-        run: cargo test --locked
+      - uses: ./.github/actions/verify
 
       - name: Build bundle
         run: ./scripts/bundle-macos.sh
         env:
           BUNDLE_VERSION: ${{ github.run_number }}
 
-      - name: Create draft release
+      - name: Verify release assets
         run: |
+          version="${{ steps.version.outputs.value }}"
+          zip="Cometty-${version}-macos-universal.zip"
+          sha="${zip}.sha256"
+          test -f "dist/${zip}"
+          test -f "dist/${sha}"
+          ( cd dist && shasum -a 256 -c "${sha}" )
+
+      - name: Prepare release notes
+        run: |
+          python3 scripts/release.py changelog \
+            --from-tag "$GITHUB_REF_NAME" \
+            --output dist/release-notes.md
+          cat dist/release-notes.md
+
+      - name: Publish release
+        run: |
+          version="${{ steps.version.outputs.value }}"
+          zip="dist/Cometty-${version}-macos-universal.zip"
+          sha="${zip}.sha256"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/*.zip dist/*.sha256 --clobber
+            gh release upload "$GITHUB_REF_NAME" "$zip" "$sha" --clobber
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "cometty ${version}" \
+              --notes-file dist/release-notes.md \
+              --draft=false
           else
-            gh release create "$GITHUB_REF_NAME" dist/*.zip dist/*.sha256 \
-              --title "cometty ${GITHUB_REF_NAME#v}" \
-              --generate-notes \
-              --draft \
+            # gh release create uploads assets into a temporary draft and
+            # publishes only once all uploads succeed, avoiding a partial-asset
+            # window for the in-app updater.
+            gh release create "$GITHUB_REF_NAME" "$zip" "$sha" \
+              --title "cometty ${version}" \
+              --notes-file dist/release-notes.md \
               --verify-tag
           fi
         env:
