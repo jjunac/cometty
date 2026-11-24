@@ -97,7 +97,9 @@ Drag to select text, double-click a word, or triple-click a line. Use the wheel
 or scrollbar to browse history. Hold **Shift** to select/scroll locally when an
 application is handling the mouse.
 
-Hold **Cmd** on macOS or **Ctrl** on Linux and click a link to open it. Click a
+Hold **Cmd** on macOS or **Ctrl** on Linux and click a web link, `file://` URL,
+or existing local path (absolute, `~/…`, or relative to the tab's working
+directory, including `:line:col` compiler locations) to open it. Click a
 tab to switch, its **×** to close, or **+** to open another.
 Drag a tab left or right to reorder it; hold near either end of a crowded tab
 strip to scroll. Release to place it, or press **Esc** to cancel. Dropping outside
@@ -212,7 +214,14 @@ manually from the releases page.
   `[clipboard] osc52 = "off"` to disable application clipboard access. Only enable
   `"read-write"` if you trust applications—including remote ones—to read your
   clipboard.
-- Web, FTP, and email links can open; local `file` links are refused.
+- Web (`http`, `https`, `ftp`, `mailto`), local `file://` links, and existing
+  local file or directory paths can open on Cmd/Ctrl+click. Remote `file://`
+  hosts are refused, and executable files or app bundles (`.app`, `.command`,
+  `.pkg`, `.dmg`, `.desktop`, `.exe`, or `+x` binaries) are revealed in Finder /
+  the file manager instead of launched. Set `[links] open_files = false` to
+  disable local file opening completely, or set `[links] file_opener` (for
+  example `code -g {path}:{line}:{col}`) to open files in your editor at the
+  clicked line.
 - **Restored scrollback is saved to disk.** At quit, each tab's history (which
   may include secrets you printed) is written to
   `${XDG_STATE_HOME:-$HOME/.local/state}/cometty/scrollback/`, readable only by

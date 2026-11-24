@@ -105,17 +105,58 @@ Shift is pressed later or the pointer leaves the grid.
 
 ## Hyperlinks and clipboard security
 
-OSC 8 runs take priority over plain-text URL detection. Detection recognizes
-allowlisted schemes and `www.`, with boundaries/trailing punctuation handling
-and byte-to-column spans. `www.` opens as `https://`. Detection is **per visual
-row**: the model records no soft-wrap flag, so wrapped URLs are not joined.
+OSC 8 runs take priority over plain-text URL and path detection. Web detection
+recognizes allowlisted schemes (`http`, `https`, `ftp`, `mailto`) and `www.`,
+with boundaries/trailing punctuation handling and byte-to-column spans. `www.`
+opens as `https://`. When `[links] open_files` is enabled (the default), local
+`file://` URLs (OSC 8 and plain-text) and, when `[links] detect_paths` is also
+enabled, plain-text local paths (`/…`, `~/…`, `./…`, `../…`, relative paths
+containing `/` or an alphabetic extension, quoted same-row paths, `--flag=path`,
+`git diff` `a/`/`b/` prefixes, and `:line[:col]` / `(line,col)` suffixes) are
+also detected. Detection is **per visual row**: the model records no soft-wrap
+flag, so wrapped URLs and paths are not joined.
 
-Link hints cache per tab by grid view version and `detect_urls`; modifier changes
-still repaint and update cursor feedback with unchanged text. At open, strip
-controls and allow only `http`, `https`, `ftp`, and `mailto`. Refuse `file` so
-untrusted output cannot launch arbitrary local paths. macOS/Linux openers use
-direct argv (`open`/`xdg-open`), not shell interpolation. Windows' `cmd /C start`
-requires rejecting cmd metacharacters even inside a quoted URI.
+Link hints cache per tab by `(grid view version, detect_urls, open_files,
+detect_paths, local_cwd, link_hint_generation)`; modifier presses bump
+`link_hint_generation` once (picking up newly created/deleted files) while
+pointer motion over the grid stays a cache hit with zero `stat()` calls and no
+repaints. Modifier changes still repaint and update cursor feedback with
+unchanged text. Plain-text paths and `file://` links are only underlined and
+clickable when their resolved local target exists (regular file or directory);
+existence probes inside one `HintView` build are deduplicated and capped at
+**256 unique probes** (`MAX_PATH_PROBES`).
+
+`Terminal` retains a bounded `OSC 7` authority host (at most 255 bytes; longer
+authorities classify as `CwdHost::Oversized` without copying). `Tab::local_cwd`
+uses a live local-host `OSC 7` directory while a local job owns the TTY,
+suppresses local resolution (`None`) while a live remote-host `OSC 7` (such as
+integrated `ssh`) is active, and otherwise uses `shell_cwd`.
+
+The web-only API (`links::sanitize_uri` / `links::open_command` / `links::open`,
+also used by the updater) remains strictly limited to `http`, `https`, `ftp`,
+and `mailto` with controls stripped. Terminal clicks route through
+`LinkTarget` (`Url` vs `File`) and `links::open_target`:
+
+- Local `file://` URIs must have an empty host, `localhost`, or a match for the
+  local hostname (remote hosts are refused), reject NUL/control bytes before and
+  after percent-decoding, and reject Windows UNC paths.
+- At open time, `fs::metadata` and `fs::canonicalize` inspect both the clicked
+  path and any symlink target; special files (FIFOs, sockets, devices) are
+  refused. Dangerous bundles/launchers/installers (`.app`, `.command`, `.pkg`,
+  `.dmg`, `.desktop`, `.exe`, etc.) always reveal in the file manager
+  (`open -R` on macOS, parent dir via `xdg-open` on Linux, `explorer.exe
+  /select,…` on Windows) rather than launching. Under the OS default opener,
+  executable regular files (`+x` on Unix) also reveal instead of executing.
+- Optional `[links] file_opener` templates split into argv via
+  `pty::split_command_args` (no shell interpolation) *before* substituting
+  `{path}`, `{line}`, and `{col}` within each argument token (`argv[0]` is never
+  substituted; `{path}` is replaced last so filenames cannot inject arguments or
+  re-expand placeholders). On macOS, bare program names missing from launchd's
+  minimal `PATH` fall back to `/opt/homebrew/bin`, `/usr/local/bin`, and
+  `$HOME/.local/bin`.
+- macOS/Linux default openers use direct argv (`open`/`xdg-open`), not shell
+  interpolation. Windows' `cmd /C start` rejects cmd metacharacters even inside
+  a quoted URI or path.
 
 OSC 52 parsing emits requests, not clipboard API calls. The app applies
 `off` / `write` / `read-write`, with reads opt-in because they can exfiltrate

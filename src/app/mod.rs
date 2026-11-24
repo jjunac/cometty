@@ -115,6 +115,15 @@ pub struct App {
     /// A left press opened a link: swallow the matching release so no
     /// spurious release reaches a mouse-reporting app.
     pub(crate) link_press: bool,
+    /// Bumped when the link-hint modifier transitions released -> pressed,
+    /// so freshly created/deleted local paths are re-probed without re-stat'ing
+    /// on every pointer move while the modifier stays held.
+    pub(crate) link_hint_generation: u64,
+    /// Cached `$HOME` (no trailing slash) for `~/` path expansion.
+    pub(crate) home_dir: Option<String>,
+    /// Cached local hostname for `file://` and `OSC 7` local-host checks;
+    /// refreshed when the link-hint modifier is pressed.
+    pub(crate) local_host: Option<String>,
     pub(crate) clipboard: Option<arboard::Clipboard>,
     pub(crate) window_title: String,
     pub(crate) settings: SettingsPanel,
@@ -196,6 +205,9 @@ impl App {
             last_mouse_report: None,
             cursor_icon: winit::window::CursorIcon::Default,
             link_press: false,
+            link_hint_generation: 0,
+            home_dir: crate::procinfo::home(),
+            local_host: crate::procinfo::hostname(),
             clipboard: None,
             window_title,
             settings,

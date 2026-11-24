@@ -538,7 +538,7 @@ impl App {
                     Ok(pid) => {
                         log::info!(target: TARGET, "opened release page {url:?} (pid {pid})")
                     }
-                    Err(OpenError::Rejected) => {
+                    Err(OpenError::Rejected | OpenError::NotFound) => {
                         log::debug!(target: TARGET, "refusing to open release page {url:?}");
                     }
                     Err(OpenError::Spawn(e)) => {

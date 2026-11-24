@@ -672,10 +672,23 @@ pub struct LinksConfig {
     /// (only while the open modifier is held), or `"never"`.
     #[serde(default = "d_link_underline")]
     pub underline: String,
-    /// Detect plain-text URLs (`https://…`, `www.…`, `mailto:…`) in
-    /// addition to `OSC 8` hyperlinks.
+    /// Detect plain-text URLs (`https://…`, `www.…`, `mailto:…`, and
+    /// `file://…` when `open_files` is enabled) in addition to `OSC 8`
+    /// hyperlinks.
     #[serde(default = "d_true")]
     pub detect_urls: bool,
+    /// Allow opening local `file://` links and detected local paths.
+    /// When `false`, local file links are refused and no filesystem probes run.
+    #[serde(default = "d_true")]
+    pub open_files: bool,
+    /// Detect plain-text absolute and relative local paths against the tab's
+    /// working directory (only active when `open_files` is `true`).
+    #[serde(default = "d_true")]
+    pub detect_paths: bool,
+    /// Optional custom command template for opening local files/directories
+    /// (empty = OS default opener). Supports `{path}`, `{line}`, and `{col}`.
+    #[serde(default)]
+    pub file_opener: String,
 }
 
 impl Default for LinksConfig {
@@ -684,6 +697,9 @@ impl Default for LinksConfig {
             open_modifier: d_open_modifier(),
             underline: d_link_underline(),
             detect_urls: true,
+            open_files: true,
+            detect_paths: true,
+            file_opener: String::new(),
         }
     }
 }
@@ -890,6 +906,7 @@ impl Config {
             known @ ("always" | "hover" | "never") => known.to_string(),
             _ => d_link_underline(),
         };
+        self.links.file_opener = self.links.file_opener.trim().to_string();
         self.clipboard.osc52 = match self.clipboard.osc52.trim().to_ascii_lowercase().as_str() {
             known @ ("off" | "write" | "read-write") => known.to_string(),
             _ => d_osc52(),
@@ -968,6 +985,9 @@ mod tests {
         assert_eq!(c.links.open_modifier, "auto");
         assert_eq!(c.links.underline, "hover");
         assert!(c.links.detect_urls);
+        assert!(c.links.open_files);
+        assert!(c.links.detect_paths);
+        assert!(c.links.file_opener.is_empty());
         assert_eq!(c.clipboard.osc52, "write");
         assert!(c.clipboard.allows_write() && !c.clipboard.allows_read());
         assert_eq!(c.session.restore, "scrollback");
@@ -1081,16 +1101,21 @@ mod tests {
     #[test]
     fn links_and_clipboard_sanitize_enums() {
         let c: Config = toml::from_str(
-            "[links]\nopen_modifier=\"CMD\"\nunderline=\"weird\"\ndetect_urls=false\n[clipboard]\nosc52=\"read-write\"\n",
+            "[links]\nopen_modifier=\"CMD\"\nunderline=\"weird\"\ndetect_urls=false\nopen_files=false\ndetect_paths=false\nfile_opener=\"  code -g {path}:{line}:{col}  \"\n[clipboard]\nosc52=\"read-write\"\n",
         )
         .unwrap();
         assert_eq!(c.links.open_modifier, "CMD", "raw value kept for repair");
         assert_eq!(c.links.underline, "weird");
         assert!(!c.links.detect_urls);
+        assert!(!c.links.open_files);
+        assert!(!c.links.detect_paths);
         let s = c.sanitized();
         assert_eq!(s.links.open_modifier, "cmd");
         assert_eq!(s.links.underline, "hover", "unknown value repaired");
         assert!(!s.links.detect_urls, "boolean survives sanitize");
+        assert!(!s.links.open_files, "open_files survives sanitize");
+        assert!(!s.links.detect_paths, "detect_paths survives sanitize");
+        assert_eq!(s.links.file_opener, "code -g {path}:{line}:{col}");
         assert_eq!(s.clipboard.osc52, "read-write");
         assert!(s.clipboard.allows_read());
         // Unknown osc52 mode falls back to write-only.

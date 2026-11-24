@@ -477,6 +477,12 @@ mod tests {
         new.links.underline = "always".to_string();
         assert!(diff_actions(&old, &new).chrome);
         new = old.clone();
+        new.links.open_files = false;
+        assert!(diff_actions(&old, &new).chrome);
+        new = old.clone();
+        new.links.file_opener = "code -g {path}:{line}:{col}".to_string();
+        assert!(diff_actions(&old, &new).chrome);
+        new = old.clone();
         new.clipboard.osc52 = "read-write".to_string();
         assert!(diff_actions(&old, &new).chrome);
         new = old.clone();

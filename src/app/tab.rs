@@ -45,11 +45,16 @@ pub(crate) struct TitleRefresh {
 }
 
 /// Cached view-space link runs for the hint underlines. Rebuilt only when
-/// the grid view or the URL-detection toggle changed, so holding the hint
-/// modifier does not re-scan the screen every frame.
+/// the grid view, link settings, tab working directory, or modifier-press
+/// generation changed, so holding the hint modifier and moving the pointer
+/// never re-scans the screen or re-probes the filesystem.
 pub(crate) struct LinkHintCache {
     version: u64,
     detect_urls: bool,
+    open_files: bool,
+    detect_paths: bool,
+    generation: u64,
+    cwd: Option<String>,
     view: crate::links::HintView,
 }
 
@@ -58,6 +63,10 @@ impl Default for LinkHintCache {
         Self {
             version: u64::MAX,
             detect_urls: true,
+            open_files: true,
+            detect_paths: true,
+            generation: u64::MAX,
+            cwd: None,
             view: crate::links::HintView::default(),
         }
     }
@@ -172,13 +181,41 @@ impl Tab {
         }
     }
 
-    /// View-space link runs, rebuilt when the grid view changed.
-    pub(crate) fn link_hints(&mut self, detect_urls: bool) -> &crate::links::HintView {
+    /// View-space link runs, rebuilt when the grid view, link settings,
+    /// working directory, or modifier-press generation changed.
+    pub(crate) fn link_hints(
+        &mut self,
+        config: &crate::config::LinksConfig,
+        generation: u64,
+        home: Option<&str>,
+        local_host: Option<&str>,
+    ) -> &crate::links::HintView {
         let version = self.terminal.grid().version;
-        if self.link_hints.version != version || self.link_hints.detect_urls != detect_urls {
+        let cwd = self.local_cwd(local_host);
+        if self.link_hints.version != version
+            || self.link_hints.detect_urls != config.detect_urls
+            || self.link_hints.open_files != config.open_files
+            || self.link_hints.detect_paths != config.detect_paths
+            || self.link_hints.generation != generation
+            || self.link_hints.cwd.as_deref() != cwd
+        {
+            let cwd_owned = cwd.map(str::to_string);
             self.link_hints.version = version;
-            self.link_hints.detect_urls = detect_urls;
-            self.link_hints.view = crate::links::HintView::build(self.terminal.grid(), detect_urls);
+            self.link_hints.detect_urls = config.detect_urls;
+            self.link_hints.open_files = config.open_files;
+            self.link_hints.detect_paths = config.detect_paths;
+            self.link_hints.generation = generation;
+            self.link_hints.cwd = cwd_owned;
+            let ctx = crate::links::LinkContext {
+                detect_urls: config.detect_urls,
+                open_files: config.open_files,
+                detect_paths: config.detect_paths,
+                cwd: self.link_hints.cwd.as_deref(),
+                home,
+                local_host,
+                platform: crate::links::platform(),
+            };
+            self.link_hints.view = crate::links::HintView::build_with(self.terminal.grid(), &ctx);
         }
         &self.link_hints.view
     }
@@ -259,6 +296,25 @@ impl Tab {
     /// The shell's last known working directory, for session snapshots.
     pub(crate) fn shell_cwd(&self) -> Option<&str> {
         self.foreground.cwd.as_deref().or(self.spawn_cwd.as_deref())
+    }
+
+    /// Local base directory for resolving relative paths clicked in this tab.
+    /// Returns `None` while a live remote `OSC 7` report (e.g., an integrated
+    /// `ssh` session) owns the foreground, so remote paths never resolve
+    /// against a local directory.
+    pub(crate) fn local_cwd(&self, local_host: Option<&str>) -> Option<&str> {
+        let shell_foreground = self
+            .pty
+            .shell_pid()
+            .is_some_and(|pid| self.foreground.pgid == Some(pid));
+        let osc7_live = osc7_is_live(
+            self.terminal.cwd_version(),
+            self.foreground.cwd_baseline,
+            shell_foreground,
+        );
+        let osc7 = self.terminal.cwd().filter(|_| osc7_live);
+        let osc7_local = self.terminal.cwd_host().is_local(local_host);
+        local_cwd_for(osc7, osc7_local, self.shell_cwd(), shell_foreground)
     }
 }
 
@@ -457,6 +513,27 @@ pub fn preferred_cwd<'a>(
     } else {
         osc7.or(kernel)
     }
+}
+
+/// Local base directory for resolving relative path links.
+///
+/// While a foreground job emitted a live `OSC 7`, a local host's directory
+/// wins (nested local shells, local file managers), while a remote host's
+/// `OSC 7` suppresses local fallback so remote relative paths cannot resolve
+/// against a local directory.
+pub fn local_cwd_for<'a>(
+    osc7: Option<&'a str>,
+    osc7_is_local: bool,
+    shell_cwd: Option<&'a str>,
+    shell_foreground: bool,
+) -> Option<&'a str> {
+    if !shell_foreground {
+        if let Some(dir) = osc7 {
+            return osc7_is_local.then_some(dir);
+        }
+        return shell_cwd;
+    }
+    shell_cwd.or_else(|| osc7.filter(|_| osc7_is_local))
 }
 
 /// Whether the terminal is owned by a foreground job rather than the shell
@@ -1609,6 +1686,37 @@ mod tests {
             Some("/reported")
         );
         assert_eq!(preferred_cwd(None, None, true), None);
+    }
+
+    #[test]
+    fn local_cwd_suppresses_remote_osc7_while_allowing_local() {
+        // Remote SSH foreground job emitting remote OSC 7: suppress local
+        // fallback so remote relative paths never resolve locally.
+        assert_eq!(
+            local_cwd_for(Some("/var/log"), false, Some("/Users/me/repo"), false),
+            None
+        );
+        // Local foreground job emitting local OSC 7: prefer its directory.
+        assert_eq!(
+            local_cwd_for(Some("/Users/me/sub"), true, Some("/Users/me/repo"), false),
+            Some("/Users/me/sub")
+        );
+        // Foreground job without OSC 7: use shell cwd.
+        assert_eq!(
+            local_cwd_for(None, true, Some("/Users/me/repo"), false),
+            Some("/Users/me/repo")
+        );
+        // At prompt: shell cwd beats stale remote OSC 7; without kernel cwd
+        // only local OSC 7 may be used.
+        assert_eq!(
+            local_cwd_for(Some("/var/log"), false, Some("/Users/me/repo"), true),
+            Some("/Users/me/repo")
+        );
+        assert_eq!(local_cwd_for(Some("/var/log"), false, None, true), None);
+        assert_eq!(
+            local_cwd_for(Some("/Users/me/sub"), true, None, true),
+            Some("/Users/me/sub")
+        );
     }
 
     #[test]

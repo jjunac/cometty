@@ -11,11 +11,45 @@
 //! tab and only refreshes after that tab produced output (see
 //! [`crate::app::tab::Tab::refresh_title`]).
 
-/// `$HOME` with any trailing slash removed, when set and non-empty.
-fn home() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let trimmed = home.trim_end_matches('/');
+/// `$HOME` (or `%USERPROFILE%` on Windows) with any trailing slash removed,
+/// when set and non-empty.
+pub fn home() -> Option<String> {
+    let home = std::env::var("HOME").ok().or_else(|| {
+        if cfg!(target_os = "windows") {
+            std::env::var("USERPROFILE").ok()
+        } else {
+            None
+        }
+    })?;
+    let trimmed = home.trim_end_matches(['/', '\\']);
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Local machine hostname (best-effort), used to tell local `file://` URLs
+/// and `OSC 7` reports apart from remote hosts.
+pub fn hostname() -> Option<String> {
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        // SAFETY: `buf` is a live writable buffer of `buf.len()` bytes.
+        let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+        if rc != 0 {
+            return None;
+        }
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        let name = std::str::from_utf8(&buf[..end]).ok()?.trim();
+        (!name.is_empty()).then(|| name.to_string())
+    }
+    #[cfg(windows)]
+    {
+        let name = std::env::var("COMPUTERNAME").ok()?;
+        let trimmed = name.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
 }
 
 /// Rewrite a leading `$HOME` (or the whole path) to `~`.
@@ -182,5 +216,14 @@ mod tests {
         // Pids are positive; a negative one is never valid.
         assert_eq!(command(-1), None);
         assert_eq!(cwd(-1), None);
+    }
+
+    #[test]
+    fn hostname_is_available_on_unix() {
+        #[cfg(unix)]
+        {
+            let name = hostname().expect("local hostname");
+            assert!(!name.is_empty());
+        }
     }
 }

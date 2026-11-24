@@ -5,7 +5,7 @@ use winit::window::CursorIcon;
 
 use super::App;
 use crate::config::LinksConfig;
-use crate::links::{HintView, OpenError};
+use crate::links::{HintView, LinkContext, LinkTarget, OpenError, OpenOutcome};
 
 /// True when the configured "open link" modifier is held. `auto` means Cmd
 /// on macOS and Ctrl elsewhere; `none` disables hints and click-to-open.
@@ -42,19 +42,27 @@ impl App {
     }
 
     /// View-space link runs for this frame, or `None` when underlines are
-    /// off. Cached per tab against the grid view version.
+    /// off. Cached per tab against the grid view version, link settings,
+    /// working directory, and modifier-press generation.
     pub(crate) fn link_hint_view(&mut self) -> Option<HintView> {
         if !self.hints_visible() {
             return None;
         }
-        let detect_urls = self.config.links.detect_urls;
-        let tab = self.active_tab_mut()?;
-        Some(tab.link_hints(detect_urls).clone())
+        let tab = self.tabs.get_mut(self.active)?;
+        Some(
+            tab.link_hints(
+                &self.config.links,
+                self.link_hint_generation,
+                self.home_dir.as_deref(),
+                self.local_host.as_deref(),
+            )
+            .clone(),
+        )
     }
 
-    /// URI under the cursor while the hint modifier is held: the `OSC 8`
-    /// link wins, then a detected plain-text URL.
-    pub(crate) fn link_under_cursor(&self) -> Option<String> {
+    /// Link or local path under the cursor while the hint modifier is held:
+    /// an `OSC 8` hyperlink wins, then a detected plain-text URL or local path.
+    pub(crate) fn link_under_cursor(&self) -> Option<LinkTarget> {
         if !self.hints_active() {
             return None;
         }
@@ -63,27 +71,42 @@ impl App {
         let grid = tab.terminal.grid();
         let global = self.view_to_global(view_row)?;
         let row = grid.global_line(global)?;
-        if let Some(id) = grid.hyperlink_id_at(global, col)
-            && let Some(uri) = grid.hyperlink_uri(id)
-        {
-            return Some(uri.to_string());
+        let local_host = self.local_host.as_deref();
+        let ctx = LinkContext {
+            detect_urls: self.config.links.detect_urls,
+            open_files: self.config.links.open_files,
+            detect_paths: self.config.links.detect_paths,
+            cwd: tab.local_cwd(local_host),
+            home: self.home_dir.as_deref(),
+            local_host,
+            platform: crate::links::platform(),
+        };
+        if let Some(id) = grid.hyperlink_id_at(global, col) {
+            let uri = grid.hyperlink_uri(id)?;
+            let target = crate::links::resolve_osc8_uri(uri, &ctx);
+            if target.is_none() {
+                log::debug!("ignoring unopenable OSC 8 link {uri:?}");
+            }
+            return target;
         }
-        if self.config.links.detect_urls {
-            return crate::links::detected_url_at(&row.materialize(), col);
-        }
-        None
+        crate::links::detected_link_at(&row.materialize(), col, &ctx)
     }
 
-    /// Open the link under the cursor (if any) and report whether the press
-    /// was consumed. Rejected schemes are ignored quietly (debug log).
+    /// Open the link or local path under the cursor (if any) and report
+    /// whether the press was consumed. Rejected targets are ignored quietly
+    /// (debug log).
     pub(crate) fn open_link_at_cursor(&mut self) -> bool {
-        let Some(uri) = self.link_under_cursor() else {
+        let Some(target) = self.link_under_cursor() else {
             return false;
         };
-        match crate::links::open(&uri) {
-            Ok(pid) => log::info!("opened link {uri:?} (pid {pid})"),
-            Err(OpenError::Rejected) => log::debug!("refusing to open link {uri:?}"),
-            Err(OpenError::Spawn(e)) => log::warn!("failed to open link {uri:?}: {e}"),
+        match crate::links::open_target(&target, &self.config.links) {
+            Ok(OpenOutcome::Opened(pid)) => log::info!("opened link {target:?} (pid {pid})"),
+            Ok(OpenOutcome::Revealed(pid)) => {
+                log::info!("revealed executable/bundle path {target:?} (pid {pid})")
+            }
+            Err(OpenError::Rejected) => log::debug!("refusing to open link {target:?}"),
+            Err(OpenError::NotFound) => log::debug!("local path no longer exists: {target:?}"),
+            Err(OpenError::Spawn(e)) => log::warn!("failed to open link {target:?}: {e}"),
         }
         true
     }
@@ -94,10 +117,15 @@ impl App {
         let cell = (self.hints_active() && !self.tab_drag.captures_pointer())
             .then(|| self.cell_under_cursor())
             .flatten();
-        let detect_urls = self.config.links.detect_urls;
         let pointer = cell.is_some_and(|(col, row)| {
-            self.active_tab_mut()
-                .is_some_and(|tab| tab.link_hints(detect_urls).hit(row, col, 1))
+            let generation = self.link_hint_generation;
+            let config = &self.config.links;
+            let home = self.home_dir.as_deref();
+            let local_host = self.local_host.as_deref();
+            self.tabs.get_mut(self.active).is_some_and(|tab| {
+                tab.link_hints(config, generation, home, local_host)
+                    .hit(row, col, 1)
+            })
         });
         let desired = if pointer {
             CursorIcon::Pointer

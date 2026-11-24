@@ -402,17 +402,16 @@ fn configured_shell(
     (program, args)
 }
 
-/// Split a configured shell string (`[shell] shell` or `$SHELL`) into
-/// `(program, args)`: `"/bin/bash --norc"` spawns `/bin/bash` with
-/// `--norc` instead of failing to find a binary with that whole name.
-/// Single/double quotes group (`"/my dir/sh" -l`), backslash escapes the
-/// next char; there is no other expansion. An empty result falls back to
-/// the platform default so spawn never gets an empty program.
-pub(crate) fn split_shell_command(shell: &str) -> (String, Vec<String>) {
+/// Split a command string into argv tokens.
+///
+/// Single/double quotes group (`"/my dir/code" -g`), backslash escapes the
+/// next char (inside double quotes or outside quotes); there is no shell
+/// variable or glob expansion.
+pub(crate) fn split_command_args(command: &str) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut quote: Option<char> = None;
-    let mut chars = shell.chars();
+    let mut chars = command.chars();
     let mut in_word = false;
     while let Some(c) = chars.next() {
         if let Some(q) = quote {
@@ -458,6 +457,17 @@ pub(crate) fn split_shell_command(shell: &str) -> (String, Vec<String>) {
     if in_word {
         args.push(cur);
     }
+    args
+}
+
+/// Split a configured shell string (`[shell] shell` or `$SHELL`) into
+/// `(program, args)`: `"/bin/bash --norc"` spawns `/bin/bash` with
+/// `--norc` instead of failing to find a binary with that whole name.
+/// Single/double quotes group (`"/my dir/sh" -l`), backslash escapes the
+/// next char; there is no other expansion. An empty result falls back to
+/// the platform default so spawn never gets an empty program.
+pub(crate) fn split_shell_command(shell: &str) -> (String, Vec<String>) {
+    let mut args = split_command_args(shell);
     if args.is_empty() {
         return (default_shell(), Vec::new());
     }

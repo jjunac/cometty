@@ -1149,10 +1149,11 @@ fn show_section(
         }
         SettingsSection::Links => {
             ui.label(
-                "Hold the open modifier to underline every OSC 8 hyperlink and \
-                 detected URL; click while holding it to open the link in the \
-                 OS browser. Detected URLs must include a scheme (http, https, \
-                 ftp, file, mailto) or start with www.",
+                "Hold the open modifier to underline OSC 8 hyperlinks, detected \
+                 URLs (http, https, ftp, mailto, www., and local file://), and \
+                 existing local paths; click while holding it to open them. \
+                 Remote file:// hosts are refused, and executables or app \
+                 bundles are revealed in the file manager instead of launched.",
             );
             ui.horizontal(|ui| {
                 let slot = begin_reset_slot(ui);
@@ -1218,6 +1219,34 @@ fn show_section(
                 &mut config.links.detect_urls,
                 true,
             );
+            ed.flag(
+                ui,
+                "Open local files and paths",
+                &mut config.links.open_files,
+                true,
+            );
+            ui.add_enabled_ui(config.links.open_files, |ui| {
+                ed.flag(
+                    ui,
+                    "Detect plain-text paths",
+                    &mut config.links.detect_paths,
+                    true,
+                );
+                ed.text(
+                    ui,
+                    "File opener (empty = OS default)",
+                    &mut config.links.file_opener,
+                    &d.links.file_opener,
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Optional command template supporting {path}, {line}, {col} \
+                         (for example: code -g {path}:{line}:{col} or zed {path}:{line}:{col}).",
+                    )
+                    .small()
+                    .weak(),
+                );
+            });
         }
         SettingsSection::Clipboard => {
             ui.label(

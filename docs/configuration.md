@@ -43,6 +43,9 @@ title_format = "$command | $cwd"
 open_modifier = "auto"
 underline = "hover"
 detect_urls = true
+open_files = true
+detect_paths = true
+file_opener = ""
 
 [clipboard]
 osc52 = "write"
@@ -160,11 +163,31 @@ use `word_regex` for new configurations.
 | --- | --- | --- |
 | `links.open_modifier` | `"auto"` | `auto` = Cmd on macOS, Ctrl elsewhere; alternatives: `cmd`, `ctrl`, `alt`, `none` (disables activation) |
 | `links.underline` | `"hover"` | `always`, `hover` (while the modifier is held), or `never` |
-| `links.detect_urls` | `true` | Detect plain-text URLs as well as application-provided links |
+| `links.detect_urls` | `true` | Detect plain-text URLs (`http`, `https`, `ftp`, `mailto`, `www.`, and local `file://` when `open_files` is enabled) as well as application-provided links |
+| `links.open_files` | `true` | Allow opening local `file://` hyperlinks and local paths; set `false` to refuse all local file targets and skip filesystem existence probes |
+| `links.detect_paths` | `true` | Detect plain-text absolute, `~/…`, and relative local paths against the tab's working directory (only active when `open_files` is `true`) |
+| `links.file_opener` | `""` | Optional command template for opening local files/directories (empty = OS default opener). Supports `{path}`, `{line}`, and `{col}` placeholders (e.g. `code -g {path}:{line}:{col}` or `zed {path}:{line}:{col}`) |
 | `clipboard.osc52` | `"write"` | `off`, `write`, or `read-write` for application clipboard requests |
 
-Only `http`, `https`, `ftp`, and `mailto` links open; local `file` links are
-refused. Wrapped plain-text URLs are detected separately on each displayed row.
+Web links allow `http`, `https`, `ftp`, and `mailto`. Local `file://` links
+must use an empty host, `localhost`, or the local machine's hostname (remote
+hosts are refused) and must exist on disk. Plain-text paths support absolute
+paths, `~/…`, `./…`, `../…`, relative paths with `/` or a file extension,
+quoted same-row paths with spaces, `--flag=path`, `git diff` `a/`/`b/`
+prefixes, and `:line[:col]` / `(line,col)` suffixes. Wrapped plain-text URLs
+and paths are detected separately on each displayed row.
+
+With the OS default opener, executable files (`+x` regular files on Unix) and
+dangerous bundles/installers/launchers (`.app`, `.command`, `.pkg`, `.dmg`,
+`.desktop`, `.exe`, `.bat`, etc., including symlinks pointing to them) are
+revealed in the file manager (`open -R` on macOS) instead of launched. With a
+custom `file_opener`, bundles/installers still reveal while regular files
+(including `+x` scripts) open in the configured command. `file_opener` is split
+into arguments using quotes/backslashes with no shell interpolation, and
+placeholders are substituted inside each argument afterwards; if `{path}` is
+omitted, the resolved path is appended as the final argument. When launched
+from `Cometty.app` on macOS, bare program names in `file_opener` also fall back
+to `/opt/homebrew/bin`, `/usr/local/bin`, and `$HOME/.local/bin`.
 
 **Clipboard reads are a privacy risk:** `read-write` allows a terminal program
 (including a remote program) to request your clipboard contents. `write` allows

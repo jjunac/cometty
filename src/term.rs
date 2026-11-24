@@ -26,6 +26,32 @@ pub enum ClipboardOp {
 /// logged and dropped (clipboard writes are not a bulk transfer channel).
 pub const MAX_CLIPBOARD_BYTES: usize = 1 << 20;
 
+/// Largest `OSC 7` authority hostname retained, in bytes (DNS limit).
+/// Longer authorities are recorded as [`CwdHost::Oversized`] without copying
+/// the remaining bytes, and treated as non-local.
+const MAX_CWD_HOST_BYTES: usize = 255;
+
+/// Authority host from an `OSC 7` `file://host/path` report.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum CwdHost {
+    #[default]
+    Empty,
+    Named(String),
+    Oversized,
+}
+
+impl CwdHost {
+    /// True when this authority refers to the local machine (empty host,
+    /// `localhost`, or matching `local_host`).
+    pub fn is_local(&self, local_host: Option<&str>) -> bool {
+        match self {
+            Self::Empty => true,
+            Self::Named(host) => crate::links::is_local_file_host(host, local_host),
+            Self::Oversized => false,
+        }
+    }
+}
+
 pub struct Terminal {
     grid: Grid,
     parser: BoundedParser,
@@ -37,6 +63,9 @@ pub struct Terminal {
     // Last OSC 7 working directory set by the shell, when it reports one.
     // Fallback source for the `$cwd` label variable.
     cwd: Option<String>,
+    // Authority host from the last OSC 7 report, so local path resolution can
+    // tell a local tool's directory apart from a remote SSH host's.
+    cwd_host: CwdHost,
     // Monotonic count of OSC 7 reports, so the tab label can tell a live
     // report (a running job's own directory) from one left behind by a
     // finished job.
@@ -176,17 +205,44 @@ fn title_payload(payload: OscPayload<'_>, max_chars: usize) -> String {
     title
 }
 
-/// Extract an `OSC 7` working-directory update (`file://host/path`).
+/// Extract an `OSC 7` working-directory update (`file://host/path`), returning
+/// its bounded authority host alongside the decoded path.
 ///
-/// The authority is ignored (empty, `localhost`, or a remote host name —
-/// cometty only ever shows a local shell's directory). Non-`file` schemes
-/// and relative paths are rejected.
-fn cwd_payload(payload: OscPayload<'_>, max_chars: usize) -> Option<String> {
+/// Non-`file` schemes and relative paths are rejected. Authorities longer than
+/// [`MAX_CWD_HOST_BYTES`] (or containing control chars) are recorded as
+/// [`CwdHost::Oversized`] without copying the excess bytes.
+fn cwd_payload_with_host(payload: OscPayload<'_>, max_chars: usize) -> Option<(CwdHost, String)> {
     let mut chars = payload.chars();
     if !chars.by_ref().take(7).eq("file://".chars()) {
         return None;
     }
-    chars.find(|&c| c == '/')?;
+    let mut host_buf = String::new();
+    let mut oversized = false;
+    let mut found_slash = false;
+    for c in chars.by_ref() {
+        if c == '/' {
+            found_slash = true;
+            break;
+        }
+        if !oversized {
+            if c.is_control() || host_buf.len() + c.len_utf8() > MAX_CWD_HOST_BYTES {
+                oversized = true;
+                host_buf.clear();
+            } else {
+                host_buf.push(c);
+            }
+        }
+    }
+    if !found_slash {
+        return None;
+    }
+    let host = if oversized {
+        CwdHost::Oversized
+    } else if host_buf.is_empty() {
+        CwdHost::Empty
+    } else {
+        CwdHost::Named(host_buf)
+    };
     let path_bytes = std::iter::once('/').chain(chars).flat_map(|c| {
         let mut bytes = [0; 4];
         let len = c.encode_utf8(&mut bytes).len();
@@ -198,12 +254,17 @@ fn cwd_payload(payload: OscPayload<'_>, max_chars: usize) -> Option<String> {
     let decoded: Vec<u8> = percent_decoded(path_bytes)
         .take(max_chars.saturating_mul(4))
         .collect();
-    Some(
-        String::from_utf8_lossy(&decoded)
-            .chars()
-            .take(max_chars)
-            .collect(),
-    )
+    let path = String::from_utf8_lossy(&decoded)
+        .chars()
+        .take(max_chars)
+        .collect();
+    Some((host, path))
+}
+
+/// Extract an `OSC 7` working-directory path (`file://host/path`).
+#[cfg(test)]
+fn cwd_payload(payload: OscPayload<'_>, max_chars: usize) -> Option<String> {
+    cwd_payload_with_host(payload, max_chars).map(|(_, path)| path)
 }
 
 /// Decode `%XX` escapes (paths with spaces, non-UTF-8 bytes, …). Invalid
@@ -427,6 +488,7 @@ impl Terminal {
             pending_wrap: false,
             title: String::new(),
             cwd: None,
+            cwd_host: CwdHost::Empty,
             cwd_version: 0,
             title_version: 0,
             max_title_chars: config.terminal.max_title_chars.max(1),
@@ -448,6 +510,11 @@ impl Terminal {
     /// shell cwd (see `app::tab::preferred_cwd`).
     pub fn cwd(&self) -> Option<&str> {
         self.cwd.as_deref()
+    }
+
+    /// Authority host from the last `OSC 7` report; see [`CwdHost::is_local`].
+    pub fn cwd_host(&self) -> &CwdHost {
+        &self.cwd_host
     }
 
     /// Monotonic count of `OSC 7` reports; see [`Self::cwd`].
@@ -1073,6 +1140,7 @@ impl vte::Perform for Terminal {
                     self.title.clear();
                     self.title_version += 1;
                     self.cwd = None;
+                    self.cwd_host = CwdHost::Empty;
                     self.status.clear();
                     self.last_graphic = None;
                 }
@@ -1110,7 +1178,8 @@ impl vte::Perform for Terminal {
                 self.title_version += 1;
             }
             b"7" => {
-                if let Some(cwd) = cwd_payload(payload, self.max_title_chars) {
+                if let Some((host, cwd)) = cwd_payload_with_host(payload, self.max_title_chars) {
+                    self.cwd_host = host;
                     self.cwd = Some(cwd);
                     self.cwd_version += 1;
                 }
@@ -1346,6 +1415,19 @@ mod tests {
         };
         let stats = crate::perf_bench::allocation_stats(|| {
             assert_eq!(cwd_payload(cwd, 16).unwrap().chars().count(), 16);
+        });
+        assert!(stats.largest_request < 4096 && stats.live_delta == 0);
+
+        // Oversized authority must also stay bounded and classify as non-local.
+        let huge_host = format!("file://{}/tmp", "h".repeat(1 << 18));
+        let cwd_huge = OscPayload {
+            first: huge_host.as_bytes(),
+            rest: &[],
+        };
+        let stats = crate::perf_bench::allocation_stats(|| {
+            let (host, path) = cwd_payload_with_host(cwd_huge, 16).unwrap();
+            assert_eq!(host, CwdHost::Oversized);
+            assert_eq!(path, "/tmp");
         });
         assert!(stats.largest_request < 4096 && stats.live_delta == 0);
 
@@ -2129,8 +2211,20 @@ mod tests {
         // stays monotonic so a later report still counts as fresh.
         feed_str(&mut t, "\x1bc");
         assert_eq!(t.cwd(), None);
+        assert_eq!(t.cwd_host(), &CwdHost::Empty);
         assert_eq!(t.cwd_version(), 1);
         assert_eq!(t.title(), "");
+
+        // Authority host is tracked so local path resolution can distinguish
+        // local shells from remote SSH hosts.
+        feed_str(&mut t, "\x1b]7;file:///tmp\x07");
+        assert_eq!(t.cwd_host(), &CwdHost::Empty);
+        assert!(t.cwd_host().is_local(Some("mac.local")));
+        feed_str(&mut t, "\x1b]7;file://remote.example/var/log\x07");
+        assert_eq!(t.cwd_host(), &CwdHost::Named("remote.example".into()));
+        assert!(!t.cwd_host().is_local(Some("mac.local")));
+        feed_str(&mut t, "\x1b]7;file://mac/Users/x\x07");
+        assert!(t.cwd_host().is_local(Some("mac.local")));
     }
 
     #[test]

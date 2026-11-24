@@ -395,8 +395,16 @@ impl ApplicationHandler<UserEvent> for App {
                 let hints_were = self.hints_active();
                 self.modifiers = m.state();
                 // Pressing/releasing the link modifier toggles hint
-                // underlines and the hover cursor.
+                // underlines and the hover cursor. A fresh press also bumps
+                // the hint generation so newly created/deleted local paths
+                // are picked up once without re-stat'ing during pointer motion.
                 if self.hints_active() != hints_were {
+                    if self.hints_active() {
+                        self.link_hint_generation = self.link_hint_generation.wrapping_add(1);
+                        if self.config.links.open_files {
+                            self.local_host = crate::procinfo::hostname();
+                        }
+                    }
                     self.update_link_cursor();
                     if let Some(w) = self.window.as_ref() {
                         w.request_redraw();
