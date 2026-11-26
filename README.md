@@ -30,18 +30,35 @@ and Unicode support.
 
 ### macOS (prebuilt app)
 
-Download the latest `Cometty-<version>-macos-universal.zip` from the
-[releases page](https://github.com/jjunac/cometty/releases/latest), unzip it,
-and move `Cometty.app` to `/Applications`. The build is universal (Apple
-Silicon and Intel) and targets macOS 13 or later.
+Install the latest universal release (Apple Silicon and Intel, macOS 13 or later):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jjunac/cometty/main/install.sh | sh
+```
+
+The installer downloads the latest release from GitHub, verifies its SHA-256
+checksum, and installs `Cometty.app` into `/Applications` (falling back to
+`~/Applications` if `/Applications` is not writable). Because it does not come
+through a browser quarantine, Cometty opens immediately without a Gatekeeper
+prompt. Pass options via `sh -s --` to choose a version or folder (for example
+`sh -s -- --version 0.4.0 --dir ~/Applications`).
+
+Alternatively, download `Cometty-<version>-macos-universal.zip` manually from
+the [releases page](https://github.com/jjunac/cometty/releases/latest), unzip
+it, and move `Cometty.app` to `/Applications`. Release builds are ad-hoc signed
+and not notarized yet, so macOS blocks a browser-downloaded copy on first
+launch. Either clear its quarantine flag:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Cometty.app
+```
+
+or try opening Cometty once, then open **System Settings → Privacy & Security**
+and click **Open Anyway** next to Cometty.
 
 The bundled app starts your shell as a login shell, so Finder launches see your
 normal login PATH and profiles. Set `shell.shell` explicitly if you prefer a
 non-login shell.
-
-Release builds are ad-hoc signed, so macOS blocks the first launch. Try opening
-Cometty once, then open **System Settings → Privacy & Security** and click
-**Open Anyway** next to Cometty. Builds are not notarized yet.
 
 Prebuilt releases currently cover macOS only.
 

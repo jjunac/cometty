@@ -7,7 +7,7 @@ helpers: `version`, `release`, `checksum`, `bundle`, `staging`, `mode`, `state`,
 [`renderer/update_ui.rs`](../src/renderer/update_ui.rs). Event-loop wiring is in
 [architecture](architecture.md#update-workers); the setting is in
 [configuration](configuration.md#updates); release naming and the manual
-checklist are in [development](development.md#reaching-the-updater).
+checklist are in [development](development.md#reaching-the-updater-and-installer).
 
 Every launch with `[update] enabled` checks GitHub's latest published release.
 A launch from a replaceable `Cometty.app` also downloads, verifies, and stages a

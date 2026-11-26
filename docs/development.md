@@ -72,22 +72,22 @@ directly** with the annotated tag's notes (falling back to regenerating them
 from git history if a tag was pushed manually). Output is colored on a terminal
 unless `NO_COLOR` is set.
 
-### Reaching the updater
+### Reaching the updater and installer
 
-The in-app [updater](update.md) reads only GitHub's latest published release,
-and skips a release that is a draft or a prerelease. Because `release.yml`
-publishes directly once all assets are uploaded (`gh release create` uploads
-into a temporary draft before publishing), every installed copy is offered the
-new version as soon as the release workflow finishes; prereleases are never
-offered. The updater also relies on these names:
+Both the in-app [updater](update.md) and [`install.sh`](../install.sh) read only
+GitHub's latest published release, and skip drafts and prereleases. Because
+`release.yml` publishes directly once all assets are uploaded (`gh release
+create` uploads into a temporary draft before publishing), every installed copy
+and new `install.sh` run sees the new version as soon as the release workflow
+finishes; prereleases are never offered. Both rely on these names:
 
 - the tag is exactly `vX.Y.Z` (no suffix, no leading zeros),
 - the archive asset is `Cometty-<X.Y.Z>-macos-universal.zip`,
 - the checksum asset is that name plus `.sha256`, as written by
   `scripts/bundle-macos.sh`.
 
-Renaming either asset or changing the tag scheme hides the release from every
-installed copy.
+Renaming either asset or changing the tag scheme breaks `install.sh` and hides
+the release from every installed copy.
 
 ### Manual update checklist
 
@@ -143,13 +143,17 @@ the macOS floor in the README in sync.
 
 ```sh
 cargo test --locked
+sh -n install.sh
+python3 -B -m unittest discover -s scripts -p 'test_*.py'
 cargo check --locked
 cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 git diff --check
 ```
 
-`make fmt` rewrites formatting; `verify` only checks it. `make help` lists the
+`make fmt` rewrites formatting; `verify` only checks it. `make test-scripts`
+runs the `install.sh` syntax check and offline script tests (`scripts/test_*.py`)
+on their own. `make help` lists the
 remaining targets: build/run, release tagging, the headless benchmark, the
 cross-terminal comparison, the idle probe, opt-in probes, profiling, bundling,
 and locked dependency inventories. Those preserve
@@ -157,7 +161,9 @@ the commands and limitations documented here and in [performance](performance.md
 
 [CI](../.github/workflows/ci.yml) runs the shared
 [`.github/actions/verify`](../.github/actions/verify/action.yml) action
-(`cargo test --locked`, `cargo clippy --locked --all-targets -- -D warnings`,
+(`cargo test --locked`, `sh -n install.sh`,
+`python3 -B -m unittest discover -s scripts -p 'test_*.py'`,
+`cargo clippy --locked --all-targets -- -D warnings`,
 and `cargo fmt --check`) on macOS for branch pushes and pull requests (skipping
 `chore: release v*` branch pushes, which [`release.yml`](../.github/workflows/release.yml)
 verifies in the release job itself). Linux/Windows/backend branches exist, but
@@ -192,6 +198,7 @@ Do not run all `--ignored` tests indiscriminately without a working GPU.
 | Search / selection / links | `search::`, `selection::`, `links::`, `app::search::`, `app::tab::`: projected columns, eviction/recycling, security gates, no background reveal |
 | Tab reordering | `tabbar::`, `renderer::tabbar_ui::`, `app::tab::`, `app::mouse::`, `app::scheduling::`, `app::session::`: gesture/preview/drop, stable identity, capture/cancellation, overflow/idle, preserved caches/transport/drain cursor, saved order |
 | Updates | `update::`, `app::update::`, `renderer::update_ui::`: version/asset rules, checksum-before-archive order, staged-digest reuse, staging/lock, swap fallback, instance counting, stale job ids, focus-free notice |
+| Installer & release scripts | `make test-scripts` (`scripts/test_install.py`, `scripts/test_release.py`): `install.sh` syntax, redirect/version/checksum/bundle/signature/running-app/fallback/rollback checks, release version/changelog/tag helpers |
 | Panels / settings / logs | `app::settings::`, `app::persistence::`, `logbuf::`, `logging::`, `renderer::log_ui::`: generation ordering, bounded indexing, independent filters, focus and fixed-height rows |
 
 For memory/parser or optimization changes, also run the relevant tests with

@@ -47,7 +47,7 @@ RELEASE_WATCH ?=
 RELEASE_FLAGS = $(if $(strip $(RELEASE_VERSION)),--version '$(RELEASE_VERSION)',--bump '$(RELEASE_BUMP)') --remote '$(RELEASE_REMOTE)' $(if $(strip $(RELEASE_ALLOW_BRANCH)),--allow-branch) $(if $(strip $(RELEASE_DRY_RUN)),--dry-run) $(if $(strip $(RELEASE_SKIP_VERIFY)),--no-verify) $(if $(strip $(RELEASE_YES)),--yes) $(if $(strip $(RELEASE_WATCH)),--watch)
 
 # Every target is a command rather than an artifact name.
-.PHONY: help build release changelog run run-release test test-release check clippy fmt \
+.PHONY: help build release changelog run run-release test test-release test-scripts check clippy fmt \
 	fmt-check diff-check verify bench bench-compare bench-idle probe-scheduling probe-retained-glyphs \
 	probe-uploads profile bundle deps clean
 
@@ -80,6 +80,10 @@ test: ## Run tests (FILTER=..., TEST_ARGS=...)
 test-release: ## Run tests in release mode (FILTER=..., TEST_ARGS=...)
 	$(CARGO) test --release $(CARGO_FLAGS) $(FILTER) $(if $(strip $(TEST_ARGS)),-- $(TEST_ARGS))
 
+test-scripts: ## Run syntax and offline unit tests for install.sh and release scripts
+	sh -n install.sh
+	python3 -B -m unittest discover -s scripts -p 'test_*.py'
+
 check: ## Type-check the crate
 	$(CARGO) check $(CARGO_FLAGS)
 
@@ -95,7 +99,7 @@ fmt-check: ## Check formatting without rewriting
 diff-check: ## Reject whitespace errors and conflict markers in the diff
 	git diff --check
 
-verify: test check clippy fmt-check diff-check ## Local gate: the AGENTS.md routine
+verify: test test-scripts check clippy fmt-check diff-check ## Local gate: the AGENTS.md routine
 
 bench: ## Headless release benchmark; BENCH_OUT=dir (see docs/performance.md)
 	bash scripts/bench-headless.sh $(BENCH_OUT)

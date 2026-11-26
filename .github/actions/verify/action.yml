@@ -1,5 +1,5 @@
 name: Verify
-description: Run locked tests, strict all-target Clippy, and rustfmt checks
+description: Run locked tests, script tests, strict all-target Clippy, and rustfmt checks
 
 runs:
   using: composite
@@ -7,6 +7,12 @@ runs:
     - name: Test
       shell: bash
       run: cargo test --locked
+
+    - name: Script tests
+      shell: bash
+      run: |
+        sh -n install.sh
+        python3 -B -m unittest discover -s scripts -p 'test_*.py'
 
     - name: Clippy
       shell: bash
