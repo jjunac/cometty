@@ -51,7 +51,7 @@ file_opener = ""
 osc52 = "write"
 
 [session]
-restore = "tabs"
+restore = "scrollback"
 ```
 
 ## Appearance
@@ -59,7 +59,7 @@ restore = "tabs"
 | Section / key | Default | Meaning |
 | --- | --- | --- |
 | `theme.name` | `"tokyo-night"` | `tokyo-night`, `vscode`, or `tomorrow-night` |
-| `font.family` | `"monospace"` | Installed family name, or generic `monospace`, `sans`/`sans-serif`, `serif`, `cursive`, `fantasy`. Generic monospace resolves to an installed platform-appropriate family; missing glyphs/names use fallback |
+| `font.family` | `"monospace"` | Installed family name, or generic `monospace`, `sans`/`sans-serif`, `serif`, `cursive`, `fantasy`. Generic monospace resolves to an installed platform-appropriate family; missing glyphs/names use fallback. The Settings UI dropdown lists generic presets and shows a custom text field when another name is configured |
 | `font.size` | `14.0` | Logical font size |
 | `font.line_height_factor` | `1.25` | Line height relative to font size |
 | `font.cell_width_factor` | `0.602` | Column width relative to font size |
@@ -136,18 +136,21 @@ limit controls the memory used by programs running inside the terminal.
 
 Shortcut letters are case-insensitive. `super` means Cmd on macOS and the
 Super/Windows key elsewhere. The default shortcuts are listed in the
-[README](../README.md#keyboard-and-mouse).
+[README](../README.md#shortcuts).
 
 | Section / key | Default | Meaning |
 | --- | --- | --- |
 | `input.copy_key`, `input.paste_key` | `"c"`, `"v"` | Copy/paste shortcut letters |
 | `input.new_tab_key`, `input.search_key` | `"t"`, `"f"` | New-tab/search shortcut letters |
+| `input.background_key` | `"b"` | Park/unpark and peek background tab shortcut letter |
 | `input.copy_ctrl_shift`, `input.paste_ctrl_shift` | `true`, `true` | Enable Ctrl+Shift copy/paste |
 | `input.copy_super`, `input.paste_super` | `true`, `true` | Enable Super copy/paste |
 | `input.new_tab_ctrl`, `input.new_tab_super` | `true`, `true` | Enable Ctrl / Super new-tab shortcuts |
 | `input.search_ctrl` | `false` on macOS; `true` elsewhere | Enable Ctrl search shortcut; macOS preserves shell Ctrl+F by default |
 | `input.search_super` | `true` | Enable Super search shortcut |
 | `input.tab_switch_ctrl`, `input.tab_switch_super` | `true`, `true` | Enable Ctrl / Super tab switching |
+| `input.background_super`, `input.background_ctrl_shift` | `true`, `true` | Enable Super / Ctrl+Shift park/unpark shortcuts |
+| `input.peek_super_shift`, `input.peek_ctrl_shift_alt` | `true`, `false` | Enable Super+Shift / opt-in Ctrl+Shift+Alt peek-background shortcuts |
 | `input.shift_page_scroll` | `true` | Enable Shift+PageUp/PageDown/Home/End history navigation |
 | `input.lines_per_tick` | `7.0` | Mouse-wheel scroll distance |
 | `input.pixel_fallback_line_height` | `20.0` | Fallback conversion for pixel-based wheel input |
@@ -246,14 +249,13 @@ and URL previews. Review copied logs before sharing them.
 | `update.enabled` | `true` | Check GitHub for a new release 5 s after launch and then daily. From `Cometty.app`, a verified update is also downloaded in the background and installed only after you choose **Restart to update**; other launches only announce new releases |
 
 A file without an `[update]` table or `enabled` key keeps the default. Settings →
-**Updates** → **Check for updates automatically** toggles it, and `ConfigSaver`
-saves it like any other preference. An update-only edit sets only
-`ApplyActions::update`, which goes to the update controller. It never reaches the
-renderer's settings routing, so shaping caches are kept.
+**Updates** → **Check for updates automatically** toggles it and saves the
+change automatically.
 
 Turning it off makes no further network requests: it clears the check schedule,
 cancels a running check or download, and hides the notice. It does not stop an
 install already running after **Restart to update**, or launch
 housekeeping, which cleans the staging directory without network access. Turning
-it back on checks about one second later. See [updates](update.md) for the modes,
-trust model, and staging layout.
+it back on checks about one second later. See the
+[User Guide](usage.md#automatic-updates) for user-facing behavior or
+[updates](update.md) for the technical architecture and trust model.

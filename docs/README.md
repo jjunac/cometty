@@ -1,15 +1,21 @@
 # Documentation
 
-The root [README](../README.md) is for people using cometty. This directory
-contains the configuration reference and the technical documentation for
-maintaining it.
+The root [README](../README.md) is the quick overview for people installing and
+using cometty. This directory contains the user guide, the configuration
+reference, and the technical documentation for maintaining it.
 
 ## Using cometty
 
+- [User Guide](usage.md) — installation options, tabs and background sessions,
+  search, links, session restore, automatic updates, safety defaults, and known
+  limitations.
 - [Configuration](configuration.md) — file location, defaults, shortcuts, themes,
   tab labels, clipboard permissions, and logging options.
 
 ## Developing cometty
+
+Start with [CONTRIBUTING.md](../CONTRIBUTING.md) for build setup and check
+commands.
 
 | Document | Read it when working on… |
 | --- | --- |
@@ -24,7 +30,7 @@ maintaining it.
 | [Idle CPU and energy](idle.md) | Idle wakeups, frame sources, per-frame costs, the reduction plan, and shipped fixes |
 | [Updates](update.md) | Release checks, download verification, staging, the in-place install, or the trust model |
 | [Throughput fixes and diagnosis](throughput.md) | Shipped fixes, same-host validation, remaining limits, and the preserved investigation baseline |
-| [Roadmap](roadmap.md) | Planned features and proposed designs (not yet implemented) |
+| [Roadmap](../ROADMAP.md) | Planned features and proposed designs (not yet implemented) |
 
 ## Keeping these documents useful
 

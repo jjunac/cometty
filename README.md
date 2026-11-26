@@ -4,264 +4,157 @@
 
 # cometty
 
-A GPU-accelerated terminal emulator with tabs, themes, searchable scrollback,
-and Unicode support.
+A fast, GPU-accelerated terminal emulator built for everyday workflows—with
+smart tabs, background sessions, clickable links, and automatic session restore.
 
-## Features
+> **Platforms:** Prebuilt universal app for **macOS 13+** (Apple Silicon &
+> Intel). Builds from source on Linux.
 
-- Multiple tabs with command and working-directory labels. A running program
-  that sets its own title (for example opencode) names its tab while it runs.
-- Program status badges: programs that report their state (such as opencode)
-  show per-tab counts next to the tab title for sessions waiting on you,
-  working, finished, failed, or idle. A session counts as finished until you
-  look at its tab (closing a busy session counts too). A tab you aren't looking at glows when its program needs you, it
-  rings the bell, or it sends a notification.
-- Search across your screen and scrollback, with highlighted matches and
-  wrap-around navigation.
-- Three built-in themes: **tokyo-night**, **vscode**, and **tomorrow-night**.
-- Live settings with automatic saving and reset controls.
-- Mouse selection, word/line selection, copy/paste, and clickable links.
-- Truecolor, styled text, emoji, combining characters, and double-width text.
-- Support for terminal applications such as vim, less, and htop, including
-  application mouse input and bracketed paste.
-- A built-in log viewer for troubleshooting.
+## Install
 
-## Install and launch
-
-### macOS (prebuilt app)
-
-Install the latest universal release (Apple Silicon and Intel, macOS 13 or later):
+### macOS (recommended)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jjunac/cometty/main/install.sh | sh
 ```
 
-The installer downloads the latest release from GitHub, verifies its SHA-256
-checksum, and installs `Cometty.app` into `/Applications` (falling back to
-`~/Applications` if `/Applications` is not writable). Because it does not come
-through a browser quarantine, Cometty opens immediately without a Gatekeeper
-prompt. Pass options via `sh -s --` to choose a version or folder (for example
-`sh -s -- --version 0.4.0 --dir ~/Applications`).
+This downloads the latest release from GitHub, verifies its SHA-256 checksum,
+and installs `Cometty.app` to `/Applications` (or `~/Applications` if
+`/Applications` is not writable). Because it is not browser-quarantined, Cometty
+opens immediately without a Gatekeeper prompt.
 
-Alternatively, download `Cometty-<version>-macos-universal.zip` manually from
-the [releases page](https://github.com/jjunac/cometty/releases/latest), unzip
-it, and move `Cometty.app` to `/Applications`. Release builds are ad-hoc signed
-and not notarized yet, so macOS blocks a browser-downloaded copy on first
-launch. Either clear its quarantine flag:
+<details>
+<summary>Manual download or installer options</summary>
+
+Download `Cometty-<version>-macos-universal.zip` from the
+[releases page](https://github.com/jjunac/cometty/releases/latest), unzip it,
+and move `Cometty.app` to `/Applications`.
+
+Release builds are ad-hoc signed and not notarized yet, so macOS blocks a
+browser-downloaded copy on first launch. Either clear its quarantine attribute:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Cometty.app
 ```
 
-or try opening Cometty once, then open **System Settings → Privacy & Security**
-and click **Open Anyway** next to Cometty.
+or try opening Cometty once, then click **Open Anyway** in **System Settings →
+Privacy & Security**.
 
-The bundled app starts your shell as a login shell, so Finder launches see your
-normal login PATH and profiles. Set `shell.shell` explicitly if you prefer a
-non-login shell.
+For installer flags (`--version`, `--dir`, `--force`), see the
+[User Guide](docs/usage.md#installing-and-launching).
 
-Prebuilt releases currently cover macOS only.
+</details>
 
-### From source
+### Linux and building from source
 
-To build from a source checkout, you need a current
-[Rust toolchain](https://rustup.rs/). On Debian/Ubuntu, install these packages first:
-
-```sh
-sudo apt-get install -y libx11-dev libxkbcommon-dev libgl1-mesa-dev
-```
-
-From the cometty checkout:
+With a current [Rust toolchain](https://rustup.rs/) and platform graphics
+libraries installed:
 
 ```sh
 cargo install --path . --locked
 cometty
 ```
 
-Ensure Cargo's install directory (usually `~/.cargo/bin`) is on your PATH.
-Launching cometty requires a graphical desktop and a working graphics adapter.
-On macOS/Linux, it starts your `$SHELL` in your home directory, falling back to
-`/bin/bash` if needed.
+See [CONTRIBUTING.md](CONTRIBUTING.md#building-from-source) for Debian/Ubuntu
+package prerequisites and build instructions.
 
-```sh
-cometty --theme tokyo-night
-cometty --list-themes
-cometty --config ~/.config/cometty/config.toml
-cometty --help
-```
+## Highlights
 
-## Keyboard and mouse
+- **Smart tabs & attention glow** — Tabs display the running command and working
+  directory (or a live program title), support drag-to-reorder, and glow when an
+  unseen tab needs you. Programs that report session status (such as `opencode`)
+  also show per-tab status counts.
+- **Background (parked) tabs** — Tuck dev servers or watchers out of the tab
+  strip (`Cmd+B` / `Ctrl+Shift+B` or hover `↓`) into a compact tray badge, and
+  peek at them anytime without losing your foreground layout.
+- **Automatic session restore** — Quit with tabs open and pick up where you left
+  off: window size and position, tab order, working directories, and scrollback
+  return on next launch.
+- **Searchable scrollback** — Find text across your screen and history
+  (`Cmd+F` / `Ctrl+F`) with smart-case matching and wrap-around navigation.
+- **Clickable links & file paths** — Hold `Cmd` (macOS) or `Ctrl` (Linux) and
+  click web URLs, `file://` links, or local paths (including `path:line:col`
+  compiler output) to open them in your browser or editor.
+- **Built-in themes & live settings** — Includes **tokyo-night**, **vscode**,
+  and **tomorrow-night**, an in-app Settings dialog (`Cmd+,` / `Ctrl+,`) that
+  applies live and saves automatically, and a built-in Logs viewer
+  (`Cmd+Shift+L` / `Ctrl+Shift+L`).
+- **Modern terminal support** — Truecolor, styled text, emoji, combining
+  characters, double-width text, mouse reporting, bracketed paste, and full
+  support for TUI apps like `vim`, `less`, and `htop`.
+- **Automatic updates (macOS)** — Checks GitHub Releases in the background,
+  verifies SHA-256 checksums, and updates on restart. Can be turned off in
+  Settings.
+
+## Shortcuts
 
 | Action | macOS | Linux |
 | --- | --- | --- |
-| New tab | Cmd+T | Ctrl+T |
-| Copy / paste | Cmd+C / Cmd+V | Ctrl+Shift+C / Ctrl+Shift+V |
-| Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab | Ctrl+Tab / Ctrl+Shift+Tab |
-| Jump to tab 1–9 | Cmd+1–9 | Super+1–9 |
-| Park / unpark background tab | Cmd+B | Ctrl+Shift+B |
-| Peek background tab | Cmd+Shift+B | Click the tray badge |
-| Find / re-focus search | Cmd+F | Ctrl+F |
-| Settings | Cmd+, | Ctrl+, |
-| Logs | Cmd+Shift+L | Ctrl+Shift+L |
-| Page through history | Shift+PageUp / Shift+PageDown | Shift+PageUp / Shift+PageDown |
-| History top / live bottom | Shift+Home / Shift+End | Shift+Home / Shift+End |
+| New tab | `Cmd+T` | `Ctrl+T` |
+| Copy / paste | `Cmd+C` / `Cmd+V` | `Ctrl+Shift+C` / `Ctrl+Shift+V` |
+| Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
+| Jump to tab 1–9 | `Cmd+1–9` | `Super+1–9` |
+| Park / unpark background tab | `Cmd+B` | `Ctrl+Shift+B` |
+| Peek background tab | `Cmd+Shift+B` | Click the tray badge |
+| Find / re-focus search | `Cmd+F` | `Ctrl+F` |
+| Settings | `Cmd+,` | `Ctrl+,` |
+| Logs | `Cmd+Shift+L` | `Ctrl+Shift+L` |
+| Page through history | `Shift+PageUp` / `Shift+PageDown` | `Shift+PageUp` / `Shift+PageDown` |
+| History top / live bottom | `Shift+Home` / `Shift+End` | `Shift+Home` / `Shift+End` |
 
-While search is open, **Enter** / **Shift+Enter** (or **F3** / **Shift+F3**) moves
-to the next/previous match; **Esc** closes it. Lowercase queries ignore case;
-including an uppercase character makes a query case-sensitive.
+- **Mouse:** Drag to select, double-click a word, or triple-click a line. Hold
+  `Shift` to select or scroll locally when a terminal app is capturing the mouse.
+- **Links:** Hold `Cmd` (macOS) or `Ctrl` (Linux) and click any URL or existing
+  local path to open it.
+- **Tabs:** Click `+` for a new tab, `×` to close, `↓` to park, or drag tabs to
+  reorder. On macOS, drag the empty space around the tabs to move the window.
 
-Drag to select text, double-click a word, or triple-click a line. Use the wheel
-or scrollbar to browse history. Hold **Shift** to select/scroll locally when an
-application is handling the mouse.
+See the [User Guide](docs/usage.md) for search keys, parked-tab workflows,
+status badges, and cursor/session behavior.
 
-Hold **Cmd** on macOS or **Ctrl** on Linux and click a web link, `file://` URL,
-or existing local path (absolute, `~/…`, or relative to the tab's working
-directory, including `:line:col` compiler locations) to open it. Click a
-tab to switch, its **×** to close, or **+** to open another.
-Drag a tab left or right to reorder it; hold near either end of a crowded tab
-strip to scroll. Release to place it, or press **Esc** to cancel. Dropping outside
-the strip cancels rather than opening a new window. Tab order is saved with the
-session.
-On macOS, drag the empty space around the tabs to move the window—not the tabs
-or their buttons.
+## Configuration
 
-Hover a tab and click **↓** to park it, or press **Cmd+B** (macOS) or
-**Ctrl+Shift+B** (Linux) to park the active tab: it leaves the strip and appears
-behind a small count badge beside **+**. Use this for a dev server or watcher you
-want to keep running without losing a tab slot.
-Click the badge to list parked tabs: click a row to preview it in place (the
-strip stays unchanged), **↑** to move it back to the strip, or **×** to close
-it. Click a foreground tab to leave the preview; the previewed tab stays parked.
-A badge dot marks a running job and changes color when a background task
-finishes. Parking the only visible tab opens a fresh prompt in the same
-directory, so the window always keeps one foreground tab. Parked tabs are saved
-with the session.
+Open **Settings** with `Cmd+,` (macOS, or **Cometty → Settings…**) or `Ctrl+,`
+(Linux). Changes apply immediately and save to `~/.config/cometty/config.toml`.
 
-## Preferences
-
-Open Settings with the shortcut above, or edit
-`$HOME/.config/cometty/config.toml`. Missing files or settings use defaults:
+You can also edit `config.toml` directly (only include keys you want to change):
 
 ```toml
 [theme]
-name = "tokyo-night"
+name = "tokyo-night"          # "tokyo-night", "vscode", or "tomorrow-night"
 
 [font]
-family = "monospace"
+family = "monospace"          # or an installed font family name
 size = 14.0
 
-[terminal]
-scrollback_lines = 10000
-
-[tabbar]
-title_format = "$command | $cwd"
-live_title = true      # a running program's own title replaces the format
-attention = "pulse"    # unseen-tab glow: "pulse", "static", or "off"
+[links]
+file_opener = "code -g {path}:{line}:{col}"  # optional editor command
 ```
 
-Settings changes save automatically. File edits take effect on the next launch;
-shell/starting-directory changes in Settings apply to new tabs. `--theme`
-overrides your saved theme for the current session, and `--config` selects a
-different preferences file.
+Pass `--theme NAME`, `--config PATH`, or `--list-themes` on the command line for
+one-off overrides. See the [Configuration Reference](docs/configuration.md) for
+every option, custom shortcuts, tab-label templates, and logging filters.
 
-The cursor blinks only while the window has focus, and stops blinking 10 seconds
-after you last typed; typing or returning to the window restarts it. Set
-`[cursor] blink_timeout_ms = 0` to blink for as long as the window has focus. In
-a window without focus, the block cursor is drawn as an outline.
+## Good to know
 
-Quitting with tabs open (Cmd+Q, or closing the window) reopens the same tabs, in
-their working directories, at the next launch, with their scrollback and the
-window size and position. Each restored tab shows its previous contents followed
-by a highlighted `Session restored: <date>` block. Closing every tab yourself starts
-fresh next time. Running programs are not restored, and a fullscreen program
-(vim, less) left open at quit comes back as the shell screen underneath it. Set
-`[session] restore = "tabs"` to restore tabs without their contents, or `"off"`
-to always start fresh.
+- **Clipboard safety:** Terminal apps can write to your clipboard by default,
+  but cannot read it (`[clipboard] osc52 = "write"`).
+- **Local links:** Executable files and app bundles are revealed in Finder /
+  your file manager instead of launched directly.
+- **Session scrollback on disk:** At quit, tab history is saved in an owner-only
+  state directory and removed after the next launch. Set
+  `[session] restore = "tabs"` or `"off"` if history should never touch disk.
+- **Closing tabs:** Closing a tab stops its shell without a confirmation prompt.
+- **Current limitations:** No audible/visual bell (unseen tabs glow instead), no
+  keyboard font zoom yet, and prebuilt releases are currently macOS-only
+  (ad-hoc signed, not notarized).
 
-See the [configuration reference](docs/configuration.md) for all options,
-custom shortcuts, tab labels, and logging preferences.
+See the [User Guide](docs/usage.md#safety-and-privacy) for full details on
+updates, privacy, and known limitations.
 
-## Updates
+## Documentation & Contributing
 
-Cometty checks for new releases about 5 seconds after launch and then every
-24 hours. Only published releases on the
-[releases page](https://github.com/jjunac/cometty/releases) are offered. To turn
-this off, clear **Settings → Updates → Check for updates automatically** (on by
-default), or set `[update] enabled = false` in your preferences file. The check
-asks `api.github.com` for the latest release. It sends only a User-Agent that
-includes your Cometty version.
-
-When you run the macOS app from `/Applications`, Cometty downloads and checks
-the update in the background. When it's done, a small notice in the
-bottom-right corner says **Cometty X is ready.**
-
-- **Restart to update** quits Cometty, saving your session as a normal quit
-  does, replaces the app, and opens it again.
-- **Later** hides the notice until the next launch.
-- If other Cometty windows from the same app are running, the notice asks you to
-  quit them first.
-- If the update can't be installed (for example, macOS blocks Cometty from
-  modifying apps), the notice says why and keeps **Restart to update** so you
-  can try again.
-- macOS may ask again for permissions you granted Cometty, such as Full Disk
-  Access, after an update.
-
-Some installs can't update in place:
-
-- the app runs from a read-only location
-- macOS runs it from a temporary copy because it was opened without being moved
-  out of Downloads
-- you launched it with `cargo install` or `cargo run`, or on Linux
-
-In those cases the notice only says **Cometty X is available.**, with a
-**View release** button to open the release page. When moving the app would
-help, the notice suggests moving Cometty to a writable Applications folder. The
-same notice appears, with the reason, when the automatic download fails.
-
-**What is verified.** Cometty downloads updates over HTTPS from
-GitHub and checks them against the SHA-256 checksum published with the release.
-That catches a corrupted download, but not a tampered release. Builds are not
-notarized, and macOS Gatekeeper does not re-check updates that Cometty
-downloads itself. For stronger guarantees, turn off automatic checks and update
-manually from the releases page.
-
-## Clipboard, links, and closing tabs
-
-- Applications can set your clipboard by default, but cannot read it. Set
-  `[clipboard] osc52 = "off"` to disable application clipboard access. Only enable
-  `"read-write"` if you trust applications—including remote ones—to read your
-  clipboard.
-- Web (`http`, `https`, `ftp`, `mailto`), local `file://` links, and existing
-  local file or directory paths can open on Cmd/Ctrl+click. Remote `file://`
-  hosts are refused, and executable files or app bundles (`.app`, `.command`,
-  `.pkg`, `.dmg`, `.desktop`, `.exe`, or `+x` binaries) are revealed in Finder /
-  the file manager instead of launched. Set `[links] open_files = false` to
-  disable local file opening completely, or set `[links] file_opener` (for
-  example `code -g {path}:{line}:{col}`) to open files in your editor at the
-  clicked line.
-- **Restored scrollback is saved to disk.** At quit, each tab's history (which
-  may include secrets you printed) is written to
-  `${XDG_STATE_HOME:-$HOME/.local/state}/cometty/scrollback/`, readable only by
-  you. It is deleted shortly after the next launch, or when you close every tab
-  or set `[session] restore` to `"tabs"` or `"off"`. Use one of those settings
-  if the history should never touch the disk.
-- An input-full or oversized-paste notice means that input was **not sent**.
-  Wait for the program to read, then retry with a smaller paste.
-- Closing a tab on macOS/Linux ends its shell and requests that its foreground
-  job stop. Unsent input is discarded. There is currently **no confirmation for
-  running work**, so save or finish it first. Closing the last shell closes the
-  window, and the next launch starts with a single fresh tab.
-
-## Current limitations
-
-- The bell makes no sound and doesn't flash; it only makes an unseen tab glow.
-  No keyboard font zoom or running-job close confirmation.
-- Program status messages aren't shown, only counts. Desktop notifications and
-  progress bars (`OSC 9;4`) aren't supported.
-- Search does not span displayed row boundaries; wrapped plain-text links are
-  detected separately on each row.
-- Font choice currently uses generic families rather than individual font names.
-- Scrollback is saved only when you quit: after a crash, tabs come back without
-  their contents. Restoring into a narrower window re-wraps long lines.
-- Large histories, many tabs, and dense searches can use substantial memory;
-  scrollback limits are per tab, not an application-wide RAM limit.
+- **For users:** [User Guide](docs/usage.md) ·
+  [Configuration Reference](docs/configuration.md) · [Roadmap](ROADMAP.md)
+- **For contributors:** [Contributing Guide](CONTRIBUTING.md) ·
+  [Architecture & Technical Docs](docs/README.md)

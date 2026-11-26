@@ -122,9 +122,12 @@ tests or headless timings with native-memory, GUI-latency, or energy verificatio
 
 ## Documentation contract
 
-- `README.md` is **for users only**: installation, usage, shortcuts, preferences,
-  safety, and visible limitations. No source maps, dependency-stack explanations,
-  internal algorithms, test commands, or contributor/agent guidance there.
+- `README.md` is **for users only**: concise overview, quick install, highlights,
+  shortcuts, basic configuration, and key safety/limitation notes. Put detailed
+  user workflows in `docs/usage.md`, all config keys in `docs/configuration.md`,
+  and source-build/contributor onboarding in `CONTRIBUTING.md`. No source maps,
+  dependency-stack explanations, internal algorithms, test commands, or
+  contributor/agent guidance in `README.md`.
 - Maintain architecture rationale and implementation details in `docs/`; keep
   AGENTS.md a short working map plus high-risk rules, not a duplicate manual.
 - Update the relevant document when limits/cache keys/ownership change. Explicitly

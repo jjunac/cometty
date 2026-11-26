@@ -262,6 +262,8 @@ Revalidate these assumptions on upgrades, especially atlas `trim`/pinning,
 wgpu staging submission, and egui texture destruction semantics.
 
 Keep documentation by subsystem: update the relevant reference when behavior or
-limits change. Keep the root README for installation and user-visible behavior;
-put source maps, sequence internals, profiling, tests, and agent guidance here or
-in AGENTS.md, not in the README.
+limits change. Keep the root README concise for installation and everyday use,
+put detailed user workflows in [usage](usage.md) and config keys in
+[configuration](configuration.md), and put build/contributor guidance, source
+maps, sequence internals, profiling, tests, and agent rules in
+[CONTRIBUTING.md](../CONTRIBUTING.md), here, or in `AGENTS.md`.
