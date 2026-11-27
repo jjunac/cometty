@@ -1,11 +1,10 @@
-//! App window icon embedded from `assets/icon-128.png` (rasterized from `logo.svg`).
+//! App window icon embedded from `assets/icon-128.png`.
 //!
 //! The PNG is baked into the binary via `include_bytes!` so the single-binary
 //! property holds. Decoding failures are non-fatal: callers get `None` and the
 //! window is created without a custom icon.
 
-/// Embedded 128x128 PNG rasterized from `logo.svg` via
-/// `rsvg-convert -w 128 -h 128 logo.svg -o assets/icon-128.png`.
+/// Embedded 128x128 PNG generated from the app icon by `scripts/build-icons.sh`.
 const ICON_PNG: &[u8] = include_bytes!("../assets/icon-128.png");
 
 /// Decode the embedded PNG to raw RGBA bytes plus dimensions.
@@ -43,10 +42,9 @@ pub(crate) fn load_window_icon() -> Option<winit::window::Icon> {
 ///
 /// `winit`'s window icon is ignored on macOS, so unbundled runs (`cargo run`)
 /// call `NSApplication::setApplicationIconImage` explicitly. A bundled `.app`
-/// already gets its 1024px `AppIcon.icns` from `Info.plist`; overriding that
-/// with the embedded 128px development asset would soften the Dock icon, so
-/// bundled launches leave it alone. Non-fatal: logs and returns on any
-/// failure. Must run on the main thread (winit's `resumed` qualifies).
+/// gets its icon from `Info.plist`, so macOS can render the native icon or use
+/// the `.icns` fallback. Non-fatal: logs and returns on any failure. Must run on
+/// the main thread (winit's `resumed` qualifies).
 #[cfg(target_os = "macos")]
 pub(crate) fn set_dock_icon() {
     use objc2::AnyThread as _;

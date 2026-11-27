@@ -132,10 +132,14 @@ The script reads the version from `Cargo.toml`, so run `make release` before
 building a bundle for a tag. [`release.yml`](../.github/workflows/release.yml)
 runs the same script on `v*` tags and publishes the GitHub release directly.
 
-The bundle icon is [`assets/AppIcon.icns`](../assets/AppIcon.icns), generated
-once from `logo.svg` via `assets/icon-1024.png`; the embedded 128px icon is
-used only for unbundled runs. Keep `LSMinimumSystemVersion` in the plist and
-the macOS floor in the README in sync.
+The bundle ships a layered [`Assets.car`](../assets/Assets.car) for the native
+macOS 26+ icon and [`AppIcon.icns`](../assets/AppIcon.icns) for earlier releases.
+To update the artwork, open [`assets/AppIcon.icon`](../assets/AppIcon.icon) in
+Icon Composer, then run `./scripts/build-icons.sh` with Xcode selected (the
+current assets were generated with Xcode 27.2). Commit both generated bundle
+resources and `assets/icon-128.png`, the fallback rendition embedded for
+unbundled runs. Packaging uses these checked-in assets. Keep
+`LSMinimumSystemVersion` in the plist and the macOS floor in the README in sync.
 
 ## Routine checks
 

@@ -10,6 +10,8 @@
     <string>cometty</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.github.jjunac.cometty</string>
     <key>CFBundleInfoDictionaryVersion</key>

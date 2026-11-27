@@ -19,7 +19,7 @@ vte = "0.15"
 # OSC guard keeps ordinary output on vte's bulk path (already a vte dependency).
 memchr = "2"
 pollster = "0.4"
-# Window icon: decode embedded PNG rasterized from logo.svg (PNG only).
+# Window icon: decode the embedded PNG.
 image = { version = "0.25", default-features = false, features = ["png"] }
 log = "0.4"
 env_logger = "0.11"

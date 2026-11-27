@@ -33,6 +33,7 @@ APP_NAME="Cometty"
 DIST="$ROOT/dist"
 APP="$DIST/$APP_NAME.app"
 ICON="$ROOT/assets/AppIcon.icns"
+ICON_CATALOG="$ROOT/assets/Assets.car"
 PLIST_TEMPLATE="$ROOT/packaging/macos/Info.plist"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 
@@ -91,6 +92,7 @@ command -v codesign >/dev/null 2>&1 || die "codesign not found"
 
 [[ -f "$PLIST_TEMPLATE" ]] || die "missing $PLIST_TEMPLATE"
 [[ -f "$ICON" ]] || die "missing $ICON (see docs/development.md#packaging-a-macos-release)"
+[[ -f "$ICON_CATALOG" ]] || die "missing $ICON_CATALOG (see docs/development.md#packaging-a-macos-release)"
 
 VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
 [[ -n "$VERSION" ]] || die "could not read the package version from Cargo.toml"
@@ -127,7 +129,7 @@ else
 fi
 chmod 755 "$APP/Contents/MacOS/cometty"
 
-cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
+cp "$ICON" "$ICON_CATALOG" "$APP/Contents/Resources/"
 sed -e "s/__VERSION__/$VERSION/g" -e "s/__BUILD__/$BUILD/g" \
     "$PLIST_TEMPLATE" > "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
